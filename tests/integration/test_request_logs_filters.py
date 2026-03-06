@@ -29,9 +29,21 @@ def _make_account(account_id: str, email: str) -> Account:
     )
 
 
-def _cost(input_tokens: int, output_tokens: int, cached_tokens: int = 0) -> float:
+def _cost(
+    input_tokens: int,
+    output_tokens: int,
+    cached_tokens: int = 0,
+    *,
+    input_rate: float = 1.25,
+    cached_rate: float = 0.125,
+    output_rate: float = 10.0,
+) -> float:
     billable = input_tokens - cached_tokens
-    return (billable / 1_000_000) * 1.25 + (cached_tokens / 1_000_000) * 0.125 + (output_tokens / 1_000_000) * 10.0
+    return (
+        (billable / 1_000_000) * input_rate
+        + (cached_tokens / 1_000_000) * cached_rate
+        + (output_tokens / 1_000_000) * output_rate
+    )
 
 
 @pytest.mark.asyncio
@@ -386,4 +398,34 @@ async def test_request_logs_tokens_and_cost_use_reasoning_tokens(async_client, d
     assert entry["cachedInputTokens"] == 100
     assert entry["reasoningEffort"] == "xhigh"
     expected = round(_cost(1000, 400, 100), 6)
+    assert entry["costUsd"] == pytest.approx(expected)
+
+
+@pytest.mark.asyncio
+async def test_request_logs_cost_uses_priority_service_tier(async_client, db_setup):
+    now = utcnow()
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        logs_repo = RequestLogsRepository(session)
+        await accounts_repo.upsert(_make_account("acc_priority", "priority@example.com"))
+
+        await logs_repo.add_log(
+            account_id="acc_priority",
+            request_id="req_priority_1",
+            model="gpt-5.4",
+            service_tier="priority",
+            input_tokens=1_000_000,
+            output_tokens=1_000_000,
+            latency_ms=50,
+            status="success",
+            error_code=None,
+            requested_at=now,
+        )
+
+    response = await async_client.get("/api/request-logs?accountId=acc_priority&limit=1")
+    assert response.status_code == 200
+    payload = response.json()["requests"]
+    assert len(payload) == 1
+    entry = payload[0]
+    expected = round(_cost(1_000_000, 1_000_000, input_rate=5.0, cached_rate=0.5, output_rate=30.0), 6)
     assert entry["costUsd"] == pytest.approx(expected)

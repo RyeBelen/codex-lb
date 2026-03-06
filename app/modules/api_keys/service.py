@@ -378,6 +378,7 @@ class ApiKeysService:
         input_tokens: int,
         output_tokens: int,
         cached_input_tokens: int = 0,
+        service_tier: str | None = None,
     ) -> None:
         reservation = await self._repository.get_usage_reservation(reservation_id)
         if reservation is None or reservation.status != "reserved":
@@ -397,6 +398,7 @@ class ApiKeysService:
             input_tokens,
             output_tokens,
             cached_input_tokens,
+            service_tier,
         )
 
         try:
@@ -482,12 +484,14 @@ class ApiKeysService:
         input_tokens: int,
         output_tokens: int,
         cached_input_tokens: int = 0,
+        service_tier: str | None = None,
     ) -> None:
         cost_microdollars = _calculate_cost_microdollars(
             model,
             input_tokens,
             output_tokens,
             cached_input_tokens,
+            service_tier,
         )
         await self._repository.increment_limit_usage(
             key_id,
@@ -768,6 +772,7 @@ def _calculate_cost_microdollars(
     input_tokens: int,
     output_tokens: int,
     cached_input_tokens: int,
+    service_tier: str | None = None,
 ) -> int:
     resolved = get_pricing_for_model(model)
     if resolved is None:
@@ -778,7 +783,7 @@ def _calculate_cost_microdollars(
         output_tokens=float(output_tokens),
         cached_input_tokens=float(cached_input_tokens),
     )
-    cost_usd = calculate_cost_from_usage(usage, price)
+    cost_usd = calculate_cost_from_usage(usage, price, service_tier=service_tier)
     if cost_usd is None:
         return 0
     return int(cost_usd * 1_000_000)

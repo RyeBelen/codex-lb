@@ -606,6 +606,34 @@ async def test_record_usage_model_filter_matching() -> None:
 
 
 @pytest.mark.asyncio
+async def test_record_usage_cost_limit_uses_service_tier_pricing() -> None:
+    repo = _FakeApiKeysRepository()
+    service = ApiKeysService(repo)
+    created = await service.create_key(
+        ApiKeyCreateData(
+            name="priority-cost-key",
+            allowed_models=None,
+            expires_at=None,
+            limits=[
+                LimitRuleInput(limit_type="cost_usd", limit_window="weekly", max_value=100_000_000),
+            ],
+        )
+    )
+
+    await service.record_usage(
+        created.id,
+        model="gpt-5.4",
+        input_tokens=1_000_000,
+        output_tokens=1_000_000,
+        service_tier="priority",
+    )
+
+    limits = await repo.get_limits_by_key(created.id)
+    cost_limit = next(lim for lim in limits if lim.limit_type == LimitType.COST_USD)
+    assert cost_limit.current_value == 35_000_000
+
+
+@pytest.mark.asyncio
 async def test_release_usage_reservation_restores_reserved_counter() -> None:
     repo = _FakeApiKeysRepository()
     service = ApiKeysService(repo)

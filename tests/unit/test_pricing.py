@@ -42,6 +42,13 @@ def test_get_pricing_for_model_gpt_5_3_alias():
     assert model == "gpt-5.3"
 
 
+def test_get_pricing_for_model_gpt_5_4_alias():
+    result = get_pricing_for_model("gpt-5.4-2026", DEFAULT_PRICING_MODELS, DEFAULT_MODEL_ALIASES)
+    assert result is not None
+    model, _ = result
+    assert model == "gpt-5.4"
+
+
 def test_calculate_cost_from_usage_cached_tokens():
     usage = ResponseUsage(
         input_tokens=1000,
@@ -51,6 +58,29 @@ def test_calculate_cost_from_usage_cached_tokens():
     price = ModelPrice(input_per_1m=2.0, cached_input_per_1m=0.5, output_per_1m=4.0)
     cost = calculate_cost_from_usage(usage, price)
     expected = (800 / 1_000_000) * 2.0 + (200 / 1_000_000) * 0.5 + (500 / 1_000_000) * 4.0
+    assert cost == pytest.approx(expected)
+
+
+def test_calculate_cost_from_usage_priority_service_tier():
+    usage = UsageTokens(input_tokens=1_000_000.0, output_tokens=1_000_000.0)
+    price = DEFAULT_PRICING_MODELS["gpt-5.1"]
+
+    cost = calculate_cost_from_usage(usage, price, service_tier="priority")
+
+    assert cost == pytest.approx(22.5)
+
+
+def test_calculate_cost_from_usage_gpt_5_4_long_context():
+    usage = UsageTokens(
+        input_tokens=300_000.0,
+        output_tokens=100_000.0,
+        cached_input_tokens=50_000.0,
+    )
+    price = DEFAULT_PRICING_MODELS["gpt-5.4"]
+
+    cost = calculate_cost_from_usage(usage, price)
+
+    expected = (250_000 / 1_000_000) * 5.0 + (50_000 / 1_000_000) * 0.5 + (100_000 / 1_000_000) * 22.5
     assert cost == pytest.approx(expected)
 
 
@@ -64,3 +94,17 @@ def test_calculate_costs_aggregates_by_model():
     by_model = {entry.model: entry.usd for entry in result.by_model}
     assert "gpt-5.1" in by_model
     assert by_model["gpt-5.1"] > 0
+
+
+def test_calculate_costs_uses_service_tier():
+    items = [
+        CostItem(
+            model="gpt-5.4",
+            service_tier="priority",
+            usage=UsageTokens(input_tokens=1_000_000.0, output_tokens=1_000_000.0),
+        ),
+    ]
+
+    result = calculate_costs(items, DEFAULT_PRICING_MODELS, DEFAULT_MODEL_ALIASES)
+
+    assert result.total_usd_7d == pytest.approx(35.0)

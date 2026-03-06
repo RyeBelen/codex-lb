@@ -252,6 +252,7 @@ class ProxyService:
         output_tokens = usage.output_tokens if usage else None
         cached_input_tokens = usage.input_tokens_details.cached_tokens if usage and usage.input_tokens_details else 0
         model_name = api_key_reservation.model or (getattr(response, "model", None) or "")
+        service_tier = response.model_extra.get("service_tier") if response is not None else None
 
         with anyio.CancelScope(shield=True):
             try:
@@ -264,6 +265,7 @@ class ProxyService:
                             input_tokens=input_tokens,
                             output_tokens=output_tokens,
                             cached_input_tokens=cached_input_tokens or 0,
+                            service_tier=service_tier if isinstance(service_tier, str) else None,
                         )
                     else:
                         await api_keys_service.release_usage_reservation(reservation_id)
@@ -305,6 +307,7 @@ class ProxyService:
                             input_tokens=settlement.input_tokens,
                             output_tokens=settlement.output_tokens,
                             cached_input_tokens=settlement.cached_input_tokens or 0,
+                            service_tier=settlement.service_tier,
                         )
                     else:
                         await api_keys_service.release_usage_reservation(reservation_id)
@@ -551,6 +554,7 @@ class ProxyService:
         access_token = self._encryptor.decrypt(account.access_token_encrypted)
         account_id = _header_account_id(account.chatgpt_account_id)
         model = payload.model
+        service_tier = payload.service_tier
         reasoning_effort = payload.reasoning.effort if payload.reasoning else None
         start = time.monotonic()
         status = "success"
@@ -659,6 +663,7 @@ class ProxyService:
             )
             settlement.status = status
             settlement.model = model
+            settlement.service_tier = service_tier
             settlement.input_tokens = input_tokens
             settlement.output_tokens = output_tokens
             settlement.cached_input_tokens = cached_input_tokens
@@ -675,6 +680,7 @@ class ProxyService:
                             cached_input_tokens=cached_input_tokens,
                             reasoning_tokens=reasoning_tokens,
                             reasoning_effort=reasoning_effort,
+                            service_tier=service_tier,
                             latency_ms=latency_ms,
                             status=status,
                             error_code=error_code,
@@ -763,6 +769,7 @@ class _StreamSettlement:
 
     status: str = "success"
     model: str = ""
+    service_tier: str | None = None
     input_tokens: int | None = None
     output_tokens: int | None = None
     cached_input_tokens: int | None = None
