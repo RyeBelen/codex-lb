@@ -5,10 +5,10 @@ from datetime import datetime
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.usage.types import BucketModelAggregate
-from app.db.models import Account, RequestLog, UsageHistory
+from app.db.models import Account, AdditionalUsageHistory, RequestLog, UsageHistory
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.request_logs.repository import RequestLogsRepository
-from app.modules.usage.repository import UsageRepository
+from app.modules.usage.repository import AdditionalUsageRepository, UsageRepository
 
 
 class DashboardRepository:
@@ -16,6 +16,7 @@ class DashboardRepository:
         self._accounts_repo = AccountsRepository(session)
         self._usage_repo = UsageRepository(session)
         self._logs_repo = RequestLogsRepository(session)
+        self._additional_usage_repo = AdditionalUsageRepository(session)
 
     async def list_accounts(self) -> list[Account]:
         return await self._accounts_repo.list_accounts()
@@ -35,3 +36,11 @@ class DashboardRepository:
         bucket_seconds: int = 21600,
     ) -> list[BucketModelAggregate]:
         return await self._logs_repo.aggregate_by_bucket(since, bucket_seconds)
+
+    async def list_additional_limit_names(self) -> list[str]:
+        return await self._additional_usage_repo.list_limit_names()
+
+    async def latest_additional_usage_by_account(
+        self, limit_name: str, window: str
+    ) -> dict[str, AdditionalUsageHistory]:
+        return await self._additional_usage_repo.latest_by_account(limit_name, window)

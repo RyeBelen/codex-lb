@@ -50,7 +50,12 @@ from app.modules.proxy.helpers import (
 from app.modules.proxy.load_balancer import LoadBalancer
 from app.modules.proxy.rate_limit_cache import get_rate_limit_headers_cache
 from app.modules.proxy.repo_bundle import ProxyRepoFactory, ProxyRepositories
-from app.modules.proxy.types import RateLimitStatusPayloadData
+from app.modules.proxy.types import (
+    AdditionalRateLimitData,
+    RateLimitStatusDetailsData,
+    RateLimitStatusPayloadData,
+    RateLimitWindowSnapshotData,
+)
 from app.modules.usage.updater import UsageUpdater
 
 logger = logging.getLogger(__name__)
@@ -398,10 +403,14 @@ class ProxyService:
             primary_window = _window_snapshot(primary_summary, primary_rows, "primary", now_epoch)
             secondary_window = _window_snapshot(secondary_summary, secondary_rows, "secondary", now_epoch)
 
+            # Fetch additional rate limits
+            additional_rate_limits = await self._build_additional_rate_limits(repos, account_map, now_epoch)
+
             return RateLimitStatusPayloadData(
                 plan_type=_plan_type_for_accounts(selected_accounts),
                 rate_limit=_rate_limit_details(primary_window, secondary_window),
                 credits=_credits_snapshot(await self._latest_usage_entries(repos, account_map)),
+                additional_rate_limits=additional_rate_limits,
             )
 
     async def _stream_with_retry(
@@ -763,6 +772,79 @@ class ProxyService:
             return []
         latest = await repos.usage.latest_by_account()
         return [entry for entry in latest.values() if entry.account_id in account_map]
+
+    async def _build_additional_rate_limits(
+        self,
+        repos: ProxyRepositories,
+        account_map: dict[str, Account],
+        now_epoch: int,
+    ) -> list[AdditionalRateLimitData]:
+        """Build additional rate limit entries from AdditionalUsageRepository."""
+        if not account_map:
+            return []
+
+        limit_names = await repos.additional_usage.list_limit_names()
+        additional_limits = []
+
+        for limit_name in limit_names:
+            # Fetch latest entries for this limit across all accounts
+            latest_entries = await repos.additional_usage.latest_by_account(
+                limit_name=limit_name,
+                window="primary",
+            )
+
+            # Filter to selected accounts
+            filtered_entries = {
+                account_id: entry for account_id, entry in latest_entries.items() if account_id in account_map
+            }
+
+            if not filtered_entries:
+                continue
+
+            # Get metered_feature from first entry (same for all accounts)
+            first_entry = next(iter(filtered_entries.values()))
+            metered_feature = first_entry.metered_feature
+
+            # Aggregate used_percent across accounts (average)
+            used_percents = [
+                entry.used_percent for entry in filtered_entries.values() if entry.used_percent is not None
+            ]
+            if not used_percents:
+                avg_used_percent = None
+            else:
+                avg_used_percent = sum(used_percents) / len(used_percents)
+
+            # Build rate limit details if we have data
+            rate_limit_details = None
+            if avg_used_percent is not None:
+                # Get window info from first entry
+                window_minutes = first_entry.window_minutes or 300  # default to 5 minutes
+                limit_window_seconds = int(window_minutes * 60)
+                reset_at = first_entry.reset_at or 0
+                reset_after_seconds = max(0, int(reset_at) - now_epoch)
+
+                window_snapshot = RateLimitWindowSnapshotData(
+                    used_percent=int(max(0.0, min(100.0, avg_used_percent))),
+                    limit_window_seconds=limit_window_seconds,
+                    reset_after_seconds=reset_after_seconds,
+                    reset_at=int(reset_at),
+                )
+                rate_limit_details = RateLimitStatusDetailsData(
+                    allowed=int(max(0.0, min(100.0, avg_used_percent))) < 100,
+                    limit_reached=int(max(0.0, min(100.0, avg_used_percent))) >= 100,
+                    primary_window=window_snapshot,
+                    secondary_window=None,
+                )
+
+            additional_limits.append(
+                AdditionalRateLimitData(
+                    limit_name=limit_name,
+                    metered_feature=metered_feature,
+                    rate_limit=rate_limit_details,
+                )
+            )
+
+        return additional_limits
 
     async def _ensure_fresh(self, account: Account, *, force: bool = False) -> Account:
         async with self._repo_factory() as repos:
