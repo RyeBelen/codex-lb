@@ -92,12 +92,13 @@ class DashboardService:
         additional_quotas = await self._build_additional_quotas()
 
         # Compute depletion from primary usage history.
-        # Use the actual window duration so we don't undercount for 5-hour windows.
-        depletion_lookback_minutes = primary_window_minutes if primary_window_minutes else 60
-        history_since = now - timedelta(minutes=depletion_lookback_minutes)
+        # Use each account's own window_minutes for lookback so weekly-only accounts
+        # (7-day window) don't get truncated by the aggregate primary_window_minutes.
         primary_history: dict[str, list[UsageHistory]] = {}
-        for account_id in primary_usage:
-            rows = await self._repo.usage_history_since(account_id, "primary", history_since)
+        for account_id, usage_entry in primary_usage.items():
+            acct_window = usage_entry.window_minutes if usage_entry.window_minutes else 60
+            acct_since = now - timedelta(minutes=acct_window)
+            rows = await self._repo.usage_history_since(account_id, "primary", acct_since)
             if rows:
                 primary_history[account_id] = rows
 

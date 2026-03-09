@@ -43,6 +43,8 @@ export function UsageDonuts({
 	);
 
 	// Weekly-only plans remap usage to secondary — route safeLine to the active donut.
+	// TODO: In mixed-plan dashboards (Plus + Free), the aggregate depletion is always
+	// computed from primary usage; secondary-only depletion would require backend changes.
 	const isWeeklyOnly = primaryItems.length === 0 || primaryTotal === 0;
 
 	return (

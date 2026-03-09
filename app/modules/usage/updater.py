@@ -219,10 +219,12 @@ class UsageUpdater:
         if rate_limit is None:
             # Additional-only accounts still wrote data above; mark fresh to
             # prevent the scheduler/load-balancer from re-polling immediately.
-            additional_written = self._additional_usage_repo is not None and bool(payload.additional_rate_limits)
-            if additional_written:
+            # Mark fresh when additional_rate_limits was present (even if empty),
+            # so explicit empty lists don't cause tight re-polling (R8-F3).
+            additional_synced = self._additional_usage_repo is not None and payload.additional_rate_limits is not None
+            if additional_synced:
                 _additional_fresh[account.id] = utcnow()
-            return AccountRefreshResult(usage_written=additional_written)
+            return AccountRefreshResult(usage_written=additional_synced)
 
         primary = rate_limit.primary_window
         secondary = rate_limit.secondary_window
