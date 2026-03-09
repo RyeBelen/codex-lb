@@ -103,11 +103,13 @@ class DashboardService:
                 acct_since = now - timedelta(minutes=acct_window)
                 rows = await self._repo.usage_history_since(account_id, "primary", acct_since)
             else:
-                # Weekly-only: use secondary history with weekly window
+                # Weekly-only: history is stored under window="primary" even
+                # though normalization remapped the latest row to secondary.
+                # Use the secondary entry's window for lookback duration.
                 sec_entry = secondary_usage.get(account_id)
                 acct_window = sec_entry.window_minutes if sec_entry and sec_entry.window_minutes else 10080
                 acct_since = now - timedelta(minutes=acct_window)
-                rows = await self._repo.usage_history_since(account_id, "secondary", acct_since)
+                rows = await self._repo.usage_history_since(account_id, "primary", acct_since)
             if rows:
                 usage_history[account_id] = rows
 

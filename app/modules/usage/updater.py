@@ -174,11 +174,13 @@ class UsageUpdater:
                 current_entries: set[tuple[str, str]] = set()
                 for additional in payload.additional_rate_limits:
                     if additional.rate_limit is None:
-                        # Limit exists but has no window data right now; still mark
-                        # both windows as current so the prune pass doesn't delete
-                        # previously stored rows for either window.
-                        current_entries.add((additional.limit_name, "primary"))
-                        current_entries.add((additional.limit_name, "secondary"))
+                        # Limit exists but upstream reports no window data; prune
+                        # any previously stored rows so the dashboard doesn't show
+                        # stale quota percentages.
+                        await self._additional_usage_repo.delete_for_account_and_limit(
+                            account.id,
+                            additional.limit_name,
+                        )
                         continue
                     add_primary = additional.rate_limit.primary_window
                     add_secondary = additional.rate_limit.secondary_window
