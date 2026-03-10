@@ -176,13 +176,14 @@ class DashboardService:
                 cutoff = pri_cutoffs[account_id]
                 pri_rows_filtered = [r for r in all_pri_rows.get(account_id, []) if r.recorded_at >= cutoff]
                 sec_rows_filtered = [r for r in all_sec_rows.get(account_id, []) if r.recorded_at >= cutoff]
-                # Deduplicate by row id to avoid stale secondary copies
-                # that overlap with normalized primary rows.
-                seen_ids: set[int] = set()
+                # Deduplicate by (recorded_at, used_percent) to avoid counting
+                # mirrored weekly rows (which have different row ids) twice.
+                seen_keys: set[tuple[datetime, float]] = set()
                 deduped: list[UsageHistory] = []
                 for r in sorted(pri_rows_filtered + sec_rows_filtered, key=lambda r: r.recorded_at):
-                    if r.id not in seen_ids:
-                        seen_ids.add(r.id)
+                    key = (r.recorded_at, r.used_percent)
+                    if key not in seen_keys:
+                        seen_keys.add(key)
                         deduped.append(r)
                 if deduped:
                     secondary_history[account_id] = deduped

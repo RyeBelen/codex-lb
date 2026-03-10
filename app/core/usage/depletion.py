@@ -88,7 +88,7 @@ def compute_safe_usage_percent(
     total_window_seconds: float,
 ) -> float:
     if total_window_seconds == 0:
-        return 100.0
+        return 0.0
 
     progress = seconds_elapsed / total_window_seconds
     clamped_progress = min(max(progress, 0.0), 1.0)
