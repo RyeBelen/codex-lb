@@ -321,3 +321,10 @@ Index(
     AdditionalUsageHistory.window,
     AdditionalUsageHistory.recorded_at,
 )
+Index(
+    "ix_additional_usage_limit_window",
+    AdditionalUsageHistory.limit_name,
+    AdditionalUsageHistory.window,
+    AdditionalUsageHistory.account_id,
+    AdditionalUsageHistory.recorded_at,
+)

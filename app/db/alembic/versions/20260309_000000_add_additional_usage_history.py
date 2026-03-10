@@ -58,6 +58,13 @@ def upgrade() -> None:
             "additional_usage_history",
             ["account_id", "limit_name", "window", "recorded_at"],
         )
+    # Index for latest_by_account queries that filter on (limit_name, window)
+    if "ix_additional_usage_limit_window" not in existing_indexes:
+        op.create_index(
+            "ix_additional_usage_limit_window",
+            "additional_usage_history",
+            ["limit_name", "window", "account_id", "recorded_at"],
+        )
 
 
 def downgrade() -> None:
