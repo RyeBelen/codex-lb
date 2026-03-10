@@ -130,8 +130,10 @@ class UsageUpdater:
                     usage_account_id=account.chatgpt_account_id,
                 )
                 refreshed = refreshed or result.usage_written
-                if result.usage_written:
-                    _last_successful_refresh[account.id] = now
+                # Always mark as fresh after a successful fetch so
+                # additional-only accounts with empty payloads don't
+                # get re-polled needlessly by this or restarted workers.
+                _last_successful_refresh[account.id] = now
             except Exception as exc:
                 logger.warning(
                     "Usage refresh failed account_id=%s request_id=%s error=%s",
