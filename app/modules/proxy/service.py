@@ -824,8 +824,6 @@ class ProxyService:
                     window_minutes_values = [e.window_minutes for e in filtered_entries.values() if e.window_minutes]
                     reset_at_values = [e.reset_at for e in filtered_entries.values() if e.reset_at]
 
-                    # Only build a snapshot when we have actual reset metadata;
-                    # fabricating reset_at=0 / window=300 breaks client countdowns.
                     if window_minutes_values or reset_at_values:
                         window_minutes = max(window_minutes_values) if window_minutes_values else 300
                         limit_window_seconds = int(window_minutes * 60)
@@ -837,6 +835,15 @@ class ProxyService:
                             limit_window_seconds=limit_window_seconds,
                             reset_after_seconds=reset_after_seconds,
                             reset_at=reset_at,
+                        )
+                    else:
+                        # Primary usage data without reset metadata: emit a
+                        # minimal snapshot so the exhaustion check still works.
+                        window_snapshot = RateLimitWindowSnapshotData(
+                            used_percent=int(max(0.0, min(100.0, avg_used_percent))),
+                            limit_window_seconds=0,
+                            reset_after_seconds=0,
+                            reset_at=0,
                         )
 
             secondary_window_snapshot = None

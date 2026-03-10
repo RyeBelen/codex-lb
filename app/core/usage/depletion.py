@@ -7,7 +7,6 @@ RISK_WARNING = 0.60
 RISK_DANGER = 0.80
 RISK_CRITICAL = 0.95
 DEFAULT_ALPHA = 0.4
-RESET_DROP_THRESHOLD = 50.0
 
 
 @dataclass
@@ -35,7 +34,10 @@ def ewma_update(
         return state
 
     drop = state.last_used_percent - used_percent
-    if drop > RESET_DROP_THRESHOLD:
+    if drop > 0:
+        # Any decrease in used_percent indicates a window reset (or partial
+        # reset). Clear the EWMA rate so post-reset burn starts from zero
+        # rather than carrying over stale momentum.
         return EWMAState(
             rate=None,
             last_used_percent=used_percent,

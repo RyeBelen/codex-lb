@@ -96,13 +96,15 @@ class DashboardService:
         # to secondary by normalization) use secondary history so they still
         # contribute to the aggregate depletion indicator.
         normalized_primary_ids = {row.account_id for row in primary_rows}
+        all_account_ids = set(primary_usage.keys()) | set(secondary_usage.keys())
         usage_history: dict[str, list[UsageHistory]] = {}
-        for account_id, usage_entry in primary_usage.items():
+        for account_id in all_account_ids:
             if account_id in normalized_primary_ids:
+                usage_entry = primary_usage[account_id]
                 acct_window = usage_entry.window_minutes if usage_entry.window_minutes else 300
                 acct_since = now - timedelta(minutes=acct_window)
                 rows = await self._repo.usage_history_since(account_id, "primary", acct_since)
-            else:
+            elif account_id in primary_usage:
                 # Weekly-only: history is stored under window="primary" even
                 # though normalization remapped the latest row to secondary.
                 # Use the secondary entry's window for lookback duration.
@@ -110,6 +112,12 @@ class DashboardService:
                 acct_window = sec_entry.window_minutes if sec_entry and sec_entry.window_minutes else 10080
                 acct_since = now - timedelta(minutes=acct_window)
                 rows = await self._repo.usage_history_since(account_id, "primary", acct_since)
+            else:
+                # Secondary-only: no primary data at all.
+                sec_entry = secondary_usage[account_id]
+                acct_window = sec_entry.window_minutes if sec_entry.window_minutes else 10080
+                acct_since = now - timedelta(minutes=acct_window)
+                rows = await self._repo.usage_history_since(account_id, "secondary", acct_since)
             if rows:
                 usage_history[account_id] = rows
 
