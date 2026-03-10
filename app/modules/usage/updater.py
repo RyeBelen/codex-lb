@@ -70,7 +70,6 @@ class AccountRefreshResult:
 
 # Module-level freshness cache for additional-only accounts (no main UsageHistory
 # entry). Persists across UsageUpdater instances within the same process.
-_additional_fresh: dict[str, datetime] = {}
 
 
 class UsageUpdater:
@@ -104,10 +103,13 @@ class UsageUpdater:
             latest = latest_usage.get(account.id)
             if latest and (now - latest.recorded_at).total_seconds() < interval:
                 continue
-            # Additional-only accounts have no main usage entry; check in-memory freshness.
-            additional_fresh_at = _additional_fresh.get(account.id)
-            if additional_fresh_at and (now - additional_fresh_at).total_seconds() < interval:
-                continue
+            # Additional-only accounts have no main usage entry; check DB.
+            if self._additional_usage_repo is not None:
+                additional_fresh_at = await self._additional_usage_repo.latest_recorded_at_for_account(
+                    account.id,
+                )
+                if additional_fresh_at and (now - additional_fresh_at).total_seconds() < interval:
+                    continue
             # NOTE: AsyncSession is not safe for concurrent use. Run sequentially
             # within the request-scoped session to avoid PK collisions and
             # flush-time warnings (SAWarning: Session.add during flush).
@@ -230,8 +232,7 @@ class UsageUpdater:
             # so explicit empty lists don't cause tight re-polling (R8-F3).
             additional_synced = self._additional_usage_repo is not None and payload.additional_rate_limits is not None
             if additional_synced:
-                _additional_fresh[account.id] = utcnow()
-            return AccountRefreshResult(usage_written=additional_synced)
+                return AccountRefreshResult(usage_written=additional_synced)
 
         primary = rate_limit.primary_window
         secondary = rate_limit.secondary_window

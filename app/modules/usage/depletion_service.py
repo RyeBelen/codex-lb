@@ -119,8 +119,13 @@ def compute_depletion_for_account(
     if state.rate > 0:
         remaining = 100.0 - used_percent
         secs = remaining / state.rate
-        seconds_until_exhaustion = secs
-        projected_exhaustion_at = now + timedelta(seconds=secs)
+        if seconds_until_reset > 0 and secs > seconds_until_reset:
+            # Exhaustion falls after the window resets — it won't happen in
+            # the current window, so leave the fields as None.
+            pass
+        else:
+            seconds_until_exhaustion = secs
+            projected_exhaustion_at = now + timedelta(seconds=secs)
 
     return DepletionMetrics(
         risk=risk,

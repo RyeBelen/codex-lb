@@ -102,6 +102,7 @@ class StubAdditionalUsageRepository:
         self.deleted_account_ids: list[str] = []
         self.deleted_account_limit_pairs: list[tuple[str, str]] = []
         self.deleted_account_limit_windows: list[tuple[str, str, str]] = []
+        self._written_accounts: set[str] = set()
 
     async def add_entry(
         self,
@@ -113,6 +114,7 @@ class StubAdditionalUsageRepository:
         reset_at: int | None = None,
         window_minutes: int | None = None,
     ) -> None:
+        self._written_accounts.add(account_id)
         self.entries.append(
             AdditionalUsageEntry(
                 account_id=account_id,
@@ -133,6 +135,11 @@ class StubAdditionalUsageRepository:
 
     async def delete_for_account_limit_window(self, account_id: str, limit_name: str, window: str) -> None:
         self.deleted_account_limit_windows.append((account_id, limit_name, window))
+
+    async def latest_recorded_at_for_account(self, account_id: str):
+        from app.core.utils.time import utcnow
+
+        return utcnow() if account_id in self._written_accounts else None
 
     async def list_limit_names(self, *, account_ids: list[str] | None = None) -> list[str]:
         if account_ids is None:

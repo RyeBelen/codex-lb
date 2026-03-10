@@ -311,3 +311,11 @@ class AdditionalUsageRepository:
         )
         result = await self._session.execute(stmt)
         return list(result.scalars().all())
+
+    async def latest_recorded_at_for_account(self, account_id: str) -> datetime | None:
+        """Return the most recent recorded_at for any additional usage entry of this account."""
+        stmt = select(func.max(AdditionalUsageHistory.recorded_at)).where(
+            AdditionalUsageHistory.account_id == account_id
+        )
+        result = await self._session.execute(stmt)
+        return result.scalar_one_or_none()
