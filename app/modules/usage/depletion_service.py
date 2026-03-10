@@ -5,7 +5,6 @@ from datetime import datetime, timedelta
 
 from app.core.usage.depletion import (
     EWMAState,
-    aggregate_risks,
     classify_risk,
     compute_burn_rate,
     compute_depletion_risk,
@@ -154,27 +153,17 @@ def compute_aggregate_depletion(
     if not valid:
         return None
 
-    risks = [m.risk for m in valid]
-    max_risk = aggregate_risks(risks)
-
-    # Average safe_usage_percent and burn_rate across all accounts so the
-    # pooled donut marker represents the aggregate, not a single account.
-    avg_safe = sum(m.safe_usage_percent for m in valid) / len(valid)
-    avg_burn = sum(m.burn_rate for m in valid) / len(valid)
-
-    # Use the earliest projected exhaustion for the pool.
-    exhaustion_candidates = [m for m in valid if m.projected_exhaustion_at is not None]
-    earliest_exhaustion = (
-        min(exhaustion_candidates, key=lambda m: m.projected_exhaustion_at) if exhaustion_candidates else None
-    )  # type: ignore[arg-type]
+    # Use all fields from the worst-case account so that risk, safe-line,
+    # burn rate, and exhaustion ETA are internally consistent.
+    worst = max(valid, key=lambda m: m.risk)
 
     return AggregateDepletionMetrics(
-        risk=max_risk,
-        risk_level=classify_risk(max_risk),
-        burn_rate=avg_burn,
-        safe_usage_percent=avg_safe,
-        projected_exhaustion_at=earliest_exhaustion.projected_exhaustion_at if earliest_exhaustion else None,
-        seconds_until_exhaustion=earliest_exhaustion.seconds_until_exhaustion if earliest_exhaustion else None,
+        risk=worst.risk,
+        risk_level=worst.risk_level,
+        burn_rate=worst.burn_rate,
+        safe_usage_percent=worst.safe_usage_percent,
+        projected_exhaustion_at=worst.projected_exhaustion_at,
+        seconds_until_exhaustion=worst.seconds_until_exhaustion,
     )
 
 
