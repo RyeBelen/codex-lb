@@ -40,6 +40,12 @@ class AccountStatus(str, Enum):
     DEACTIVATED = "deactivated"
 
 
+class StickySessionKind(str, Enum):
+    CODEX_SESSION = "codex_session"
+    STICKY_THREAD = "sticky_thread"
+    PROMPT_CACHE = "prompt_cache"
+
+
 class Account(Base):
     __tablename__ = "accounts"
 
@@ -126,6 +132,17 @@ class StickySession(Base):
 
     key: Mapped[str] = mapped_column(String, primary_key=True)
     account_id: Mapped[str] = mapped_column(String, ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False)
+    kind: Mapped[StickySessionKind] = mapped_column(
+        SqlEnum(
+            StickySessionKind,
+            name="sticky_session_kind",
+            validate_strings=True,
+            values_callable=_enum_values,
+        ),
+        default=StickySessionKind.STICKY_THREAD,
+        server_default=text("'sticky_thread'"),
+        nullable=False,
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime,
@@ -145,6 +162,12 @@ class DashboardSettings(Base):
         String,
         default="usage_weighted",
         server_default=text("'usage_weighted'"),
+        nullable=False,
+    )
+    openai_cache_affinity_max_age_seconds: Mapped[int] = mapped_column(
+        Integer,
+        default=300,
+        server_default=text("300"),
         nullable=False,
     )
     import_without_overwrite: Mapped[bool] = mapped_column(
@@ -326,6 +349,7 @@ Index("idx_logs_account_time", RequestLog.account_id, RequestLog.requested_at)
 Index("idx_logs_requested_at", RequestLog.requested_at)
 Index("idx_logs_requested_at_id", RequestLog.requested_at.desc(), RequestLog.id.desc())
 Index("idx_sticky_account", StickySession.account_id)
+Index("idx_sticky_kind_updated_at", StickySession.kind, StickySession.updated_at.desc())
 Index("idx_api_keys_hash", ApiKey.key_hash)
 Index("idx_api_key_limits_key_id", ApiKeyLimit.api_key_id)
 Index("idx_api_key_usage_reservations_key_id", ApiKeyUsageReservation.api_key_id)

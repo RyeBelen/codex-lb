@@ -61,6 +61,7 @@ const SettingsPayloadSchema = z.object({
   stickyThreadsEnabled: z.boolean().optional(),
   preferEarlierResetAccounts: z.boolean().optional(),
   routingStrategy: z.enum(["usage_weighted", "round_robin"]).optional(),
+  openaiCacheAffinityMaxAgeSeconds: z.number().int().positive().optional(),
   importWithoutOverwrite: z.boolean().optional(),
   totpRequiredOnLogin: z.boolean().optional(),
   totpConfigured: z.boolean().optional(),
@@ -86,6 +87,15 @@ type MockState = {
   settings: DashboardSettings;
   apiKeys: ApiKey[];
   firewallEntries: Array<{ ipAddress: string; createdAt: string }>;
+  stickySessions: Array<{
+    key: string;
+    accountId: string;
+    kind: "codex_session" | "sticky_thread" | "prompt_cache";
+    createdAt: string;
+    updatedAt: string;
+    expiresAt: string | null;
+    isStale: boolean;
+  }>;
 };
 
 function createInitialState(): MockState {
@@ -96,6 +106,7 @@ function createInitialState(): MockState {
     settings: createDashboardSettings(),
     apiKeys: createDefaultApiKeys(),
     firewallEntries: [],
+    stickySessions: [],
   };
 }
 
@@ -404,6 +415,37 @@ export const handlers = [
       ...payload,
     });
     return HttpResponse.json(state.settings);
+  }),
+
+  http.get("/api/sticky-sessions", () => {
+    return HttpResponse.json({ entries: state.stickySessions });
+  }),
+
+  http.delete("/api/sticky-sessions/:key", ({ params }) => {
+    const key = decodeURIComponent(String(params.key));
+    const exists = state.stickySessions.some((entry) => entry.key === key);
+    if (!exists) {
+      return HttpResponse.json(
+        { error: { code: "sticky_session_not_found", message: "Sticky session not found" } },
+        { status: 404 },
+      );
+    }
+    state.stickySessions = state.stickySessions.filter((entry) => entry.key !== key);
+    return HttpResponse.json({ status: "deleted" });
+  }),
+
+  http.post("/api/sticky-sessions/purge", async ({ request }) => {
+    const payload = (await parseJsonBody(request, z.object({ staleOnly: z.boolean().default(true) }))) ?? {
+      staleOnly: true,
+    };
+    if (payload.staleOnly) {
+      const before = state.stickySessions.length;
+      state.stickySessions = state.stickySessions.filter((entry) => !entry.isStale);
+      return HttpResponse.json({ deletedCount: before - state.stickySessions.length });
+    }
+    const deletedCount = state.stickySessions.length;
+    state.stickySessions = [];
+    return HttpResponse.json({ deletedCount });
   }),
 
   http.get("/api/dashboard-auth/session", () => {

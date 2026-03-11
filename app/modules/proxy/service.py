@@ -29,7 +29,7 @@ from app.core.types import JsonValue
 from app.core.usage.types import UsageWindowRow
 from app.core.utils.request_id import ensure_request_id, get_request_id
 from app.core.utils.sse import format_sse_event, parse_sse_data_json
-from app.db.models import Account, UsageHistory
+from app.db.models import Account, StickySessionKind, UsageHistory
 from app.modules.accounts.auth_manager import AuthManager
 from app.modules.api_keys.service import ApiKeyData, ApiKeysService, ApiKeyUsageReservationData
 from app.modules.proxy.helpers import (
@@ -62,6 +62,14 @@ logger = logging.getLogger(__name__)
 
 _TEXT_DELTA_EVENT_TYPES = frozenset({"response.output_text.delta", "response.refusal.delta"})
 _TEXT_DONE_CONTENT_PART_TYPES = frozenset({"output_text", "refusal"})
+
+
+@dataclass(frozen=True, slots=True)
+class _AffinityPolicy:
+    key: str | None = None
+    kind: StickySessionKind | None = None
+    reallocate_sticky: bool = False
+    max_age_seconds: int | None = None
 
 
 class ProxyService:
@@ -121,19 +129,21 @@ class ProxyService:
 
         settings = await get_settings_cache().get()
         prefer_earlier_reset = settings.prefer_earlier_reset_accounts
-        sticky_threads_enabled = settings.sticky_threads_enabled
-        routing_strategy = _routing_strategy(settings)
-        sticky_key, reallocate_sticky = _sticky_key_for_compact_request(
+        affinity = _sticky_key_for_compact_request(
             payload,
             headers,
             codex_session_affinity=codex_session_affinity,
             openai_cache_affinity=openai_cache_affinity,
-            sticky_threads_enabled=sticky_threads_enabled,
+            openai_cache_affinity_max_age_seconds=settings.openai_cache_affinity_max_age_seconds,
+            sticky_threads_enabled=settings.sticky_threads_enabled,
         )
+        routing_strategy = _routing_strategy(settings)
         try:
             selection = await self._load_balancer.select_account(
-                sticky_key=sticky_key,
-                reallocate_sticky=reallocate_sticky,
+                sticky_key=affinity.key,
+                sticky_kind=affinity.kind,
+                reallocate_sticky=affinity.reallocate_sticky,
+                sticky_max_age_seconds=affinity.max_age_seconds,
                 prefer_earlier_reset_accounts=prefer_earlier_reset,
                 routing_strategy=routing_strategy,
                 model=payload.model,
@@ -527,15 +537,15 @@ class ProxyService:
         start = time.monotonic()
         settings = await get_settings_cache().get()
         prefer_earlier_reset = settings.prefer_earlier_reset_accounts
-        sticky_threads_enabled = settings.sticky_threads_enabled
-        routing_strategy = _routing_strategy(settings)
-        sticky_key = _sticky_key_for_responses_request(
+        affinity = _sticky_key_for_responses_request(
             payload,
             headers,
             codex_session_affinity=codex_session_affinity,
             openai_cache_affinity=openai_cache_affinity,
-            sticky_threads_enabled=sticky_threads_enabled,
+            openai_cache_affinity_max_age_seconds=settings.openai_cache_affinity_max_age_seconds,
+            sticky_threads_enabled=settings.sticky_threads_enabled,
         )
+        routing_strategy = _routing_strategy(settings)
         max_attempts = 3
         settled = False
         any_attempt_logged = False
@@ -543,7 +553,10 @@ class ProxyService:
         try:
             for attempt in range(max_attempts):
                 selection = await self._load_balancer.select_account(
-                    sticky_key=sticky_key,
+                    sticky_key=affinity.key,
+                    sticky_kind=affinity.kind,
+                    reallocate_sticky=affinity.reallocate_sticky,
+                    sticky_max_age_seconds=affinity.max_age_seconds,
                     prefer_earlier_reset_accounts=prefer_earlier_reset,
                     routing_strategy=routing_strategy,
                     model=payload.model,
@@ -1335,15 +1348,29 @@ def _sticky_key_for_responses_request(
     *,
     codex_session_affinity: bool,
     openai_cache_affinity: bool,
+    openai_cache_affinity_max_age_seconds: int,
     sticky_threads_enabled: bool,
-) -> str | None:
+) -> _AffinityPolicy:
     if codex_session_affinity:
         session_key = _sticky_key_from_session_header(headers)
         if session_key:
-            return session_key
-    if openai_cache_affinity or sticky_threads_enabled:
-        return _sticky_key_from_payload(payload)
-    return None
+            return _AffinityPolicy(
+                key=session_key,
+                kind=StickySessionKind.CODEX_SESSION,
+            )
+    if openai_cache_affinity:
+        return _AffinityPolicy(
+            key=_sticky_key_from_payload(payload),
+            kind=StickySessionKind.PROMPT_CACHE,
+            max_age_seconds=openai_cache_affinity_max_age_seconds,
+        )
+    if sticky_threads_enabled:
+        return _AffinityPolicy(
+            key=_sticky_key_from_payload(payload),
+            kind=StickySessionKind.STICKY_THREAD,
+            reallocate_sticky=True,
+        )
+    return _AffinityPolicy()
 
 
 def _sticky_key_from_compact_payload(payload: ResponsesCompactRequest) -> str | None:
@@ -1360,17 +1387,29 @@ def _sticky_key_for_compact_request(
     *,
     codex_session_affinity: bool,
     openai_cache_affinity: bool,
+    openai_cache_affinity_max_age_seconds: int,
     sticky_threads_enabled: bool,
-) -> tuple[str | None, bool]:
+) -> _AffinityPolicy:
     if codex_session_affinity:
         session_key = _sticky_key_from_session_header(headers)
         if session_key:
-            return session_key, False
+            return _AffinityPolicy(
+                key=session_key,
+                kind=StickySessionKind.CODEX_SESSION,
+            )
     if openai_cache_affinity:
-        return _sticky_key_from_compact_payload(payload), False
+        return _AffinityPolicy(
+            key=_sticky_key_from_compact_payload(payload),
+            kind=StickySessionKind.PROMPT_CACHE,
+            max_age_seconds=openai_cache_affinity_max_age_seconds,
+        )
     if sticky_threads_enabled:
-        return _sticky_key_from_compact_payload(payload), True
-    return None, False
+        return _AffinityPolicy(
+            key=_sticky_key_from_compact_payload(payload),
+            kind=StickySessionKind.STICKY_THREAD,
+            reallocate_sticky=True,
+        )
+    return _AffinityPolicy()
 
 
 def _service_tier_from_compact_payload(payload: ResponsesCompactRequest) -> str | None:
