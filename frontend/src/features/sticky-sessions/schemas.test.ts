@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   StickySessionEntrySchema,
+  StickySessionIdentifierSchema,
   StickySessionsListResponseSchema,
   StickySessionsPurgeRequestSchema,
 } from "@/features/sticky-sessions/schemas";
@@ -24,9 +25,24 @@ describe("StickySessionEntrySchema", () => {
 });
 
 describe("StickySessionsListResponseSchema", () => {
-  it("defaults entries to an empty array", () => {
+  it("defaults entries and stalePromptCacheCount", () => {
     const parsed = StickySessionsListResponseSchema.parse({});
     expect(parsed.entries).toEqual([]);
+    expect(parsed.stalePromptCacheCount).toBe(0);
+  });
+});
+
+describe("StickySessionIdentifierSchema", () => {
+  it("parses composite sticky-session identities", () => {
+    const parsed = StickySessionIdentifierSchema.parse({
+      key: "thread_123",
+      kind: "prompt_cache",
+    });
+
+    expect(parsed).toEqual({
+      key: "thread_123",
+      kind: "prompt_cache",
+    });
   });
 });
 

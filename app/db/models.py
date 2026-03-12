@@ -131,7 +131,6 @@ class StickySession(Base):
     __tablename__ = "sticky_sessions"
 
     key: Mapped[str] = mapped_column(String, primary_key=True)
-    account_id: Mapped[str] = mapped_column(String, ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False)
     kind: Mapped[StickySessionKind] = mapped_column(
         SqlEnum(
             StickySessionKind,
@@ -139,10 +138,12 @@ class StickySession(Base):
             validate_strings=True,
             values_callable=_enum_values,
         ),
+        primary_key=True,
         default=StickySessionKind.STICKY_THREAD,
         server_default=text("'sticky_thread'"),
         nullable=False,
     )
+    account_id: Mapped[str] = mapped_column(String, ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime,

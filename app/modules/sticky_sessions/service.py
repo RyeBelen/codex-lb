@@ -20,6 +20,12 @@ class StickySessionEntryData:
     is_stale: bool
 
 
+@dataclass(frozen=True, slots=True)
+class StickySessionListData:
+    entries: list[StickySessionEntryData]
+    stale_prompt_cache_count: int
+
+
 class StickySessionsService:
     def __init__(
         self,
@@ -35,17 +41,24 @@ class StickySessionsService:
         kind: StickySessionKind | None = None,
         stale_only: bool = False,
         limit: int = 100,
-    ) -> list[StickySessionEntryData]:
+    ) -> StickySessionListData:
         settings = await self._settings_repository.get_or_create()
         ttl_seconds = settings.openai_cache_affinity_max_age_seconds
-        rows = await self._repository.list_entries(kind=kind, limit=limit)
+        stale_cutoff = utcnow() - timedelta(seconds=ttl_seconds)
+        stale_prompt_cache_count = await self._count_stale_prompt_cache_entries(kind=kind, stale_cutoff=stale_cutoff)
+        if stale_only and kind not in (None, StickySessionKind.PROMPT_CACHE):
+            return StickySessionListData(entries=[], stale_prompt_cache_count=stale_prompt_cache_count)
+        effective_kind = StickySessionKind.PROMPT_CACHE if stale_only else kind
+        rows = await self._repository.list_entries(
+            kind=effective_kind,
+            updated_before=stale_cutoff if stale_only else None,
+            limit=limit,
+        )
         entries = [self._to_entry(row, ttl_seconds=ttl_seconds) for row in rows]
-        if stale_only:
-            return [entry for entry in entries if entry.is_stale]
-        return entries
+        return StickySessionListData(entries=entries, stale_prompt_cache_count=stale_prompt_cache_count)
 
-    async def delete_entry(self, key: str) -> bool:
-        return await self._repository.delete(key)
+    async def delete_entry(self, key: str, *, kind: StickySessionKind) -> bool:
+        return await self._repository.delete(key, kind=kind)
 
     async def purge_entries(self, *, stale_only: bool) -> int:
         if not stale_only:
@@ -68,4 +81,17 @@ class StickySessionsService:
             updated_at=row.updated_at,
             expires_at=expires_at,
             is_stale=is_stale,
+        )
+
+    async def _count_stale_prompt_cache_entries(
+        self,
+        *,
+        kind: StickySessionKind | None,
+        stale_cutoff: datetime,
+    ) -> int:
+        if kind not in (None, StickySessionKind.PROMPT_CACHE):
+            return 0
+        return await self._repository.count_entries(
+            kind=StickySessionKind.PROMPT_CACHE,
+            updated_before=stale_cutoff,
         )

@@ -43,10 +43,16 @@ describe("useStickySessions", () => {
     const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");
 
     server.use(
-      http.get("/api/sticky-sessions", () => HttpResponse.json({ entries })),
-      http.delete("/api/sticky-sessions/:key", ({ params }) => {
+      http.get("/api/sticky-sessions", () =>
+        HttpResponse.json({
+          entries,
+          stalePromptCacheCount: entries.filter((entry) => entry.isStale && entry.kind === "prompt_cache").length,
+        }),
+      ),
+      http.delete("/api/sticky-sessions/:kind/:key", ({ params }) => {
         const key = decodeURIComponent(String(params.key));
-        const index = entries.findIndex((entry) => entry.key === key);
+        const kind = String(params.kind);
+        const index = entries.findIndex((entry) => entry.key === key && entry.kind === kind);
         if (index >= 0) {
           entries.splice(index, 1);
         }
@@ -62,7 +68,7 @@ describe("useStickySessions", () => {
     await waitFor(() => expect(result.current.stickySessionsQuery.isSuccess).toBe(true));
     expect(result.current.stickySessionsQuery.data?.entries).toHaveLength(1);
 
-    await result.current.deleteMutation.mutateAsync("thread_123");
+    await result.current.deleteMutation.mutateAsync({ key: "thread_123", kind: "prompt_cache" });
     await waitFor(() => {
       expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ["sticky-sessions", "list"] });
     });
@@ -88,7 +94,7 @@ describe("useStickySessions", () => {
     });
 
     await waitFor(() => expect(result.current.stickySessionsQuery.isSuccess).toBe(true));
-    await expect(result.current.deleteMutation.mutateAsync("thread_123")).rejects.toThrow();
+    await expect(result.current.deleteMutation.mutateAsync({ key: "thread_123", kind: "prompt_cache" })).rejects.toThrow();
     await expect(result.current.purgeMutation.mutateAsync(true)).rejects.toThrow();
 
     expect(toastSpy).toHaveBeenCalledWith("Failed to remove sticky session");

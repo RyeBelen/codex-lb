@@ -476,6 +476,18 @@ async def test_run_startup_migrations_drops_accounts_email_unique_with_non_casca
                 await session.execute(text("SELECT kind FROM sticky_sessions WHERE key='sticky_1'"))
             ).scalar_one()
             assert sticky_kind == "sticky_thread"
+            await session.execute(
+                text(
+                    """
+                    INSERT INTO sticky_sessions (key, account_id, kind, created_at, updated_at)
+                    VALUES ('sticky_1', 'acc_legacy', 'prompt_cache', '2026-01-01 00:00:00', '2026-01-01 00:00:00')
+                    """
+                )
+            )
+            sticky_same_key_count = (
+                await session.execute(text("SELECT COUNT(*) FROM sticky_sessions WHERE key='sticky_1'"))
+            ).scalar_one()
+            assert sticky_same_key_count == 2
             index_rows = (await session.execute(text("PRAGMA index_list(accounts)"))).fetchall()
             has_email_non_unique_index = False
             for row in index_rows:
@@ -526,6 +538,6 @@ async def test_run_startup_migrations_drops_accounts_email_unique_with_non_casca
 
             assert usage_count == 1
             assert logs_count == 1
-            assert sticky_count == 1
+            assert sticky_count == 2
     finally:
         await engine.dispose()

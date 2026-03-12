@@ -143,6 +143,57 @@ async def test_sticky_sessions_api_lists_metadata_and_purges_stale(async_client)
 
 
 @pytest.mark.asyncio
+async def test_sticky_sessions_api_counts_hidden_stale_rows_and_deletes_by_kind(async_client):
+    accounts = await _create_accounts()
+    await _set_affinity_ttl(60)
+
+    for index in range(101):
+        await _insert_sticky_session(
+            key=f"fresh-session-{index:03d}",
+            account_id=accounts[index % len(accounts)].id,
+            kind=StickySessionKind.STICKY_THREAD,
+            updated_at_offset_seconds=index + 1,
+        )
+
+    await _insert_sticky_session(
+        key="shared-key",
+        account_id=accounts[0].id,
+        kind=StickySessionKind.PROMPT_CACHE,
+        updated_at_offset_seconds=600,
+    )
+    await _insert_sticky_session(
+        key="shared-key",
+        account_id=accounts[1].id,
+        kind=StickySessionKind.CODEX_SESSION,
+        updated_at_offset_seconds=5,
+    )
+
+    response = await async_client.get("/api/sticky-sessions")
+    assert response.status_code == 200
+    payload = response.json()
+
+    assert payload["stalePromptCacheCount"] == 1
+    assert len(payload["entries"]) == 100
+    assert not any(entry["key"] == "shared-key" and entry["kind"] == "prompt_cache" for entry in payload["entries"])
+    assert any(entry["key"] == "shared-key" and entry["kind"] == "codex_session" for entry in payload["entries"])
+
+    response = await async_client.get("/api/sticky-sessions", params={"staleOnly": "true"})
+    assert response.status_code == 200
+    stale_payload = response.json()
+    assert stale_payload["stalePromptCacheCount"] == 1
+    assert [(entry["key"], entry["kind"]) for entry in stale_payload["entries"]] == [("shared-key", "prompt_cache")]
+
+    response = await async_client.delete("/api/sticky-sessions/prompt_cache/shared-key")
+    assert response.status_code == 200
+
+    response = await async_client.get("/api/sticky-sessions")
+    assert response.status_code == 200
+    after_delete = response.json()
+    assert after_delete["stalePromptCacheCount"] == 0
+    assert any(entry["key"] == "shared-key" and entry["kind"] == "codex_session" for entry in after_delete["entries"])
+
+
+@pytest.mark.asyncio
 async def test_sticky_sessions_cleanup_scheduler_removes_only_stale_prompt_cache(db_setup):
     accounts = await _create_accounts()
     await _set_affinity_ttl(60)

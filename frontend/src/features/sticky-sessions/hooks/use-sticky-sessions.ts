@@ -6,6 +6,7 @@ import {
   listStickySessions,
   purgeStickySessions,
 } from "@/features/sticky-sessions/api";
+import type { StickySessionIdentifier } from "@/features/sticky-sessions/schemas";
 
 export function useStickySessions() {
   const queryClient = useQueryClient();
@@ -23,7 +24,7 @@ export function useStickySessions() {
   };
 
   const deleteMutation = useMutation({
-    mutationFn: (key: string) => deleteStickySession(key),
+    mutationFn: (target: StickySessionIdentifier) => deleteStickySession(target),
     onSuccess: () => {
       toast.success("Sticky session removed");
       invalidate();

@@ -52,6 +52,7 @@ describe("StickySessionsSection", () => {
               isStale: false,
             },
           ],
+          stalePromptCacheCount: 1,
         },
         isLoading: false,
         error: null,
@@ -80,14 +81,30 @@ describe("StickySessionsSection", () => {
     await user.click(screen.getByRole("button", { name: "Remove" }));
 
     await waitFor(() => {
-      expect(deleteMutation.mutateAsync).toHaveBeenCalledWith("session-1");
+      expect(deleteMutation.mutateAsync).toHaveBeenCalledWith({
+        key: "session-1",
+        kind: "prompt_cache",
+      });
     });
   });
 
-  it("renders the empty state when there are no sticky sessions", () => {
+  it("keeps stale purge enabled when hidden rows are stale", () => {
     useStickySessionsMock.mockReturnValue({
       stickySessionsQuery: {
-        data: { entries: [] },
+        data: {
+          entries: [
+            {
+              key: "session-2",
+              accountId: "acc_2",
+              kind: "codex_session",
+              createdAt: "2026-03-10T12:00:00Z",
+              updatedAt: "2026-03-10T12:05:00Z",
+              expiresAt: null,
+              isStale: false,
+            },
+          ],
+          stalePromptCacheCount: 3,
+        },
         isLoading: false,
         error: null,
       },
@@ -105,7 +122,7 @@ describe("StickySessionsSection", () => {
 
     render(<StickySessionsSection />);
 
-    expect(screen.getByText("No sticky sessions")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Purge stale" })).toBeDisabled();
+    expect(screen.getByText("3")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Purge stale" })).toBeEnabled();
   });
 });

@@ -809,7 +809,7 @@ async def test_v1_prompt_cache_key_rebalances_after_affinity_expires(async_clien
                 """
                 UPDATE sticky_sessions
                 SET updated_at = :stale_updated_at
-                WHERE key = :sticky_key
+                WHERE key = :sticky_key AND kind = 'prompt_cache'
                 """
             ),
             {"sticky_key": thread_key, "stale_updated_at": stale_updated_at},

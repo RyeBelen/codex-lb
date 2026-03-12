@@ -14,8 +14,14 @@ export const StickySessionEntrySchema = z.object({
   isStale: z.boolean(),
 });
 
+export const StickySessionIdentifierSchema = z.object({
+  key: z.string().min(1),
+  kind: StickySessionKindSchema,
+});
+
 export const StickySessionsListResponseSchema = z.object({
   entries: z.array(StickySessionEntrySchema).default([]),
+  stalePromptCacheCount: z.number().int().nonnegative().default(0),
 });
 
 export const StickySessionDeleteResponseSchema = z.object({
@@ -32,6 +38,7 @@ export const StickySessionsPurgeResponseSchema = z.object({
 
 export type StickySessionKind = z.infer<typeof StickySessionKindSchema>;
 export type StickySessionEntry = z.infer<typeof StickySessionEntrySchema>;
+export type StickySessionIdentifier = z.infer<typeof StickySessionIdentifierSchema>;
 export type StickySessionsListResponse = z.infer<typeof StickySessionsListResponseSchema>;
 export type StickySessionDeleteResponse = z.infer<typeof StickySessionDeleteResponseSchema>;
 export type StickySessionsPurgeRequest = z.infer<typeof StickySessionsPurgeRequestSchema>;

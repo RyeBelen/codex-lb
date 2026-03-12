@@ -20,6 +20,7 @@ class StickySessionEntryResponse(DashboardModel):
 
 class StickySessionsListResponse(DashboardModel):
     entries: list[StickySessionEntryResponse] = Field(default_factory=list)
+    stale_prompt_cache_count: int = 0
 
 
 class StickySessionDeleteResponse(DashboardModel):

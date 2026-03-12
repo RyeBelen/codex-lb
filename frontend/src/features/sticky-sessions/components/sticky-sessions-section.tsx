@@ -16,7 +16,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { useStickySessions } from "@/features/sticky-sessions/hooks/use-sticky-sessions";
-import type { StickySessionKind } from "@/features/sticky-sessions/schemas";
+import type { StickySessionIdentifier, StickySessionKind } from "@/features/sticky-sessions/schemas";
 import { useDialogState } from "@/hooks/use-dialog-state";
 import { getErrorMessageOrNull } from "@/utils/errors";
 import { formatTimeLong } from "@/utils/formatters";
@@ -34,7 +34,7 @@ function kindLabel(kind: StickySessionKind): string {
 
 export function StickySessionsSection() {
   const { stickySessionsQuery, deleteMutation, purgeMutation } = useStickySessions();
-  const deleteDialog = useDialogState<string>();
+  const deleteDialog = useDialogState<StickySessionIdentifier>();
   const purgeDialog = useDialogState();
 
   const mutationError = useMemo(
@@ -46,7 +46,7 @@ export function StickySessionsSection() {
   );
 
   const entries = stickySessionsQuery.data?.entries ?? [];
-  const staleCount = entries.filter((entry) => entry.isStale).length;
+  const staleCount = stickySessionsQuery.data?.stalePromptCacheCount ?? 0;
   const busy = deleteMutation.isPending || purgeMutation.isPending;
 
   return (
@@ -143,7 +143,7 @@ export function StickySessionsSection() {
                         variant="ghost"
                         className="text-destructive hover:text-destructive"
                         disabled={busy}
-                        onClick={() => deleteDialog.show(entry.key)}
+                        onClick={() => deleteDialog.show({ key: entry.key, kind: entry.kind })}
                       >
                         Remove
                       </Button>
@@ -159,7 +159,11 @@ export function StickySessionsSection() {
       <ConfirmDialog
         open={deleteDialog.open}
         title="Remove sticky session"
-        description={`${deleteDialog.data ?? ""} will stop pinning future requests.`}
+        description={
+          deleteDialog.data
+            ? `${kindLabel(deleteDialog.data.kind)} mapping ${deleteDialog.data.key} will stop pinning future requests.`
+            : ""
+        }
         confirmLabel="Remove"
         onOpenChange={deleteDialog.onOpenChange}
         onConfirm={() => {

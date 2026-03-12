@@ -417,20 +417,29 @@ export const handlers = [
     return HttpResponse.json(state.settings);
   }),
 
-  http.get("/api/sticky-sessions", () => {
-    return HttpResponse.json({ entries: state.stickySessions });
+  http.get("/api/sticky-sessions", ({ request }) => {
+    const url = new URL(request.url);
+    const staleOnly = url.searchParams.get("staleOnly") === "true";
+    const entries = staleOnly
+      ? state.stickySessions.filter((entry) => entry.kind === "prompt_cache" && entry.isStale)
+      : state.stickySessions;
+    const stalePromptCacheCount = state.stickySessions.filter(
+      (entry) => entry.kind === "prompt_cache" && entry.isStale,
+    ).length;
+    return HttpResponse.json({ entries, stalePromptCacheCount });
   }),
 
-  http.delete("/api/sticky-sessions/:key", ({ params }) => {
+  http.delete("/api/sticky-sessions/:kind/:key", ({ params }) => {
     const key = decodeURIComponent(String(params.key));
-    const exists = state.stickySessions.some((entry) => entry.key === key);
+    const kind = String(params.kind);
+    const exists = state.stickySessions.some((entry) => entry.key === key && entry.kind === kind);
     if (!exists) {
       return HttpResponse.json(
         { error: { code: "sticky_session_not_found", message: "Sticky session not found" } },
         { status: 404 },
       );
     }
-    state.stickySessions = state.stickySessions.filter((entry) => entry.key !== key);
+    state.stickySessions = state.stickySessions.filter((entry) => !(entry.key === key && entry.kind === kind));
     return HttpResponse.json({ status: "deleted" });
   }),
 

@@ -14,15 +14,24 @@ The system SHALL persist each sticky-session mapping with an explicit kind so du
 - **WHEN** an OpenAI-style request creates or refreshes prompt-cache affinity
 - **THEN** the stored mapping kind is `prompt_cache`
 
+#### Scenario: Identical keys remain isolated across sticky-session kinds
+- **WHEN** the same sticky-session key value is used for more than one kind
+- **THEN** each `(key, kind)` mapping is stored and managed independently without overwriting the others
+
 ### Requirement: Dashboard exposes sticky-session administration
 The system SHALL provide dashboard APIs for listing sticky-session mappings, deleting one mapping, and purging stale mappings.
 
 #### Scenario: List sticky-session mappings
 - **WHEN** the dashboard requests sticky-session entries
 - **THEN** the response includes each mapping's `key`, `account_id`, `kind`, `created_at`, `updated_at`, `expires_at`, and `is_stale`
+- **AND** the response includes the total number of stale `prompt_cache` mappings that currently exist beyond the returned page
+
+#### Scenario: List only stale mappings
+- **WHEN** the dashboard requests sticky-session entries with `staleOnly=true`
+- **THEN** the system applies stale prompt-cache filtering before enforcing the result limit
 
 #### Scenario: Delete one mapping
-- **WHEN** the dashboard deletes a sticky-session mapping by key
+- **WHEN** the dashboard deletes a sticky-session mapping by both `key` and `kind`
 - **THEN** the system removes that mapping and returns a success response
 
 #### Scenario: Purge stale prompt-cache mappings

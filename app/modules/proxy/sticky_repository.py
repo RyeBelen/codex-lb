@@ -36,12 +36,13 @@ class StickySessionsRepository:
                 return None
         return row.account_id
 
-    async def get_entry(self, key: str, *, kind: StickySessionKind | None = None) -> StickySession | None:
+    async def get_entry(self, key: str, *, kind: StickySessionKind) -> StickySession | None:
         if not key:
             return None
-        statement = select(StickySession).where(StickySession.key == key)
-        if kind is not None:
-            statement = statement.where(StickySession.kind == kind)
+        statement = select(StickySession).where(
+            StickySession.key == key,
+            StickySession.kind == kind,
+        )
         result = await self._session.execute(statement)
         return result.scalar_one_or_none()
 
@@ -49,18 +50,19 @@ class StickySessionsRepository:
         statement = self._build_upsert_statement(key, account_id, kind)
         await self._session.execute(statement)
         await self._session.commit()
-        row = await self.get_entry(key)
+        row = await self.get_entry(key, kind=kind)
         if row is None:
-            raise RuntimeError(f"StickySession upsert failed for key={key!r}")
+            raise RuntimeError(f"StickySession upsert failed for key={key!r} kind={kind.value!r}")
         await self._session.refresh(row)
         return row
 
-    async def delete(self, key: str, *, kind: StickySessionKind | None = None) -> bool:
+    async def delete(self, key: str, *, kind: StickySessionKind) -> bool:
         if not key:
             return False
-        statement = delete(StickySession).where(StickySession.key == key)
-        if kind is not None:
-            statement = statement.where(StickySession.kind == kind)
+        statement = delete(StickySession).where(
+            StickySession.key == key,
+            StickySession.kind == kind,
+        )
         result = await self._session.execute(statement.returning(StickySession.key))
         await self._session.commit()
         return result.scalar_one_or_none() is not None
@@ -69,19 +71,36 @@ class StickySessionsRepository:
         self,
         *,
         kind: StickySessionKind | None = None,
+        updated_before: datetime | None = None,
         limit: int | None = None,
     ) -> Sequence[StickySession]:
-        statement = select(StickySession).order_by(
+        statement = self._apply_filters(
+            select(StickySession),
+            kind=kind,
+            updated_before=updated_before,
+        ).order_by(
             StickySession.updated_at.desc(),
             StickySession.created_at.desc(),
             StickySession.key.asc(),
         )
-        if kind is not None:
-            statement = statement.where(StickySession.kind == kind)
         if limit is not None:
             statement = statement.limit(limit)
         result = await self._session.execute(statement)
         return result.scalars().all()
+
+    async def count_entries(
+        self,
+        *,
+        kind: StickySessionKind | None = None,
+        updated_before: datetime | None = None,
+    ) -> int:
+        statement = self._apply_filters(
+            select(func.count()).select_from(StickySession),
+            kind=kind,
+            updated_before=updated_before,
+        )
+        result = await self._session.execute(statement)
+        return int(result.scalar_one())
 
     async def purge_prompt_cache_before(self, cutoff: datetime) -> int:
         result = await self._session.execute(
@@ -110,10 +129,22 @@ class StickySessionsRepository:
             raise RuntimeError(f"StickySession upsert unsupported for dialect={dialect!r}")
         statement = insert_fn(StickySession).values(key=key, account_id=account_id, kind=kind)
         return statement.on_conflict_do_update(
-            index_elements=[StickySession.key],
+            index_elements=[StickySession.key, StickySession.kind],
             set_={
                 "account_id": account_id,
-                "kind": kind,
                 "updated_at": func.now(),
             },
         )
+
+    @staticmethod
+    def _apply_filters(
+        statement,
+        *,
+        kind: StickySessionKind | None,
+        updated_before: datetime | None,
+    ):
+        if kind is not None:
+            statement = statement.where(StickySession.kind == kind)
+        if updated_before is not None:
+            statement = statement.where(StickySession.updated_at < to_utc_naive(updated_before))
+        return statement

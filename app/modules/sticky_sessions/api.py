@@ -28,7 +28,7 @@ async def list_sticky_sessions(
     limit: int = Query(default=100, ge=1, le=500),
     context: StickySessionsContext = Depends(get_sticky_sessions_context),
 ) -> StickySessionsListResponse:
-    entries = await context.service.list_entries(kind=kind, stale_only=stale_only, limit=limit)
+    result = await context.service.list_entries(kind=kind, stale_only=stale_only, limit=limit)
     return StickySessionsListResponse(
         entries=[
             StickySessionEntryResponse(
@@ -40,17 +40,19 @@ async def list_sticky_sessions(
                 expires_at=entry.expires_at,
                 is_stale=entry.is_stale,
             )
-            for entry in entries
-        ]
+            for entry in result.entries
+        ],
+        stale_prompt_cache_count=result.stale_prompt_cache_count,
     )
 
 
-@router.delete("/{key}", response_model=StickySessionDeleteResponse)
+@router.delete("/{kind}/{key}", response_model=StickySessionDeleteResponse)
 async def delete_sticky_session(
+    kind: StickySessionKind,
     key: str,
     context: StickySessionsContext = Depends(get_sticky_sessions_context),
 ) -> StickySessionDeleteResponse:
-    deleted = await context.service.delete_entry(key)
+    deleted = await context.service.delete_entry(key, kind=kind)
     if not deleted:
         raise DashboardNotFoundError("Sticky session not found", code="sticky_session_not_found")
     return StickySessionDeleteResponse(status="deleted")
