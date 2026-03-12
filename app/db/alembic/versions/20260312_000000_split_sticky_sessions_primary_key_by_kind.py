@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import sqlalchemy as sa
 from alembic import op
+from sqlalchemy.dialects import postgresql
 from sqlalchemy.engine import Connection
 
 # revision identifiers, used by Alembic.
@@ -35,7 +36,15 @@ def _primary_key_columns(connection: Connection, table_name: str) -> list[str]:
     return [str(column) for column in columns]
 
 
-def _sticky_session_kind_enum() -> sa.Enum:
+def _sticky_session_kind_enum(connection: Connection, *, create_type: bool = True) -> sa.Enum:
+    if connection.dialect.name == "postgresql":
+        return postgresql.ENUM(
+            "codex_session",
+            "sticky_thread",
+            "prompt_cache",
+            name="sticky_session_kind",
+            create_type=create_type,
+        )
     return sa.Enum(
         "codex_session",
         "sticky_thread",
@@ -52,14 +61,14 @@ def upgrade() -> None:
         return
 
     if bind.dialect.name == "postgresql":
-        _sticky_session_kind_enum().create(bind, checkfirst=True)
+        _sticky_session_kind_enum(bind).create(bind, checkfirst=True)
 
     op.create_table(
         _TEMP_TABLE_NAME,
         sa.Column("key", sa.String(), primary_key=True),
         sa.Column(
             "kind",
-            _sticky_session_kind_enum(),
+            _sticky_session_kind_enum(bind, create_type=False),
             primary_key=True,
             nullable=False,
             server_default=sa.text("'sticky_thread'"),

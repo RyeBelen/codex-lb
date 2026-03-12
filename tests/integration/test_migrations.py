@@ -267,6 +267,26 @@ async def test_postgresql_migration_contract_policy_and_drift_match(db_setup):
 
 @pytest.mark.asyncio
 @pytest.mark.skipif(
+    not _is_postgresql_database_url(_DATABASE_URL),
+    reason="PostgreSQL-only empty database migration test",
+)
+async def test_postgresql_upgrade_head_from_empty_database(db_setup):
+    async with SessionLocal() as session:
+        await session.execute(text("DROP SCHEMA public CASCADE"))
+        await session.execute(text("CREATE SCHEMA public"))
+        await session.commit()
+
+    result = await run_startup_migrations(_DATABASE_URL)
+    assert result.current_revision == _HEAD_REVISION
+
+    async with SessionLocal() as session:
+        revision_rows = await session.execute(text("SELECT version_num FROM alembic_version"))
+        revisions = sorted(str(row[0]) for row in revision_rows.fetchall())
+        assert revisions == [_HEAD_REVISION]
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(
     (not _is_postgresql_database_url(_DATABASE_URL)) or (not _HAS_REVISION_REMAP),
     reason="PostgreSQL-only migration remap test",
 )
