@@ -664,17 +664,22 @@ def _to_websocket_upstream_url(url: str) -> str:
 
 
 def _configured_stream_transport(settings: object) -> str:
-    explicit_override = getattr(settings, "upstream_stream_transport_override", None)
+    missing = object()
+    explicit_override = getattr(settings, "upstream_stream_transport_override", missing)
     if explicit_override in {"http", "websocket", "auto"}:
         return cast(str, explicit_override)
-    configured = getattr(settings, "upstream_stream_transport", None)
+    configured = getattr(settings, "upstream_stream_transport", missing)
     if configured in {"http", "websocket", "auto"}:
         return cast(str, configured)
+    if configured == "default":
+        return "auto"
     legacy = getattr(settings, "upstream_websocket_mode", None)
     if legacy == "force":
         return "websocket"
     if legacy == "auto":
         return "auto"
+    if configured is missing and explicit_override is missing:
+        return "legacy_http_default"
     return "auto"
 
 
@@ -694,6 +699,8 @@ def _resolve_stream_transport(settings: object, model: str | None, headers: Mapp
         return "http"
     if _has_native_codex_transport_headers(headers):
         return "websocket"
+    if configured == "legacy_http_default":
+        return "http"
 
     registry = get_model_registry()
     prefers_websockets = getattr(registry, "prefers_websockets", None)

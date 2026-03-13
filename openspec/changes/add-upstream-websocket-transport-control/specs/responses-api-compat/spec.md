@@ -25,8 +25,12 @@ For streaming Codex/Responses proxy requests, the system MUST let operators choo
 #### Scenario: Auto transport honors websocket-preferred bootstrap models before registry warmup
 - **WHEN** the upstream transport strategy is `"auto"`
 - **AND** the model registry snapshot has not loaded yet
-- **AND** the request targets a locally bootstrapped websocket-preferred model
+- **AND** the request targets a locally bootstrapped websocket-preferred model family such as `gpt-5.4` or `gpt-5.4-*`
 - **THEN** the proxy MUST still select the native Responses WebSocket transport
+
+#### Scenario: Legacy settings objects keep the historical HTTP default
+- **WHEN** transport selection runs against a legacy settings object that does not expose the newer upstream transport fields
+- **THEN** the proxy MUST preserve the pre-feature HTTP transport default for model-preference auto-selection unless an explicit legacy websocket mode or native Codex websocket signal opts in
 
 #### Scenario: Websocket upstream handshake strips hop-by-hop inbound headers
 - **WHEN** streaming upstream traffic uses the native Responses WebSocket transport

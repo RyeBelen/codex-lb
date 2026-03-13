@@ -42,7 +42,7 @@ class ModelRegistrySnapshot:
     fetched_at: float
 
 
-_BOOTSTRAP_WEBSOCKET_PREFERRED_MODEL_PATTERNS = ("gpt-5.4",)
+_BOOTSTRAP_WEBSOCKET_PREFERRED_MODEL_PATTERNS = ("gpt-5.4", "gpt-5.4-*")
 
 
 class ModelRegistry:
