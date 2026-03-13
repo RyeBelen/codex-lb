@@ -96,6 +96,7 @@ _HOP_BY_HOP_HEADER_NAMES = frozenset(
     }
 )
 _AUTO_WEBSOCKET_HANDSHAKE_FALLBACK_STATUSES = frozenset({403, 404, 426})
+_WEBSOCKET_RESPONSE_CREATE_EXCLUDED_FIELDS = frozenset({"background", "stream"})
 
 logger = logging.getLogger(__name__)
 _STREAM_CONNECT_TIMEOUT_OVERRIDE: contextvars.ContextVar[float | None] = contextvars.ContextVar(
@@ -811,8 +812,7 @@ async def _stream_responses_via_websocket(
 ) -> AsyncIterator[str]:
     websocket_url = _to_websocket_upstream_url(url)
     request_started_at = time.monotonic()
-    request_payload: JsonObject = dict(payload_dict)
-    request_payload["type"] = "response.create"
+    request_payload = _build_websocket_response_create_payload(payload_dict)
     websocket_cm: AsyncContextManager[aiohttp.ClientWebSocketResponse] | None = None
     websocket: aiohttp.ClientWebSocketResponse | None = None
     connect_timeout_seconds = min(
@@ -860,6 +860,14 @@ async def _stream_responses_via_websocket(
     finally:
         if websocket_cm is not None:
             await websocket_cm.__aexit__(None, None, None)
+
+
+def _build_websocket_response_create_payload(payload_dict: JsonObject) -> JsonObject:
+    request_payload: JsonObject = {
+        key: value for key, value in payload_dict.items() if key not in _WEBSOCKET_RESPONSE_CREATE_EXCLUDED_FIELDS
+    }
+    request_payload["type"] = "response.create"
+    return request_payload
 
 
 async def _inline_input_image_urls(

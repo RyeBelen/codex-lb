@@ -37,6 +37,11 @@ For streaming Codex/Responses proxy requests, the system MUST let operators choo
 - **THEN** the upstream websocket handshake MUST omit hop-by-hop request headers such as `Connection`, `Keep-Alive`, `Transfer-Encoding`, and `Upgrade`
 - **AND** the proxy MUST also omit any additional header names named by the inbound `Connection` header before calling the upstream websocket client
 
+#### Scenario: Websocket response.create payload omits HTTP-only transport fields
+- **WHEN** streaming upstream traffic uses the native Responses WebSocket transport
+- **THEN** the proxy MUST omit HTTP-only request fields such as `stream` and `background` from the upstream `response.create` payload
+- **AND** the proxy MUST still preserve non-transport request fields when building that websocket payload
+
 ### Requirement: Fast service tier aliases canonical priority locally and upstream
 When a Responses request includes `service_tier: "fast"`, the service MUST canonicalize that alias to `service_tier: "priority"` for local billable state and outbound upstream payloads.
 

@@ -1128,7 +1128,9 @@ async def test_stream_responses_uses_native_websocket_upstream_for_codex_headers
     assert headers["originator"] == "codex_cli_rs"
     assert "Content-Type" not in headers
     assert "Accept" not in headers
-    assert websocket.sent_json == [{"type": "response.create", **payload.to_payload()}]
+    assert websocket.sent_json == [
+        {"type": "response.create", **{k: v for k, v in payload.to_payload().items() if k != "stream"}}
+    ]
     assert len(events) == 2
     created = parse_sse_event(events[0])
     completed = parse_sse_event(events[1])
@@ -1229,7 +1231,7 @@ async def test_stream_responses_uses_websocket_transport(monkeypatch):
 
     assert session.ws_calls[0]["url"] == "wss://chatgpt.com/backend-api/codex/responses"
     request_payload = websocket.sent_json[0]
-    assert request_payload == {"type": "response.create", **payload.to_payload()}
+    assert request_payload == {"type": "response.create", **{k: v for k, v in payload.to_payload().items() if k != "stream"}}
     expected_created = (
         "event: response.created\ndata: "
         '{"type":"response.created","response":{"id":"resp_ws","service_tier":"auto"}}\n\n'
@@ -1295,6 +1297,61 @@ async def test_stream_responses_websocket_forces_response_create_event_type(monk
     assert payload.to_payload()["type"] == "response.cancel"
     assert request_payload["type"] == "response.create"
     assert request_payload["custom_flag"] == "x"
+
+
+@pytest.mark.asyncio
+async def test_stream_responses_websocket_omits_http_only_transport_fields(monkeypatch):
+    class Settings:
+        upstream_base_url = "https://chatgpt.com/backend-api"
+        upstream_stream_transport = "websocket"
+        upstream_connect_timeout_seconds = 8.0
+        stream_idle_timeout_seconds = 45.0
+        max_sse_event_bytes = 1024
+        image_inline_fetch_enabled = False
+        log_upstream_request_payload = False
+        proxy_request_budget_seconds = 75.0
+        log_upstream_request_summary = False
+
+    monkeypatch.setattr(proxy_module, "get_settings", lambda: Settings())
+    monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_start", lambda **kwargs: None)
+    monkeypatch.setattr(proxy_module, "_maybe_log_upstream_request_complete", lambda **kwargs: None)
+
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.1",
+            "instructions": "hi",
+            "input": [{"role": "user", "content": "hi"}],
+            "stream": True,
+            "background": True,
+            "custom_flag": "x",
+        }
+    )
+    websocket = _WsResponse(
+        [
+            _WsMessage(
+                proxy_module.aiohttp.WSMsgType.TEXT,
+                json.dumps({"type": "response.completed", "response": {"id": "resp_ws"}}),
+            )
+        ]
+    )
+    session = _WsSession(websocket)
+
+    _ = [
+        event
+        async for event in proxy_module.stream_responses(
+            payload,
+            headers={},
+            access_token="token",
+            account_id="acc_1",
+            session=cast(proxy_module.aiohttp.ClientSession, session),
+        )
+    ]
+
+    request_payload = websocket.sent_json[0]
+    assert request_payload["type"] == "response.create"
+    assert request_payload["custom_flag"] == "x"
+    assert "stream" not in request_payload
+    assert "background" not in request_payload
 
 
 @pytest.mark.asyncio
