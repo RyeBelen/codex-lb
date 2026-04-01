@@ -224,11 +224,11 @@ class ApiKeyData:
     allowed_models: list[str] | None
     enforced_model: str | None
     enforced_reasoning_effort: str | None
-    enforced_service_tier: str | None
     expires_at: datetime | None
     is_active: bool
     created_at: datetime
     last_used_at: datetime | None
+    enforced_service_tier: str | None = None
     limits: list[LimitRuleData] = field(default_factory=list)
     usage_summary: "ApiKeyUsageSummaryData | None" = None
 
