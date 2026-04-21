@@ -137,7 +137,6 @@ from app.modules.proxy.load_balancer import AccountSelection, LoadBalancer
 from app.modules.proxy.rate_limit_cache import get_rate_limit_headers_cache
 from app.modules.proxy.repo_bundle import ProxyRepoFactory, ProxyRepositories
 from app.modules.proxy.request_policy import (
-    BACKEND_CODEX_ALLOWED_BUILTIN_TOOL_TYPES,
     apply_api_key_enforcement,
     normalize_responses_request_payload,
     openai_invalid_payload_error,
@@ -1640,7 +1639,7 @@ class ProxyService:
         sticky_threads_enabled: bool,
         openai_cache_affinity_max_age_seconds: int,
         api_key: ApiKeyData | None,
-        allowed_builtin_tool_types: frozenset[str],
+        allowed_builtin_tool_types: frozenset[str] = frozenset(),
     ) -> _PreparedWebSocketRequest:
         refreshed_api_key = await self._refresh_websocket_api_key_policy(api_key)
         client_metadata = _response_create_client_metadata(payload, headers=headers)
