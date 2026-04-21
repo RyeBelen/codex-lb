@@ -137,6 +137,7 @@ from app.modules.proxy.load_balancer import AccountSelection, LoadBalancer
 from app.modules.proxy.rate_limit_cache import get_rate_limit_headers_cache
 from app.modules.proxy.repo_bundle import ProxyRepoFactory, ProxyRepositories
 from app.modules.proxy.request_policy import (
+    BACKEND_CODEX_ALLOWED_BUILTIN_TOOL_TYPES,
     apply_api_key_enforcement,
     normalize_responses_request_payload,
     openai_invalid_payload_error,
@@ -1310,6 +1311,7 @@ class ProxyService:
         codex_session_affinity: bool,
         openai_cache_affinity: bool,
         api_key: ApiKeyData | None,
+        allowed_builtin_tool_types: frozenset[str] = frozenset(),
     ) -> None:
         filtered_headers = filter_inbound_websocket_headers(dict(headers))
         runtime_settings = get_settings()
@@ -1405,6 +1407,7 @@ class ProxyService:
                                 sticky_threads_enabled=sticky_threads_enabled,
                                 openai_cache_affinity_max_age_seconds=openai_cache_affinity_max_age_seconds,
                                 api_key=api_key,
+                                allowed_builtin_tool_types=allowed_builtin_tool_types,
                             )
                             request_state = prepared_request.request_state
                             request_affinity = prepared_request.affinity_policy
@@ -1637,10 +1640,15 @@ class ProxyService:
         sticky_threads_enabled: bool,
         openai_cache_affinity_max_age_seconds: int,
         api_key: ApiKeyData | None,
+        allowed_builtin_tool_types: frozenset[str],
     ) -> _PreparedWebSocketRequest:
         refreshed_api_key = await self._refresh_websocket_api_key_policy(api_key)
         client_metadata = _response_create_client_metadata(payload, headers=headers)
-        responses_payload = normalize_responses_request_payload(payload, openai_compat=openai_cache_affinity)
+        responses_payload = normalize_responses_request_payload(
+            payload,
+            openai_compat=openai_cache_affinity,
+            allowed_builtin_tool_types=allowed_builtin_tool_types,
+        )
         apply_api_key_enforcement(responses_payload, refreshed_api_key)
         validate_model_access(refreshed_api_key, responses_payload.model)
         reservation = await self._reserve_websocket_api_key_usage(

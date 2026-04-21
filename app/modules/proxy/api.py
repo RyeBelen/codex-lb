@@ -69,7 +69,9 @@ from app.modules.proxy import service as proxy_service_module
 from app.modules.proxy.helpers import _rate_limit_details
 from app.modules.proxy.http_bridge_forwarding import parse_forwarded_request
 from app.modules.proxy.request_policy import (
+    BACKEND_CODEX_ALLOWED_BUILTIN_TOOL_TYPES,
     apply_api_key_enforcement,
+    normalize_responses_request_payload,
     openai_invalid_payload_error,
     openai_validation_error,
     validate_model_access,
@@ -153,6 +155,14 @@ _UNAVAILABLE_SELECTION_ERROR_CODES = {
 }
 
 
+def _normalize_backend_codex_responses_payload(payload: dict[str, JsonValue]) -> ResponsesRequest:
+    return normalize_responses_request_payload(
+        payload,
+        openai_compat=False,
+        allowed_builtin_tool_types=BACKEND_CODEX_ALLOWED_BUILTIN_TOOL_TYPES,
+    )
+
+
 @router.post(
     "/responses",
     responses={
@@ -167,13 +177,18 @@ _UNAVAILABLE_SELECTION_ERROR_CODES = {
 )
 async def responses(
     request: Request,
-    payload: ResponsesRequest = Body(...),
+    payload: dict[str, JsonValue] = Body(...),
     context: ProxyContext = Depends(get_proxy_context),
     api_key: ApiKeyData | None = Security(validate_proxy_api_key),
 ) -> Response:
+    try:
+        responses_payload = _normalize_backend_codex_responses_payload(payload)
+    except ValidationError as exc:
+        error = openai_validation_error(exc)
+        return _logged_error_json_response(request, 400, error)
     return await _stream_responses(
         request,
-        payload,
+        responses_payload,
         context,
         api_key,
         codex_session_affinity=True,
@@ -201,6 +216,7 @@ async def responses_websocket(
         codex_session_affinity=True,
         openai_cache_affinity=True,
         api_key=api_key,
+        allowed_builtin_tool_types=BACKEND_CODEX_ALLOWED_BUILTIN_TOOL_TYPES,
     )
 
 
@@ -267,12 +283,17 @@ async def v1_responses(
 )
 async def internal_bridge_responses(
     request: Request,
-    payload: ResponsesRequest = Body(...),
+    payload: dict[str, JsonValue] = Body(...),
     context: ProxyContext = Depends(get_proxy_context),
 ) -> Response:
+    try:
+        responses_payload = _normalize_backend_codex_responses_payload(payload)
+    except ValidationError as exc:
+        error = openai_validation_error(exc)
+        return _logged_error_json_response(request, 400, error)
     forwarded_request_context, internal_error = parse_forwarded_request(
         request.headers,
-        payload=payload,
+        payload=responses_payload,
         current_instance=get_settings().http_responses_session_bridge_instance_id,
     )
     if internal_error is not None or forwarded_request_context is None:
@@ -285,7 +306,7 @@ async def internal_bridge_responses(
     forwarded_headers = _strip_internal_bridge_headers(request.headers)
     return await _stream_responses(
         request,
-        payload,
+        responses_payload,
         context,
         api_key,
         codex_session_affinity=forwarded_request_context.context.codex_session_affinity,

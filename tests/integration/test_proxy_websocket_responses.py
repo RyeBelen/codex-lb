@@ -208,6 +208,7 @@ def test_backend_responses_websocket_proxies_upstream_and_persists_log(app_insta
         "service_tier": "fast",
         "reasoning": {"effort": "high"},
         "input": [{"role": "user", "content": [{"type": "input_text", "text": "hi"}]}],
+        "tools": [{"type": "image_generation"}],
         "stream": True,
     }
 
@@ -240,7 +241,7 @@ def test_backend_responses_websocket_proxies_upstream_and_persists_log(app_insta
             "model": "gpt-5.4",
             "instructions": "",
             "input": [{"role": "user", "content": [{"type": "input_text", "text": "hi"}]}],
-            "tools": [],
+            "tools": [{"type": "image_generation"}],
             "reasoning": {"effort": "high"},
             "client_metadata": {"x-codex-turn-metadata": '{"turn_id":"turn_123","sandbox":"workspace-write"}'},
             "service_tier": "priority",
@@ -844,7 +845,25 @@ def test_v1_responses_websocket_normalizes_payload_before_forwarding(app_instanc
     ]
 
 
-def test_v1_responses_websocket_rejects_invalid_payload_before_connect(app_instance, monkeypatch):
+@pytest.mark.parametrize(
+    "request_payload",
+    [
+        {
+            "type": "response.create",
+            "model": "gpt-5.4",
+            "input": "hi",
+            "store": True,
+        },
+        {
+            "type": "response.create",
+            "model": "gpt-5.4",
+            "instructions": "hi",
+            "input": "hi",
+            "tools": [{"type": "image_generation"}],
+        },
+    ],
+)
+def test_v1_responses_websocket_rejects_invalid_payload_before_connect(app_instance, monkeypatch, request_payload):
     called = {"connect": False}
 
     class _FakeSettingsCache:
@@ -869,16 +888,7 @@ def test_v1_responses_websocket_rejects_invalid_payload_before_connect(app_insta
 
     with TestClient(app_instance) as client:
         with client.websocket_connect("/v1/responses") as websocket:
-            websocket.send_text(
-                json.dumps(
-                    {
-                        "type": "response.create",
-                        "model": "gpt-5.4",
-                        "input": "hi",
-                        "store": True,
-                    }
-                )
-            )
+            websocket.send_text(json.dumps(request_payload))
             json.loads(websocket.receive_text())
 
     assert called["connect"] is False

@@ -532,8 +532,11 @@ async def test_proxy_responses_forces_stream(async_client, monkeypatch):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("tool_type", ["web_search", "web_search_preview"])
-async def test_proxy_responses_accepts_builtin_tools(async_client, monkeypatch, tool_type):
+@pytest.mark.parametrize(
+    ("tool_type", "expected_tool_type"),
+    [("web_search", "web_search"), ("web_search_preview", "web_search"), ("image_generation", "image_generation")],
+)
+async def test_proxy_responses_accepts_builtin_tools(async_client, monkeypatch, tool_type, expected_tool_type):
     email = "tools@example.com"
     raw_account_id = "acc_tools"
     auth_json = _make_auth_json(raw_account_id, email)
@@ -566,7 +569,7 @@ async def test_proxy_responses_accepts_builtin_tools(async_client, monkeypatch, 
 
     event = _extract_first_event(lines)
     assert event["type"] == "response.completed"
-    assert getattr(seen.get("payload"), "tools", None) == [{"type": "web_search"}]
+    assert getattr(seen.get("payload"), "tools", None) == [{"type": expected_tool_type}]
 
 
 @pytest.mark.asyncio

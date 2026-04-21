@@ -6,7 +6,7 @@ import pytest
 from pydantic import ValidationError
 
 from app.core.openai.exceptions import ClientPayloadError
-from app.core.openai.requests import ResponsesCompactRequest, ResponsesRequest
+from app.core.openai.requests import ResponsesCompactRequest, ResponsesRequest, tool_validation_context
 from app.core.openai.v1_requests import V1ResponsesCompactRequest, V1ResponsesRequest
 from app.core.types import JsonValue
 
@@ -368,6 +368,21 @@ def test_responses_accepts_builtin_tools(tool_type, expected):
     request = ResponsesRequest.model_validate(payload)
 
     assert request.tools == [{"type": expected}]
+
+
+def test_responses_accepts_image_generation_with_validation_context():
+    payload = {
+        "model": "gpt-5.1",
+        "instructions": "hi",
+        "input": [],
+        "tools": [{"type": "image_generation"}],
+    }
+    request = ResponsesRequest.model_validate(
+        payload,
+        context=tool_validation_context(allowed_builtin_tool_types=("image_generation",)),
+    )
+
+    assert request.tools == [{"type": "image_generation"}]
 
 
 @pytest.mark.parametrize("tool_choice", [{"type": "web_search"}, {"type": "web_search_preview"}])

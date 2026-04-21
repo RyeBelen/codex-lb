@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from typing import cast
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
 
 from app.core.types import JsonObject, JsonValue
 from app.core.utils.json_guards import is_json_list, is_json_mapping
@@ -33,6 +33,8 @@ _TOOL_TYPE_ALIASES = {
     "web_search_preview": "web_search",
 }
 
+_TOOL_VALIDATION_CONTEXT_KEY = "allowed_builtin_tool_types"
+
 _INTERLEAVED_REASONING_KEYS = frozenset({"reasoning_content", "reasoning_details", "tool_calls", "function_call"})
 _INTERLEAVED_REASONING_PART_TYPES = frozenset({"reasoning", "reasoning_content", "reasoning_details"})
 _ASSISTANT_TEXT_PART_TYPES = frozenset({"text", "input_text", "output_text"})
@@ -55,6 +57,29 @@ def normalize_tool_type(tool_type: str) -> str:
     return _TOOL_TYPE_ALIASES.get(tool_type, tool_type)
 
 
+def tool_validation_context(*, allowed_builtin_tool_types: Collection[str] = ()) -> dict[str, object] | None:
+    normalized_allowed_builtin_tool_types = tuple(
+        normalize_tool_type(tool_type) for tool_type in allowed_builtin_tool_types
+    )
+    if not normalized_allowed_builtin_tool_types:
+        return None
+    return {_TOOL_VALIDATION_CONTEXT_KEY: normalized_allowed_builtin_tool_types}
+
+
+def allowed_builtin_tool_types_from_context(info: ValidationInfo) -> frozenset[str]:
+    context = info.context
+    if not isinstance(context, dict):
+        return frozenset()
+    allowed_builtin_tool_types = context.get(_TOOL_VALIDATION_CONTEXT_KEY)
+    if not isinstance(allowed_builtin_tool_types, tuple):
+        return frozenset()
+    return frozenset(
+        normalize_tool_type(tool_type)
+        for tool_type in allowed_builtin_tool_types
+        if isinstance(tool_type, str) and tool_type
+    )
+
+
 def normalize_tool_choice(choice: JsonValue | None) -> JsonValue | None:
     if not is_json_mapping(choice):
         return choice
@@ -69,7 +94,14 @@ def normalize_tool_choice(choice: JsonValue | None) -> JsonValue | None:
     return choice
 
 
-def validate_tool_types(tools: list[JsonValue]) -> list[JsonValue]:
+def validate_tool_types(
+    tools: list[JsonValue],
+    *,
+    allowed_builtin_tool_types: Collection[str] = (),
+) -> list[JsonValue]:
+    unsupported_tool_types = UNSUPPORTED_TOOL_TYPES.difference(
+        normalize_tool_type(tool_type) for tool_type in allowed_builtin_tool_types
+    )
     normalized_tools: list[JsonValue] = []
     for tool in tools:
         if not is_json_mapping(tool):
@@ -83,7 +115,7 @@ def validate_tool_types(tools: list[JsonValue]) -> list[JsonValue]:
                 tool = dict(tool_mapping)
                 tool["type"] = normalized_type
                 tool_type = normalized_type
-            if tool_type in UNSUPPORTED_TOOL_TYPES:
+            if tool_type in unsupported_tool_types:
                 raise ValueError(f"Unsupported tool type: {tool_type}")
         normalized_tools.append(tool)
     return normalized_tools
@@ -378,8 +410,8 @@ class ResponsesRequest(BaseModel):
 
     @field_validator("tools")
     @classmethod
-    def _validate_tools(cls, value: list[JsonValue]) -> list[JsonValue]:
-        return validate_tool_types(value)
+    def _validate_tools(cls, value: list[JsonValue], info: ValidationInfo) -> list[JsonValue]:
+        return validate_tool_types(value, allowed_builtin_tool_types=allowed_builtin_tool_types_from_context(info))
 
     @field_validator("tool_choice")
     @classmethod
