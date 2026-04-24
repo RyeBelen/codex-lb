@@ -1,0 +1,6 @@
+[build]
+builder = "DOCKERFILE"
+
+[deploy]
+healthcheckPath = "/health/ready"
+healthcheckTimeout = 300
