@@ -4,8 +4,7 @@ FROM oven/bun:1.3.7-alpine AS frontend-build
 WORKDIR /app/frontend
 
 COPY frontend/package.json frontend/bun.lock ./
-RUN --mount=type=cache,id=bun-install-cache,target=/root/.bun/install/cache \
-    bun install --frozen-lockfile
+RUN bun install --frozen-lockfile
 
 COPY frontend ./
 RUN bun run build
@@ -25,8 +24,7 @@ ENV PATH="/opt/venv/bin:$PATH"
 RUN pip install --no-cache-dir uv
 
 COPY pyproject.toml uv.lock ./
-RUN --mount=type=cache,id=uv-cache,target=/root/.cache/uv \
-    uv sync --frozen --no-dev --no-install-project --extra metrics --extra tracing
+RUN uv sync --frozen --no-dev --no-install-project --extra metrics --extra tracing
 
 FROM python:3.13-slim AS runtime
 
