@@ -1,6 +1,8 @@
 #!/bin/sh
 set -eu
 
+python scripts/restore_volume_from_env.py
+
 if [ "${CODEX_LB_DATABASE_MIGRATE_ON_STARTUP:-true}" = "true" ]; then
   python -m app.db.migrate upgrade
 fi
