@@ -25,7 +25,7 @@ describe("AccountList", () => {
             email: "secondary@example.com",
             displayName: "Secondary",
             planType: "pro",
-            status: "paused",
+            status: "active",
             additionalQuotas: [],
           },
         ]}
@@ -45,6 +45,38 @@ describe("AccountList", () => {
 
     await user.click(screen.getByText("secondary@example.com"));
     expect(onSelect).toHaveBeenCalledWith("acc-2");
+  });
+
+  it("hides deactivated accounts by default", () => {
+    render(
+      <AccountList
+        accounts={[
+          {
+            accountId: "acc-1",
+            email: "primary@example.com",
+            displayName: "Primary",
+            planType: "plus",
+            status: "active",
+            additionalQuotas: [],
+          },
+          {
+            accountId: "acc-2",
+            email: "inactive@example.com",
+            displayName: "Inactive",
+            planType: "pro",
+            status: "deactivated",
+            additionalQuotas: [],
+          },
+        ]}
+        selectedAccountId="acc-1"
+        onSelect={() => {}}
+        onOpenImport={() => {}}
+        onOpenOauth={() => {}}
+      />,
+    );
+
+    expect(screen.getByText("primary@example.com")).toBeInTheDocument();
+    expect(screen.queryByText("inactive@example.com")).not.toBeInTheDocument();
   });
 
   it("shows empty state when no items match filter", async () => {
