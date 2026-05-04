@@ -1,4 +1,5 @@
 import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
 import { AccountCards } from "@/features/dashboard/components/account-cards";
@@ -20,7 +21,7 @@ describe("AccountCards", () => {
     );
 
     expect(screen.getByTestId("dashboard-account-cards")).toHaveStyle({
-      maxHeight: "calc(2 * 12.5rem + 1rem)",
+      maxHeight: "calc(3 * 12.5rem + 2rem)",
     });
   });
 
@@ -37,5 +38,45 @@ describe("AccountCards", () => {
       "[scrollbar-width:none]",
       "[&::-webkit-scrollbar]:hidden",
     );
+  });
+
+  it("hides deactivated accounts by default and allows choosing multiple statuses", async () => {
+    const user = userEvent.setup();
+    render(
+      <AccountCards
+        accounts={[
+          createAccountSummary({
+            accountId: "acc-active",
+            email: "active@example.com",
+            displayName: "active@example.com",
+            status: "active",
+          }),
+          createAccountSummary({
+            accountId: "acc-paused",
+            email: "paused@example.com",
+            displayName: "paused@example.com",
+            status: "paused",
+          }),
+          createAccountSummary({
+            accountId: "acc-deactivated",
+            email: "inactive@example.com",
+            displayName: "inactive@example.com",
+            status: "deactivated",
+          }),
+        ]}
+        onAction={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("active@example.com")).toBeInTheDocument();
+    expect(screen.getByText("paused@example.com")).toBeInTheDocument();
+    expect(screen.queryByText("inactive@example.com")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /statuses/i }));
+    await user.click(await screen.findByRole("menuitemcheckbox", { name: /deactivated/i }));
+
+    expect(screen.getByText("active@example.com")).toBeInTheDocument();
+    expect(screen.getByText("paused@example.com")).toBeInTheDocument();
+    expect(screen.getByText("inactive@example.com")).toBeInTheDocument();
   });
 });
