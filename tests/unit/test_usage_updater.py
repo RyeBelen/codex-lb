@@ -547,6 +547,67 @@ async def test_usage_updater_does_not_deactivate_on_401(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_usage_updater_refreshes_instead_of_deactivating_on_usage_refresh_token_code(monkeypatch) -> None:
+    monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
+    from app.core.clients.usage import UsageFetchError
+    from app.core.config.settings import get_settings
+
+    get_settings.cache_clear()
+
+    fetch_calls = 0
+
+    async def stub_fetch_usage(*, access_token: str, account_id: str | None, **_: Any) -> UsagePayload:
+        nonlocal fetch_calls
+        fetch_calls += 1
+        if fetch_calls == 1:
+            raise UsageFetchError(401, "Refresh token expired", code="refresh_token_expired")
+        assert access_token
+        assert account_id == "workspace_refresh_token_code"
+        return UsagePayload.model_validate(
+            {
+                "rate_limit": {
+                    "primary_window": {
+                        "used_percent": 10.0,
+                        "reset_at": 1735689600,
+                        "limit_window_seconds": 60,
+                    }
+                }
+            }
+        )
+
+    monkeypatch.setattr("app.modules.usage.updater.fetch_usage", stub_fetch_usage)
+
+    usage_repo = StubUsageRepository(return_rows=True)
+    accounts_repo = StubAccountsRepository()
+    updater = UsageUpdater(usage_repo, accounts_repo=accounts_repo)
+    assert updater._auth_manager is not None
+
+    ensure_calls = 0
+
+    async def stub_ensure_fresh(account: Account, *, force: bool = False) -> Account:
+        nonlocal ensure_calls
+        ensure_calls += 1
+        assert force is True
+        return account
+
+    monkeypatch.setattr(updater._auth_manager, "ensure_fresh", stub_ensure_fresh)
+
+    acc = _make_account(
+        "acc_usage_refresh_token_code",
+        "workspace_refresh_token_code",
+        email="refresh-token-code@example.com",
+    )
+    accounts_repo.accounts_by_id[acc.id] = acc
+
+    await updater.refresh_accounts([acc], latest_usage={})
+
+    assert fetch_calls == 2
+    assert ensure_calls == 1
+    assert len(accounts_repo.status_updates) == 0
+    assert len(usage_repo.entries) == 1
+
+
+@pytest.mark.asyncio
 async def test_usage_updater_deactivates_on_401_account_deactivated_code(monkeypatch) -> None:
     monkeypatch.setenv("CODEX_LB_USAGE_REFRESH_ENABLED", "true")
     from app.core.clients.usage import UsageFetchError
