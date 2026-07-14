@@ -1475,12 +1475,24 @@ The stream MUST include a `response.output_item.done` event whose `item` is a `c
 
 For Codex-affinity standalone compact requests, `POST /backend-api/codex/responses/compact` SHALL normalize an upstream remote-compaction-v2 response that includes historical message output plus a compaction summary into the single compact output item required by Codex clients.
 
+When the upstream compaction item includes a non-empty string `id`, the proxy MUST preserve that exact ID in the normalized compact output and in every synthetic SSE event carrying that item. The proxy MUST NOT synthesize, replace, or remove a provider-owned compaction ID. When upstream omits the ID, the proxy SHALL retain the legacy ID-less output shape.
+
 OpenAI-style `/v1/responses/compact` is unchanged by this requirement.
 
 #### Scenario: terminal trigger is converted into a compact stream
 - **WHEN** a `POST /backend-api/codex/responses` request ends with exactly one top-level `compaction_trigger`
 - **THEN** the proxy strips the trigger, invokes compact handling, and streams one `response.output_item.done` event containing a `compaction` item
 - **AND** the terminal `response.completed` event carries that same item in `response.output`
+
+#### Scenario: provider compaction ID survives synthetic streaming
+- **WHEN** upstream compact handling returns a compaction item with a non-empty string `id`
+- **THEN** the `response.output_item.done` event contains that exact `id`
+- **AND** the `response.completed` event carries the same exact item and `id` in `response.output`
+
+#### Scenario: legacy ID-less compaction remains compatible
+- **WHEN** upstream compact handling returns a compaction item without an `id`
+- **THEN** the normalized output omits `id`
+- **AND** the proxy still emits a valid single-item compact response
 
 #### Scenario: malformed trigger placement is rejected
 - **WHEN** a `POST /backend-api/codex/responses` request contains a duplicated or non-terminal top-level `compaction_trigger` item
