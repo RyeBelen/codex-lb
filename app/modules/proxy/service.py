@@ -30,7 +30,7 @@ from app.core.clients.files import create_file as core_create_file  # noqa: F401
 from app.core.clients.files import finalize_file as core_finalize_file  # noqa: F401
 from app.core.clients.http import lease_http_session as lease_http_session  # noqa: F401
 from app.core.clients.proxy import CodexControlResponse as CodexControlResponse
-from app.core.clients.proxy import (  # noqa: F401
+from app.core.clients.proxy import (  # noqa: F401  # noqa: F401
     ImageFetchSession,
     ProxyResponseError,
     UpstreamProxyRouteTrace,
@@ -226,6 +226,9 @@ from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_prewarm_canary_bucket as _http_bridge_prewarm_canary_bucket,
 )
 from app.modules.proxy._service.http_bridge.helpers import (
+    _http_bridge_request_budget_seconds as _http_bridge_request_budget_seconds,
+)
+from app.modules.proxy._service.http_bridge.helpers import (
     _http_bridge_request_counts_against_queue as _http_bridge_request_counts_against_queue,
 )
 from app.modules.proxy._service.http_bridge.helpers import (
@@ -362,6 +365,9 @@ from app.modules.proxy._service.response_create import (
 )
 from app.modules.proxy._service.response_create import (
     _OVERSIZED_RESPONSE_CREATE_LARGEST_ITEMS as _OVERSIZED_RESPONSE_CREATE_LARGEST_ITEMS,
+)
+from app.modules.proxy._service.response_create import (
+    _RESPONSE_CREATE_COMPATIBILITY_METADATA_HEADERS as _RESPONSE_CREATE_COMPATIBILITY_METADATA_HEADERS,
 )
 from app.modules.proxy._service.response_create import (
     _RESPONSE_CREATE_HISTORY_OMISSION_NOTICE as _RESPONSE_CREATE_HISTORY_OMISSION_NOTICE,
@@ -526,6 +532,9 @@ from app.modules.proxy._service.streaming.helpers import (
     _should_retry_transient_stream_error as _should_retry_transient_stream_error,
 )
 from app.modules.proxy._service.streaming.helpers import (
+    _stream_iterator_after_capacity_admission as _stream_iterator_after_capacity_admission,
+)
+from app.modules.proxy._service.streaming.helpers import (
     _stream_request_budget_seconds as _stream_request_budget_seconds,
 )
 from app.modules.proxy._service.streaming.helpers import (
@@ -637,6 +646,7 @@ from app.modules.proxy._service.websocket.helpers import (
     _pop_matching_websocket_request_states,  # noqa: F401
     _pop_replayable_precreated_websocket_request_state,  # noqa: F401
     _pop_terminal_websocket_request_state,  # noqa: F401
+    _prepare_websocket_request_state_for_account_switch,  # noqa: F401
     _prepare_websocket_request_state_for_auth_replay,  # noqa: F401
     _prepare_websocket_request_state_for_visible_output_replay,  # noqa: F401
     _record_websocket_continuity_completion,  # noqa: F401
@@ -710,7 +720,14 @@ from app.modules.proxy.http_bridge_forwarding import (
 from app.modules.proxy.http_bridge_forwarding import (
     OwnerForwardRelayFailure as OwnerForwardRelayFailure,
 )
-from app.modules.proxy.load_balancer import AccountLease, AccountLeaseKind, AccountSelection, LoadBalancer
+from app.modules.proxy.load_balancer import (
+    AccountConcurrencyCaps,
+    AccountLease,
+    AccountLeaseKind,
+    AccountSelection,
+    LoadBalancer,
+    effective_account_concurrency_caps,
+)
 from app.modules.proxy.repo_bundle import ProxyRepoFactory
 from app.modules.proxy.ring_membership import (
     RingMembershipService,
@@ -1262,13 +1279,26 @@ class ProxyService(
         surface: str = "websocket",
     ) -> None:
         timeout_seconds = _proxy_admission_wait_timeout_seconds()
+        if bridge_session is not None:
+            # Bridged requests retry gate acquisition within the bridge
+            # request budget; a final attempt must not run past it, so each
+            # acquisition wait is clamped to the remaining budget. Retry
+            # states carry the original deadline because their started_at
+            # is reset when they are re-prepared.
+            deadline = request_state.bridge_request_deadline
+            if deadline is None:
+                deadline = request_state.started_at + _http_bridge_request_budget_seconds(get_settings())
+            remaining_budget = deadline - time.monotonic()
+            timeout_seconds = max(0.0, min(timeout_seconds, remaining_budget))
         request_state.response_create_gate = response_create_gate
         request_state.response_create_gate_wait_started_at = time.monotonic()
         if account_id is not None:
+            settings = await get_settings_cache().get()
             request_state.account_response_create_lease = await self._acquire_account_response_create_lease_or_overload(
                 account_id=account_id,
                 request_id=request_state.request_id,
                 surface=surface,
+                concurrency_caps=effective_account_concurrency_caps(settings),
             )
             request_state.account_response_create_release = self._load_balancer.release_account_lease
         try:
@@ -1396,11 +1426,13 @@ class ProxyService(
             else None
         )
         settings = await get_settings_cache().get()
-        single_account_id = (
-            (settings.single_account_id or "").strip() or None
-            if _routing_strategy(settings) == "single_account"
-            else None
-        )
+        if _routing_strategy(settings) == "single_account":
+            selected_account_id = (settings.single_account_id or "").strip()
+            if not selected_account_id:
+                return None
+            if scoped_account_ids is not None and selected_account_id not in scoped_account_ids:
+                return None
+            scoped_account_ids = {selected_account_id}
         selection = await self._load_balancer.select_account(
             sticky_key=affinity.key,
             sticky_kind=affinity.kind,
@@ -1409,10 +1441,10 @@ class ProxyService(
             account_ids=scoped_account_ids,
             prefer_earlier_reset_window=prefer_earlier_reset_window,
             routing_strategy=_routing_strategy(settings),
-            single_account_id=single_account_id,
             budget_threshold_pct=_sticky_reallocation_primary_budget_threshold_pct(settings),
             secondary_budget_threshold_pct=_sticky_reallocation_secondary_budget_threshold_pct(settings),
             traffic_class=traffic_class,
+            concurrency_caps=effective_account_concurrency_caps(settings),
         )
         if selection.account is None:
             return None
@@ -1724,13 +1756,108 @@ class ProxyService(
         try:
             with anyio.fail_after(remaining_budget):
                 settings = await get_settings_cache().get()
+                concurrency_caps = effective_account_concurrency_caps(settings)
+                stream_reserve_slots = (
+                    (
+                        get_settings().proxy_account_stream_recovery_reserve
+                        if getattr(settings, "proxy_account_stream_recovery_reserve", None) is None
+                        else settings.proxy_account_stream_recovery_reserve
+                    )
+                    if lease_kind == "stream" and request_stage != "reattach"
+                    else 0
+                )
                 required_preferred_account = (
                     preferred_account_id is not None and not fallback_on_preferred_account_unavailable
                 )
-                single_account_id: str | None = None
                 if _routing_strategy(settings) == "single_account" and not required_preferred_account:
-                    single_account_id = (settings.single_account_id or "").strip() or None
+                    selected_account_id = (settings.single_account_id or "").strip()
+                    if not selected_account_id:
+                        return AccountSelection(
+                            account=None,
+                            error_message="Single account routing is enabled but no account is selected",
+                            error_code="single_account_not_configured",
+                        )
+                    if selected_account_id in excluded_account_ids_set:
+                        return AccountSelection(
+                            account=None,
+                            error_message="Selected single account is unavailable",
+                            error_code="single_account_unavailable",
+                        )
+                    if scoped_account_ids is not None and selected_account_id not in scoped_account_ids:
+                        return AccountSelection(
+                            account=None,
+                            error_message="Selected single account is outside the API key account scope",
+                            error_code="single_account_scope_mismatch",
+                        )
+                    scoped_account_ids = {selected_account_id}
                     routing_strategy = "single_account"
+                preferred_eligible = (
+                    preferred_account_id is not None
+                    and preferred_account_id not in excluded_account_ids_set
+                    and (scoped_account_ids is None or preferred_account_id in scoped_account_ids)
+                )
+                if preferred_account_id is not None and not preferred_eligible:
+                    logger.warning(
+                        "Proxy preferred account skipped request_id=%s kind=%s request_stage=%s "
+                        "preferred_account_id=%s excluded=%s outside_api_key_scope=%s",
+                        request_id,
+                        kind,
+                        request_stage,
+                        preferred_account_id,
+                        preferred_account_id in excluded_account_ids_set,
+                        scoped_account_ids is not None and preferred_account_id not in scoped_account_ids,
+                    )
+                    if not fallback_on_preferred_account_unavailable:
+                        return AccountSelection(
+                            account=None,
+                            error_message="Preferred account is not available",
+                            error_code="preferred_account_unavailable",
+                        )
+                if preferred_eligible:
+                    preferred_selection = await self._load_balancer.select_account(
+                        sticky_key=sticky_key,
+                        sticky_kind=sticky_kind,
+                        reallocate_sticky=reallocate_sticky,
+                        sticky_max_age_seconds=sticky_max_age_seconds,
+                        prefer_earlier_reset_accounts=prefer_earlier_reset_accounts,
+                        prefer_earlier_reset_window=prefer_earlier_reset_window,
+                        routing_strategy=routing_strategy,
+                        relative_availability_power=_relative_availability_power(settings),
+                        relative_availability_top_k=_relative_availability_top_k(settings),
+                        model=model,
+                        service_tier=service_tier,
+                        additional_limit_name=additional_limit_name,
+                        account_ids={preferred_account_id},
+                        require_security_work_authorized=require_security_work_authorized,
+                        budget_threshold_pct=_sticky_reallocation_primary_budget_threshold_pct(settings),
+                        secondary_budget_threshold_pct=_sticky_reallocation_secondary_budget_threshold_pct(settings),
+                        lease_kind=lease_kind,
+                        estimated_lease_tokens=estimated_lease_tokens,
+                        stream_reserve_slots=stream_reserve_slots,
+                        traffic_class=effective_traffic_class,
+                        concurrency_caps=concurrency_caps,
+                    )
+                    if preferred_selection.account is not None:
+                        logger.info(
+                            "Selected preferred account request_id=%s kind=%s request_stage=%s account_id=%s",
+                            request_id,
+                            kind,
+                            request_stage,
+                            preferred_account_id,
+                        )
+                        return preferred_selection
+                    if not fallback_on_preferred_account_unavailable:
+                        logger.warning(
+                            "Proxy preferred account unavailable request_id=%s kind=%s request_stage=%s "
+                            "preferred_account_id=%s error_code=%s error=%s",
+                            request_id,
+                            kind,
+                            request_stage,
+                            preferred_account_id,
+                            preferred_selection.error_code,
+                            preferred_selection.error_message,
+                        )
+                        return preferred_selection
                 selection = await self._load_balancer.select_account(
                     sticky_key=sticky_key,
                     sticky_kind=sticky_kind,
@@ -1739,7 +1866,6 @@ class ProxyService(
                     prefer_earlier_reset_accounts=prefer_earlier_reset_accounts,
                     prefer_earlier_reset_window=prefer_earlier_reset_window,
                     routing_strategy=routing_strategy,
-                    single_account_id=single_account_id,
                     relative_availability_power=_relative_availability_power(settings),
                     relative_availability_top_k=_relative_availability_top_k(settings),
                     model=model,
@@ -1747,44 +1873,15 @@ class ProxyService(
                     additional_limit_name=additional_limit_name,
                     account_ids=scoped_account_ids,
                     exclude_account_ids=excluded_account_ids_set,
-                    preferred_account_id=preferred_account_id,
-                    require_preferred_account=required_preferred_account,
                     require_security_work_authorized=require_security_work_authorized,
                     budget_threshold_pct=_sticky_reallocation_primary_budget_threshold_pct(settings),
                     secondary_budget_threshold_pct=_sticky_reallocation_secondary_budget_threshold_pct(settings),
                     lease_kind=lease_kind,
                     estimated_lease_tokens=estimated_lease_tokens,
+                    stream_reserve_slots=stream_reserve_slots,
                     traffic_class=effective_traffic_class,
+                    concurrency_caps=concurrency_caps,
                 )
-                if (
-                    selection.account is None
-                    and routing_strategy == "single_account"
-                    and not required_preferred_account
-                ):
-                    if single_account_id is None:
-                        return AccountSelection(
-                            account=None,
-                            error_message="Single account routing is enabled but no account is selected",
-                            error_code="single_account_not_configured",
-                        )
-                    if single_account_id in excluded_account_ids_set:
-                        return AccountSelection(
-                            account=None,
-                            error_message="Selected single account is unavailable",
-                            error_code="single_account_unavailable",
-                        )
-                    if scoped_account_ids is not None and single_account_id not in scoped_account_ids:
-                        return AccountSelection(
-                            account=None,
-                            error_message="Selected single account is outside the API key account scope",
-                            error_code="single_account_scope_mismatch",
-                        )
-                    if selection.error_code is None:
-                        return AccountSelection(
-                            account=None,
-                            error_message="Selected single account is unavailable",
-                            error_code="single_account_unavailable",
-                        )
                 if selection.account is not None and selection.account.id in excluded_account_ids_set:
                     logger.warning(
                         "Proxy account selection returned excluded account request_id=%s kind=%s request_stage=%s "
@@ -1824,10 +1921,12 @@ class ProxyService(
         account_id: str,
         request_id: str,
         surface: str,
+        concurrency_caps: AccountConcurrencyCaps,
     ) -> AccountLease:
         lease = await self._load_balancer.acquire_account_lease(
             account_id,
             kind="response_create",
+            concurrency_caps=concurrency_caps,
         )
         if lease is not None:
             return lease
@@ -1866,21 +1965,35 @@ class ProxyService(
             if api_key is not None and api_key.account_assignment_scope_enabled
             else None
         )
-        single_account_id = (
-            (settings.single_account_id or "").strip() or None
-            if _routing_strategy(settings) == "single_account"
-            else None
-        )
+        if _routing_strategy(settings) == "single_account":
+            selected_account_id = (settings.single_account_id or "").strip()
+            if selected_account_id:
+                scoped_account_ids = (
+                    {selected_account_id}
+                    if scoped_account_ids is None or selected_account_id in scoped_account_ids
+                    else set()
+                )
+            else:
+                scoped_account_ids = set()
         return await self._load_balancer.check_opportunistic_admission(
             model=model,
             account_ids=scoped_account_ids,
             prefer_earlier_reset_accounts=settings.prefer_earlier_reset_accounts,
             prefer_earlier_reset_window=_prefer_earlier_reset_window(settings),
             routing_strategy=_routing_strategy(settings),
-            single_account_id=single_account_id,
             budget_threshold_pct=_sticky_reallocation_primary_budget_threshold_pct(settings),
             secondary_budget_threshold_pct=_sticky_reallocation_secondary_budget_threshold_pct(settings),
             lease_kind=lease_kind,
+            concurrency_caps=effective_account_concurrency_caps(settings),
+            stream_reserve_slots=(
+                (
+                    get_settings().proxy_account_stream_recovery_reserve
+                    if getattr(settings, "proxy_account_stream_recovery_reserve", None) is None
+                    else settings.proxy_account_stream_recovery_reserve
+                )
+                if lease_kind == "stream"
+                else 0
+            ),
         )
 
     async def _handle_proxy_error(self, account: Account, exc: ProxyResponseError) -> None:

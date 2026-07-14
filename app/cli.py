@@ -8,10 +8,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-import anyio
-
 from app.codex_sessions_retag import RetagResult, default_codex_home, retag_codex_sessions
-from app.core.config.settings import get_settings
 
 if TYPE_CHECKING:
     from app.core.runtime_logging import LogConfig
@@ -58,25 +55,6 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="Confirm that Codex/Codex CLI is closed and allow a non-interactive write.",
     )
 
-    request_logs = subparsers.add_parser(
-        "request-logs",
-        help="Manage request-log storage.",
-        formatter_class=_CliHelpFormatter,
-    )
-    request_logs_subparsers = request_logs.add_subparsers(dest="request_logs_command")
-    prune = request_logs_subparsers.add_parser(
-        "prune",
-        help="Roll up and prune old raw request logs. Dry-run by default.",
-        formatter_class=_CliHelpFormatter,
-    )
-    prune.add_argument(
-        "--retention-days",
-        type=int,
-        default=None,
-        help="Raw request-log retention window. Defaults to CODEX_LB_REQUEST_LOG_RETENTION_DAYS.",
-    )
-    prune.add_argument("--apply", action="store_true", help="Write aggregates and delete eligible raw rows.")
-
     parser.add_argument("--host", default=os.getenv("HOST", "127.0.0.1"))
     parser.add_argument("--port", default=os.getenv("PORT", "2455"))
     parser.add_argument("--ssl-certfile", default=os.getenv("SSL_CERTFILE"))
@@ -88,6 +66,17 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
             "Seconds to keep idle HTTP connections open. Codex CLI reuses local "
             "connections for large compact POSTs; short keepalive windows can leave the "
             "client writing to a stale socket before the request reaches the app."
+        ),
+    )
+    parser.add_argument(
+        "--ws-max-size",
+        default=os.getenv("UVICORN_WS_MAX_SIZE", str(128 * 1024 * 1024)),
+        help=(
+            "Maximum decompressed size in bytes of a single incoming websocket message. "
+            "Codex clients resend the full conversation history (inline screenshots "
+            "included) as one response.create message after a reconnect; messages above "
+            "this budget are closed at the protocol layer with 1009 before the "
+            "application-level slimming guard can run."
         ),
     )
 
@@ -102,17 +91,12 @@ def main(argv: Sequence[str] | None = None) -> None:
             _run_codex_sessions_retag(args)
             return
         raise SystemExit("codex-sessions requires a subcommand")
-    if args.command == "request-logs":
-        if args.request_logs_command == "prune":
-            anyio.run(_run_request_logs_prune, args)
-            return
-        raise SystemExit("request-logs requires a subcommand")
-
     if bool(args.ssl_certfile) ^ bool(args.ssl_keyfile):
         raise SystemExit("Both --ssl-certfile and --ssl-keyfile must be provided together.")
 
     port = _parse_server_port(args.port)
     timeout_keep_alive = _parse_server_timeout_keep_alive(args.timeout_keep_alive)
+    ws_max_size = _parse_server_ws_max_size(args.ws_max_size)
     os.environ["PORT"] = str(port)
 
     _load_uvicorn().run(
@@ -122,6 +106,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         ssl_certfile=args.ssl_certfile,
         ssl_keyfile=args.ssl_keyfile,
         timeout_keep_alive=timeout_keep_alive,
+        ws_max_size=ws_max_size,
         log_config=_build_log_config(),
     )
 
@@ -151,6 +136,17 @@ def _parse_server_timeout_keep_alive(raw_timeout: str) -> int:
     except ValueError as exc:
         message = f"--timeout-keep-alive/UVICORN_TIMEOUT_KEEP_ALIVE must be an integer, got {raw_timeout!r}."
         raise SystemExit(message) from exc
+
+
+def _parse_server_ws_max_size(raw_ws_max_size: str) -> int:
+    try:
+        ws_max_size = int(raw_ws_max_size)
+    except ValueError as exc:
+        message = f"--ws-max-size/UVICORN_WS_MAX_SIZE must be an integer, got {raw_ws_max_size!r}."
+        raise SystemExit(message) from exc
+    if ws_max_size <= 0:
+        raise SystemExit(f"--ws-max-size/UVICORN_WS_MAX_SIZE must be positive, got {raw_ws_max_size!r}.")
+    return ws_max_size
 
 
 def _run_codex_sessions_retag(args: argparse.Namespace) -> None:
@@ -212,36 +208,6 @@ def _print_retag_summary(result: RetagResult) -> None:
     print(f"- {action} SQLite rows: {result.sqlite_rows_matched if result.dry_run else result.sqlite_rows_updated}")
     if result.backup_path is not None:
         print(f"- Backup: {result.backup_path}")
-
-
-async def _run_request_logs_prune(args: argparse.Namespace) -> None:
-    from app.db.session import SessionLocal, close_db, init_db
-    from app.modules.request_logs.retention import RequestLogRetentionService
-
-    settings = get_settings()
-    retention_days = args.retention_days if args.retention_days is not None else settings.request_log_retention_days
-    try:
-        await init_db()
-        async with SessionLocal() as session:
-            result = await RequestLogRetentionService(session).run(
-                retention_days=retention_days,
-                dry_run=not args.apply,
-            )
-    except ValueError as exc:
-        raise SystemExit(str(exc)) from exc
-    finally:
-        await close_db()
-
-    action = "Would prune" if result.dry_run else "Pruned"
-    print("")
-    print("Request log retention summary")
-    print(f"- Mode: {'dry-run' if result.dry_run else 'apply'}")
-    print(f"- Retention days: {result.retention_days}")
-    print(f"- Cutoff: {result.cutoff.isoformat()}")
-    print(f"- Eligible raw rows: {result.eligible_rows}")
-    print(f"- Aggregate groups: {result.aggregate_groups}")
-    print(f"- Aggregate rows written: {result.aggregate_rows_written}")
-    print(f"- {action} raw rows: {result.raw_rows_deleted if not result.dry_run else result.eligible_rows}")
 
 
 if __name__ == "__main__":

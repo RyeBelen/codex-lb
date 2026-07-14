@@ -1,13 +1,12 @@
 from __future__ import annotations
 
 import uuid
-from datetime import date, datetime
+from datetime import datetime
 from enum import Enum
 
 from sqlalchemy import (
     BigInteger,
     Boolean,
-    Date,
     DateTime,
     Float,
     ForeignKey,
@@ -72,6 +71,12 @@ class Account(Base):
 
     id: Mapped[str] = mapped_column(String, primary_key=True)
     chatgpt_account_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    # Stable per-seat OpenAI principal identity (chatgpt_user_id / auth sub).
+    # Distinct from chatgpt_account_id, which is the shared Team/Business
+    # WORKSPACE identity. Two seats in one workspace share chatgpt_account_id
+    # but have different chatgpt_user_id. Used to target and verify reauth so
+    # repairing one seat cannot overwrite another seat sharing the workspace.
+    chatgpt_user_id: Mapped[str | None] = mapped_column(String, nullable=True)
     codex_installation_id: Mapped[str] = mapped_column(
         String(36),
         default=new_codex_installation_id,
@@ -160,6 +165,61 @@ class UsageHistory(Base):
     credits_has: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     credits_unlimited: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     credits_balance: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+
+class AccountUsageRollup(Base):
+    """Folded lifetime request-usage sums per account.
+
+    Request-log rows older than the fold watermark (the single
+    ``account_usage_rollup_state`` row) are summed here; account usage
+    summaries add a live aggregate over only the newer request-log tail.
+    Sums are stored unclamped; the ``cached_input_tokens <= input_tokens``
+    clamp applies after merging.
+    """
+
+    __tablename__ = "account_usage_rollups"
+
+    account_id: Mapped[str] = mapped_column(String, ForeignKey("accounts.id", ondelete="CASCADE"), primary_key=True)
+    request_count: Mapped[int] = mapped_column(BigInteger, default=0, server_default=text("0"), nullable=False)
+    input_tokens: Mapped[int] = mapped_column(BigInteger, default=0, server_default=text("0"), nullable=False)
+    output_tokens: Mapped[int] = mapped_column(BigInteger, default=0, server_default=text("0"), nullable=False)
+    cached_input_tokens: Mapped[int] = mapped_column(BigInteger, default=0, server_default=text("0"), nullable=False)
+    total_cost_usd: Mapped[float] = mapped_column(Float, default=0.0, server_default=text("0"), nullable=False)
+
+
+class ApiKeyUsageRollup(Base):
+    """Folded lifetime request-usage sums per API key.
+
+    Governed by the same fold watermark as ``AccountUsageRollup`` (the single
+    ``account_usage_rollup_state`` row); sums use the API-key summary
+    semantics (no dedupe, soft-deleted rows included, warmup kinds excluded).
+    Stored unclamped; the ``cached <= input`` clamp applies after merging
+    with the live tail.
+    """
+
+    __tablename__ = "api_key_usage_rollups"
+
+    api_key_id: Mapped[str] = mapped_column(String, ForeignKey("api_keys.id", ondelete="CASCADE"), primary_key=True)
+    request_count: Mapped[int] = mapped_column(BigInteger, default=0, server_default=text("0"), nullable=False)
+    input_tokens: Mapped[int] = mapped_column(BigInteger, default=0, server_default=text("0"), nullable=False)
+    output_tokens: Mapped[int] = mapped_column(BigInteger, default=0, server_default=text("0"), nullable=False)
+    cached_input_tokens: Mapped[int] = mapped_column(BigInteger, default=0, server_default=text("0"), nullable=False)
+    total_cost_usd: Mapped[float] = mapped_column(Float, default=0.0, server_default=text("0"), nullable=False)
+
+
+class AccountUsageRollupState(Base):
+    """Single-row fold watermark (naive-UTC), seeded by the migration.
+
+    Keeping the watermark on a dedicated always-present row gives fold passes
+    something to ``SELECT ... FOR UPDATE`` even before any rollup rows exist,
+    serializing concurrent backfills, and lets reads fetch sums + watermark in
+    one statement (one snapshot).
+    """
+
+    __tablename__ = "account_usage_rollup_state"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False)
+    folded_through: Mapped[datetime] = mapped_column(DateTime, nullable=False)
 
 
 class AdditionalUsageHistory(Base):
@@ -257,47 +317,6 @@ class RequestLog(Base):
         "ModelSource",
         back_populates="request_logs",
         primaryjoin="foreign(RequestLog.model_source_id) == ModelSource.id",
-    )
-
-
-class RequestLogDailyAggregate(Base):
-    __tablename__ = "request_log_daily_aggregates"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    aggregate_key: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
-    bucket_date: Mapped[date] = mapped_column(Date, nullable=False)
-    api_key_id: Mapped[str | None] = mapped_column(String, nullable=True)
-    account_id: Mapped[str | None] = mapped_column(String, nullable=True)
-    model: Mapped[str] = mapped_column(String, nullable=False)
-    status: Mapped[str] = mapped_column(String, nullable=False)
-    error_code: Mapped[str | None] = mapped_column(String, nullable=True)
-    request_kind: Mapped[str] = mapped_column(String, nullable=False)
-    service_tier: Mapped[str | None] = mapped_column(String, nullable=True)
-    requested_service_tier: Mapped[str | None] = mapped_column(String, nullable=True)
-    actual_service_tier: Mapped[str | None] = mapped_column(String, nullable=True)
-    transport: Mapped[str | None] = mapped_column(String, nullable=True)
-    upstream_transport: Mapped[str | None] = mapped_column(String, nullable=True)
-    source: Mapped[str | None] = mapped_column(String, nullable=True)
-    useragent_group: Mapped[str | None] = mapped_column(String, nullable=True)
-    plan_type: Mapped[str | None] = mapped_column(String, nullable=True)
-    is_deleted: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false(), nullable=False)
-    request_count: Mapped[int] = mapped_column(Integer, nullable=False)
-    error_count: Mapped[int] = mapped_column(Integer, nullable=False)
-    input_tokens: Mapped[int] = mapped_column(Integer, nullable=False)
-    output_tokens: Mapped[int] = mapped_column(Integer, nullable=False)
-    cached_input_tokens: Mapped[int] = mapped_column(Integer, nullable=False)
-    reasoning_tokens: Mapped[int] = mapped_column(Integer, nullable=False)
-    cost_usd: Mapped[float] = mapped_column(Float, nullable=False)
-    latency_ms_sum: Mapped[int] = mapped_column(Integer, nullable=False)
-    latency_ms_count: Mapped[int] = mapped_column(Integer, nullable=False)
-    latency_first_token_ms_sum: Mapped[int] = mapped_column(Integer, nullable=False)
-    latency_first_token_ms_count: Mapped[int] = mapped_column(Integer, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime,
-        server_default=func.now(),
-        onupdate=func.now(),
-        nullable=False,
     )
 
 
@@ -453,6 +472,47 @@ class SchedulerLeader(Base):
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
 
 
+class ResetCreditRedeemRequest(Base):
+    """Durable (account, redeem_request_id) -> credit_id idempotency ledger.
+
+    Written inside the per-account serialized redeem section BEFORE the
+    upstream consume call so a retry carrying the same redeem_request_id —
+    served by ANY replica — resolves to the originally selected credit and
+    never burns a second one. Rows are purged opportunistically after 24h.
+    """
+
+    __tablename__ = "reset_credit_redeem_requests"
+
+    account_id: Mapped[str] = mapped_column(
+        String,
+        ForeignKey("accounts.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    redeem_request_id: Mapped[str] = mapped_column(String, primary_key=True)
+    credit_id: Mapped[str] = mapped_column(String, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+
+
+class ResetCreditRedeemClaim(Base):
+    """Cross-process per-account redeem serialization claim for SQLite.
+
+    A single atomic conditional upsert (INSERT ... ON CONFLICT DO UPDATE ...
+    WHERE expires_at < now) under SQLite's single-writer lock gives real
+    multi-process mutual exclusion; the lease expiry recovers crashed holders.
+    PostgreSQL deployments keep using pg_advisory_xact_lock instead.
+    """
+
+    __tablename__ = "reset_credit_redeem_claims"
+
+    account_id: Mapped[str] = mapped_column(
+        String,
+        ForeignKey("accounts.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    holder_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
 class StickySession(Base):
     __tablename__ = "sticky_sessions"
 
@@ -490,11 +550,29 @@ class DashboardSettings(Base):
         server_default=text("'default'"),
         nullable=False,
     )
+    prohibit_fast_mode: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        server_default=false(),
+        nullable=False,
+    )
     http_downstream_transport_policy: Mapped[str] = mapped_column(
         String,
         default="smart",
         server_default=text("'smart'"),
         nullable=False,
+    )
+    proxy_account_response_create_limit: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
+    )
+    proxy_account_stream_limit: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
+    )
+    proxy_account_stream_recovery_reserve: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
     )
     prefer_earlier_reset_accounts: Mapped[bool] = mapped_column(
         Boolean, default=True, server_default=true(), nullable=False
@@ -653,6 +731,12 @@ class DashboardSettings(Base):
         server_default=text("99.0"),
         nullable=False,
     )
+    limit_warmup_idle_threshold_percent: Mapped[float] = mapped_column(
+        Float,
+        default=1.0,
+        server_default=text("1.0"),
+        nullable=False,
+    )
     limit_warmup_min_available_percent: Mapped[float] = mapped_column(
         Float,
         default=100.0,
@@ -688,6 +772,12 @@ class DashboardSettings(Base):
         server_default=text("'{}'"),
         nullable=False,
     )
+    version: Mapped[int] = mapped_column(
+        Integer,
+        default=1,
+        server_default=text("1"),
+        nullable=False,
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime,
@@ -695,6 +785,25 @@ class DashboardSettings(Base):
         onupdate=func.now(),
         nullable=False,
     )
+
+    __mapper_args__ = {"version_id_col": version}
+
+
+class RuntimeSentinel(Base):
+    """Cross-replica consistency sentinels stamped into the shared database.
+
+    Each row records a value every replica must agree on (for example the
+    encryption-key fingerprint). Rows are written with an atomic
+    insert-if-absent so the first replica to boot wins and later replicas
+    verify against the stored value.
+    """
+
+    __tablename__ = "runtime_sentinels"
+
+    name: Mapped[str] = mapped_column(String(64), primary_key=True)
+    value: Mapped[str] = mapped_column(String(128), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 
 class ApiFirewallAllowlist(Base):
@@ -1291,6 +1400,23 @@ class CacheInvalidation(Base):
     version: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
 
 
+class ModelRegistrySnapshotRecord(Base):
+    """Single-row (id=1) persisted serialization of the refreshed model registry.
+
+    Written by the leader's model refresh cycle and loaded by every replica via
+    the cache-invalidation bus so the catalog stays replica-coherent.
+    """
+
+    __tablename__ = "model_registry_snapshot"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False)
+    schema_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    payload: Mapped[str] = mapped_column(Text, nullable=False)
+    refreshed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    leader_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
+
 class BridgeRingMember(Base):
     __tablename__ = "bridge_ring_members"
 
@@ -1508,16 +1634,6 @@ Index(
     RequestLog.session_id,
     RequestLog.requested_at.desc(),
     RequestLog.id.desc(),
-)
-Index(
-    "idx_request_log_daily_aggregates_date_key",
-    RequestLogDailyAggregate.bucket_date,
-    RequestLogDailyAggregate.api_key_id,
-)
-Index(
-    "idx_request_log_daily_aggregates_account_date",
-    RequestLogDailyAggregate.account_id,
-    RequestLogDailyAggregate.bucket_date,
 )
 Index("idx_sticky_account", StickySession.account_id)
 Index("idx_sticky_kind_updated_at", StickySession.kind, StickySession.updated_at.desc())
