@@ -10,8 +10,9 @@ from sqlalchemy.dialects.sqlite import dialect as sqlite_dialect
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.core.crypto import TokenEncryptor
-from app.db.models import Account, AccountStatus, Base, RequestLog
+from app.db.models import Account, AccountStatus, Base, RequestLog, RequestLogHistoricalFact
 from app.modules.reports.repository import (
+    MISSING_USERAGENT_GROUP,
     DailyReportRangeTooLargeError,
     ReportsRepository,
     _daily_speed_medians_stmt,
@@ -47,6 +48,52 @@ def _make_account(account_id: str, email: str) -> Account:
         last_refresh=datetime.now(timezone.utc).replace(tzinfo=None),
         status=AccountStatus.ACTIVE,
         deactivation_reason=None,
+    )
+
+
+def _make_historical_fact(
+    request_log_id: int,
+    *,
+    account_id: str | None,
+    request_id: str,
+    requested_at: datetime,
+    model: str = "gpt-5.1",
+    useragent_group: str | None = "opencode",
+    request_kind: str = "normal",
+    source: str | None = None,
+    status: str = "success",
+    error_code: str | None = None,
+    input_tokens: int | None = 10,
+    output_tokens: int | None = 4,
+    cached_input_tokens: int | None = 2,
+    reasoning_tokens: int | None = None,
+    cost_usd: float | None = 0.25,
+    latency_ms: int | None = 1100,
+    latency_first_token_ms: int | None = 100,
+) -> RequestLogHistoricalFact:
+    return RequestLogHistoricalFact(
+        request_log_id=request_log_id,
+        account_id=account_id,
+        api_key_id=None,
+        session_id=None,
+        request_id=request_id,
+        requested_at=requested_at,
+        deleted_at=None,
+        model=model,
+        reasoning_effort=None,
+        service_tier=None,
+        source=source,
+        useragent_group=useragent_group,
+        request_kind=request_kind,
+        status=status,
+        error_code=error_code,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        cached_input_tokens=cached_input_tokens,
+        reasoning_tokens=reasoning_tokens,
+        cost_usd=cost_usd,
+        latency_ms=latency_ms,
+        latency_first_token_ms=latency_first_token_ms,
     )
 
 
@@ -228,6 +275,182 @@ async def test_aggregate_daily_rows_calculates_sql_medians_for_odd_even_and_inva
 
 
 @pytest.mark.asyncio
+async def test_mixed_raw_and_historical_facts_preserve_report_filters_distinct_counts_and_medians(
+    async_session: AsyncSession,
+) -> None:
+    repo = ReportsRepository(async_session)
+    account_one = "acc_reports_mixed_one"
+    account_two = "acc_reports_mixed_two"
+    async_session.add_all(
+        [
+            _make_account(account_one, "reports-mixed-one@example.com"),
+            _make_account(account_two, "reports-mixed-two@example.com"),
+            _make_historical_fact(
+                101,
+                account_id=account_one,
+                request_id="mixed-odd-fact-one",
+                requested_at=datetime(2026, 6, 1, 9, 0),
+                latency_first_token_ms=100,
+                latency_ms=1100,
+                output_tokens=4,
+            ),
+            RequestLog(
+                account_id=account_one,
+                request_id="mixed-odd-raw",
+                requested_at=datetime(2026, 6, 1, 10, 0),
+                model="gpt-5.1",
+                useragent_group="opencode",
+                request_kind="normal",
+                status="success",
+                input_tokens=10,
+                output_tokens=8,
+                cached_input_tokens=2,
+                cost_usd=0.25,
+                latency_ms=1200,
+                latency_first_token_ms=200,
+            ),
+            _make_historical_fact(
+                102,
+                account_id=account_two,
+                request_id="mixed-odd-fact-two",
+                requested_at=datetime(2026, 6, 1, 11, 0),
+                status="error",
+                error_code="upstream_error",
+                latency_first_token_ms=300,
+                latency_ms=1300,
+                output_tokens=12,
+            ),
+            _make_historical_fact(
+                103,
+                account_id=account_one,
+                request_id="mixed-even-fact-one",
+                requested_at=datetime(2026, 6, 2, 9, 0),
+                latency_first_token_ms=100,
+                latency_ms=1100,
+                output_tokens=4,
+            ),
+            RequestLog(
+                account_id=account_one,
+                request_id="mixed-even-raw-one",
+                requested_at=datetime(2026, 6, 2, 10, 0),
+                model="gpt-5.1",
+                useragent_group="opencode",
+                request_kind="normal",
+                status="success",
+                input_tokens=10,
+                output_tokens=8,
+                cached_input_tokens=2,
+                cost_usd=0.25,
+                latency_ms=1200,
+                latency_first_token_ms=200,
+            ),
+            _make_historical_fact(
+                104,
+                account_id=account_two,
+                request_id="mixed-even-fact-two",
+                requested_at=datetime(2026, 6, 2, 11, 0),
+                latency_first_token_ms=300,
+                latency_ms=1300,
+                output_tokens=12,
+            ),
+            RequestLog(
+                account_id=account_two,
+                request_id="mixed-even-raw-two",
+                requested_at=datetime(2026, 6, 2, 12, 0),
+                model="gpt-5.1",
+                useragent_group="opencode",
+                request_kind="normal",
+                status="success",
+                input_tokens=10,
+                output_tokens=16,
+                cached_input_tokens=2,
+                cost_usd=0.25,
+                latency_ms=1400,
+                latency_first_token_ms=400,
+            ),
+            _make_historical_fact(
+                105,
+                account_id=account_one,
+                request_id="mixed-filtered-warmup",
+                requested_at=datetime(2026, 6, 1, 12, 0),
+                request_kind="warmup",
+                cost_usd=100.0,
+            ),
+            RequestLog(
+                account_id=account_one,
+                request_id="mixed-filtered-useragent",
+                requested_at=datetime(2026, 6, 1, 13, 0),
+                model="gpt-5.1",
+                useragent_group="CodexCLI",
+                request_kind="normal",
+                status="success",
+                input_tokens=100,
+                output_tokens=100,
+                cached_input_tokens=100,
+                cost_usd=100.0,
+            ),
+        ]
+    )
+    await async_session.commit()
+
+    filters = {
+        "account_ids": [account_one, account_two],
+        "model": "gpt-5.1",
+        "useragent_group": "opencode",
+    }
+    daily = await repo.aggregate_daily_rows(
+        date(2026, 6, 1),
+        date(2026, 6, 2),
+        timezone.utc,
+        **filters,
+    )
+    summary = await repo.aggregate_summary(
+        datetime(2026, 6, 1),
+        datetime(2026, 6, 3),
+        **filters,
+    )
+    by_model = await repo.aggregate_by_model(
+        datetime(2026, 6, 1),
+        datetime(2026, 6, 3),
+        **filters,
+    )
+    by_account = await repo.aggregate_by_account(
+        datetime(2026, 6, 1),
+        datetime(2026, 6, 3),
+        **filters,
+    )
+    by_useragent = await repo.aggregate_by_useragent(
+        datetime(2026, 6, 1),
+        datetime(2026, 6, 3),
+        **filters,
+    )
+    active_accounts = await repo.count_active_accounts(
+        datetime(2026, 6, 1),
+        datetime(2026, 6, 3),
+        **filters,
+    )
+    earliest = await repo.earliest_report_activity_at(**filters)
+
+    assert [(row.date, row.requests, row.active_accounts, row.error_count) for row in daily] == [
+        ("2026-06-01", 3, 2, 1),
+        ("2026-06-02", 4, 2, 0),
+    ]
+    assert [(row.median_ttft_ms, row.median_tps) for row in daily] == [(200.0, 8.0), (250.0, 10.0)]
+    assert summary.total_requests == 7
+    assert summary.total_errors == 1
+    assert summary.active_accounts == 2
+    assert summary.total_cost_usd == 1.75
+    assert [(row.model, row.request_count, row.cost_usd) for row in by_model] == [("gpt-5.1", 7, 1.75)]
+    assert [(row.account_id, row.request_count, row.cost_usd) for row in by_account] == [
+        (account_one, 4, 1.0),
+        (account_two, 3, 0.75),
+    ]
+    assert [(row.useragent_group, row.request_count, row.cost_usd) for row in by_useragent] == [("opencode", 7, 1.75)]
+    assert active_accounts == 2
+    assert earliest == datetime(2026, 6, 1, 9, 0)
+
+
+@pytest.mark.asyncio
 async def test_aggregate_daily_rows_speed_medians_preserve_filters_and_timezone_buckets(
     async_session: AsyncSession,
 ) -> None:
@@ -309,6 +532,85 @@ async def test_aggregate_daily_rows_speed_medians_preserve_filters_and_timezone_
     ]
 
 
+@pytest.mark.parametrize(
+    ("timezone_name", "report_date", "day_start", "day_end"),
+    [
+        (
+            "America/New_York",
+            date(2026, 3, 8),
+            datetime(2026, 3, 8, 5, 0),
+            datetime(2026, 3, 9, 4, 0),
+        ),
+        (
+            "Asia/Kathmandu",
+            date(2026, 6, 1),
+            datetime(2026, 5, 31, 18, 15),
+            datetime(2026, 6, 1, 18, 15),
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_mixed_history_uses_exact_dst_and_non_hour_local_day_boundaries(
+    async_session: AsyncSession,
+    timezone_name: str,
+    report_date: date,
+    day_start: datetime,
+    day_end: datetime,
+) -> None:
+    repo = ReportsRepository(async_session)
+    account_id = f"acc_reports_timezone_{timezone_name.replace('/', '_')}"
+    async_session.add(_make_account(account_id, f"{timezone_name.replace('/', '-')}@example.com"))
+    async_session.add_all(
+        [
+            _make_historical_fact(
+                201,
+                account_id=account_id,
+                request_id="timezone-fact-at-start",
+                requested_at=day_start,
+            ),
+            RequestLog(
+                account_id=account_id,
+                request_id="timezone-raw-before-end",
+                requested_at=day_end - timedelta(microseconds=1),
+                model="gpt-5.1",
+                request_kind="normal",
+                status="success",
+                input_tokens=10,
+                output_tokens=4,
+                cached_input_tokens=2,
+                cost_usd=0.25,
+            ),
+            _make_historical_fact(
+                202,
+                account_id=account_id,
+                request_id="timezone-fact-before-start",
+                requested_at=day_start - timedelta(microseconds=1),
+            ),
+            RequestLog(
+                account_id=account_id,
+                request_id="timezone-raw-at-end",
+                requested_at=day_end,
+                model="gpt-5.1",
+                request_kind="normal",
+                status="success",
+                input_tokens=10,
+                output_tokens=4,
+                cached_input_tokens=2,
+                cost_usd=0.25,
+            ),
+        ]
+    )
+    await async_session.commit()
+
+    rows = await repo.aggregate_daily_rows(
+        report_date,
+        report_date,
+        ZoneInfo(timezone_name),
+    )
+
+    assert [(row.date, row.requests, row.cost_usd) for row in rows] == [(report_date.isoformat(), 2, 0.5)]
+
+
 @pytest.mark.asyncio
 async def test_daily_speed_medians_stmt_returns_only_one_row_per_populated_day_at_high_cardinality(
     async_session: AsyncSession,
@@ -359,6 +661,9 @@ def test_daily_speed_medians_stmt_compiles_to_portable_window_sql() -> None:
         assert "count(*) over" in sql
         assert "group by daily_ttft_ranks.report_date" in sql
         assert "group by daily_tps_ranks.report_date" in sql
+        assert "request_log_historical_facts" in sql
+        assert "request_logs" in sql
+        assert "union all" in sql
         assert "percentile_cont" not in sql
 
 
@@ -530,7 +835,8 @@ async def test_aggregate_by_useragent_separates_real_unknown_from_missing_groups
                 cached_input_tokens=0,
                 cost_usd=0.3,
             ),
-            RequestLog(
+            _make_historical_fact(
+                301,
                 account_id="acc_reports_useragents",
                 request_id="report-useragent-real-unknown",
                 requested_at=datetime(2026, 6, 1, 13, 30, tzinfo=timezone.utc).replace(tzinfo=None),
@@ -554,7 +860,8 @@ async def test_aggregate_by_useragent_separates_real_unknown_from_missing_groups
                 cached_input_tokens=0,
                 cost_usd=0.2,
             ),
-            RequestLog(
+            _make_historical_fact(
+                302,
                 account_id="acc_reports_useragents",
                 request_id="report-useragent-null",
                 requested_at=datetime(2026, 6, 1, 15, 0, tzinfo=timezone.utc).replace(tzinfo=None),
@@ -574,6 +881,16 @@ async def test_aggregate_by_useragent_separates_real_unknown_from_missing_groups
         datetime(2026, 6, 1, 0, 0),
         datetime(2026, 6, 2, 0, 0),
     )
+    missing_rows = await repo.aggregate_by_useragent(
+        datetime(2026, 6, 1, 0, 0),
+        datetime(2026, 6, 2, 0, 0),
+        useragent_group=MISSING_USERAGENT_GROUP,
+    )
+    unknown_rows = await repo.aggregate_by_useragent(
+        datetime(2026, 6, 1, 0, 0),
+        datetime(2026, 6, 2, 0, 0),
+        useragent_group="Unknown",
+    )
 
     assert [(row.useragent_group, row.cost_usd, row.request_count) for row in rows] == [
         ("opencode", 0.5, 1),
@@ -581,3 +898,7 @@ async def test_aggregate_by_useragent_separates_real_unknown_from_missing_groups
         ("CodexCLI", 0.3, 1),
         ("Missing User-Agent", 0.1, 1),
     ]
+    assert [(row.useragent_group, row.cost_usd, row.request_count) for row in missing_rows] == [
+        ("Missing User-Agent", 0.1, 1)
+    ]
+    assert [(row.useragent_group, row.cost_usd, row.request_count) for row in unknown_rows] == [("Unknown", 0.4, 1)]
