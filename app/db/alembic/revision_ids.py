@@ -27,6 +27,12 @@ OLD_TO_NEW_REVISION_MAP: dict[str, str] = {
     ),
     "20260410_020000_restore_import_without_overwrite_default_false": "20260409_020000_fix_http_bridge_last_seen_index",
     "20260525_000000_merge_routing_settings_security_heads": "20260513_000000_add_accounts_alias",
+    # The production fork briefly shipped a daily request-log aggregate
+    # branch. Remap its deployed head to the last shared upstream ancestor;
+    # the compatibility migration imports its pruned lifetime totals.
+    "20260702_000000_add_request_log_daily_aggregates": "20260626_010000_add_request_logs_upstream_transport",
+    "20260711_000000_merge_daily_aggregates_and_ttft_heads": "20260709_000000_add_ttft_phase_observability",
+    "20260714_000000_harden_request_log_rollup_parity": "20260709_000000_add_ttft_phase_observability",
 }
 
 NEW_TO_OLD_REVISION_MAP: dict[str, str] = {new: old for old, new in OLD_TO_NEW_REVISION_MAP.items()}
