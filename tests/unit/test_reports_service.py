@@ -76,6 +76,7 @@ async def test_get_reports_serializes_useragent_breakdown_and_model_request_coun
                     error_count=0,
                     median_ttft_ms=123.456,
                     median_tps=78.901,
+                    history_resolution="exact",
                 )
             ]
         ),
@@ -87,6 +88,14 @@ async def test_get_reports_serializes_useragent_breakdown_and_model_request_coun
             return_value=[SimpleNamespace(useragent_group="opencode", cost_usd=1.2, request_count=2)]
         ),
         earliest_report_activity_at=AsyncMock(return_value=datetime(2026, 5, 1, 0, 0, 0)),
+        legacy_coverage=AsyncMock(
+            return_value=SimpleNamespace(
+                start_date=date(2026, 4, 24),
+                end_date=date(2026, 6, 11),
+                aggregate_rows=1043,
+                request_count=23080,
+            )
+        ),
     )
     service = ReportsService(cast(ReportsRepository, repo))
 
@@ -102,6 +111,7 @@ async def test_get_reports_serializes_useragent_breakdown_and_model_request_coun
         None,
         None,
         "opencode",
+        include_legacy=True,
     )
     repo.aggregate_daily_rows.assert_awaited_once_with(
         date(2026, 6, 1),
@@ -110,6 +120,7 @@ async def test_get_reports_serializes_useragent_breakdown_and_model_request_coun
         None,
         None,
         "opencode",
+        include_legacy=True,
     )
     repo.aggregate_by_model.assert_awaited_once_with(
         datetime(2026, 6, 1, 0, 0, 0),
@@ -117,6 +128,7 @@ async def test_get_reports_serializes_useragent_breakdown_and_model_request_coun
         None,
         None,
         "opencode",
+        include_legacy=True,
     )
     repo.aggregate_by_account.assert_awaited_once_with(
         datetime(2026, 6, 1, 0, 0, 0),
@@ -124,6 +136,7 @@ async def test_get_reports_serializes_useragent_breakdown_and_model_request_coun
         None,
         None,
         "opencode",
+        include_legacy=True,
     )
     repo.aggregate_by_useragent.assert_awaited_once_with(
         datetime(2026, 6, 1, 0, 0, 0),
@@ -131,8 +144,14 @@ async def test_get_reports_serializes_useragent_breakdown_and_model_request_coun
         None,
         None,
         "opencode",
+        include_legacy=True,
     )
-    repo.earliest_report_activity_at.assert_awaited_once_with(None, None, "opencode")
+    repo.earliest_report_activity_at.assert_awaited_once_with(
+        None,
+        None,
+        "opencode",
+        include_legacy=True,
+    )
 
     assert result.daily[0].median_ttft_ms == 123.46
     assert result.daily[0].median_tps == 78.9
@@ -141,3 +160,48 @@ async def test_get_reports_serializes_useragent_breakdown_and_model_request_coun
     assert result.by_useragent[0].useragent == "opencode"
     assert result.by_useragent[0].requests == 2
     assert result.by_useragent[0].percentage == 100.0
+    assert result.legacy_coverage.available is True
+    assert result.legacy_coverage.included is True
+    assert result.legacy_coverage.request_count == 23080
+
+
+@pytest.mark.asyncio
+async def test_get_reports_advertises_but_excludes_legacy_history_outside_utc() -> None:
+    empty_summary = SimpleNamespace(
+        total_cost_usd=0.0,
+        total_input_tokens=0,
+        total_output_tokens=0,
+        total_cached_tokens=0,
+        total_requests=0,
+        total_errors=0,
+        active_accounts=0,
+    )
+    repo = SimpleNamespace(
+        aggregate_summary=AsyncMock(side_effect=[empty_summary, empty_summary]),
+        aggregate_daily_rows=AsyncMock(return_value=[]),
+        aggregate_by_model=AsyncMock(return_value=[]),
+        aggregate_by_account=AsyncMock(return_value=[]),
+        aggregate_by_useragent=AsyncMock(return_value=[]),
+        earliest_report_activity_at=AsyncMock(return_value=None),
+        legacy_coverage=AsyncMock(
+            return_value=SimpleNamespace(
+                start_date=date(2026, 4, 24),
+                end_date=date(2026, 6, 11),
+                aggregate_rows=1043,
+                request_count=23080,
+            )
+        ),
+    )
+    service = ReportsService(cast(ReportsRepository, repo))
+
+    result = await service.get_reports(
+        start_date=date(2026, 4, 24),
+        end_date=date(2026, 6, 11),
+        report_timezone="Asia/Manila",
+    )
+
+    assert repo.aggregate_summary.await_args_list[0].kwargs["include_legacy"] is False
+    assert repo.aggregate_daily_rows.await_args.kwargs["include_legacy"] is False
+    assert result.legacy_coverage.available is True
+    assert result.legacy_coverage.overlaps_selected_range is True
+    assert result.legacy_coverage.included is False

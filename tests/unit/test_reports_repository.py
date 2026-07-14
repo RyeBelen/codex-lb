@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from datetime import date, datetime, timedelta, timezone
+from typing import TypedDict
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -10,7 +11,14 @@ from sqlalchemy.dialects.sqlite import dialect as sqlite_dialect
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.core.crypto import TokenEncryptor
-from app.db.models import Account, AccountStatus, Base, RequestLog, RequestLogHistoricalFact
+from app.db.models import (
+    Account,
+    AccountStatus,
+    Base,
+    RequestLog,
+    RequestLogHistoricalFact,
+    RequestLogLegacyDailyAggregate,
+)
 from app.modules.reports.repository import (
     MISSING_USERAGENT_GROUP,
     DailyReportRangeTooLargeError,
@@ -19,6 +27,12 @@ from app.modules.reports.repository import (
 )
 
 pytestmark = pytest.mark.unit
+
+
+class _ReportFilters(TypedDict):
+    account_ids: list[str]
+    model: str
+    useragent_group: str
 
 
 @pytest.fixture
@@ -94,6 +108,64 @@ def _make_historical_fact(
         cost_usd=cost_usd,
         latency_ms=latency_ms,
         latency_first_token_ms=latency_first_token_ms,
+    )
+
+
+def _make_legacy_aggregate(
+    aggregate_key: str,
+    *,
+    bucket_date: date,
+    account_id: str | None,
+    model: str = "gpt-5.1",
+    useragent_group: str | None = "opencode",
+    request_kind: str = "normal",
+    source: str | None = None,
+    status: str = "success",
+    request_count: int = 3,
+    error_count: int = 0,
+    input_tokens: int = 30,
+    output_tokens: int = 12,
+    cached_input_tokens: int = 6,
+    cost_usd: float = 0.75,
+) -> RequestLogLegacyDailyAggregate:
+    return RequestLogLegacyDailyAggregate(
+        aggregate_key=aggregate_key,
+        bucket_date=bucket_date,
+        api_key_id=None,
+        account_id=account_id,
+        model=model,
+        status=status,
+        error_code=None,
+        request_kind=request_kind,
+        service_tier=None,
+        requested_service_tier=None,
+        actual_service_tier=None,
+        transport="http",
+        upstream_transport="http",
+        source=source,
+        useragent_group=useragent_group,
+        plan_type="plus",
+        is_deleted=False,
+        request_count=request_count,
+        error_count=error_count,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        effective_output_tokens=output_tokens,
+        cached_input_tokens=cached_input_tokens,
+        reasoning_tokens=0,
+        cost_usd=cost_usd,
+        cost_microdollars=round(cost_usd * 1_000_000),
+        account_request_count=request_count,
+        account_input_tokens=input_tokens,
+        account_output_tokens=output_tokens,
+        account_cached_input_tokens=cached_input_tokens,
+        account_cost_usd=cost_usd,
+        latency_ms_sum=0,
+        latency_ms_count=0,
+        latency_first_token_ms_sum=0,
+        latency_first_token_ms_count=0,
+        source_snapshot_sha256="a" * 64,
+        source_row_sha256="b" * 64,
     )
 
 
@@ -393,7 +465,7 @@ async def test_mixed_raw_and_historical_facts_preserve_report_filters_distinct_c
     )
     await async_session.commit()
 
-    filters = {
+    filters: _ReportFilters = {
         "account_ids": [account_one, account_two],
         "model": "gpt-5.1",
         "useragent_group": "opencode",
@@ -902,3 +974,164 @@ async def test_aggregate_by_useragent_separates_real_unknown_from_missing_groups
         ("Missing User-Agent", 0.1, 1)
     ]
     assert [(row.useragent_group, row.cost_usd, row.request_count) for row in unknown_rows] == [("Unknown", 0.4, 1)]
+
+
+@pytest.mark.asyncio
+async def test_legacy_utc_history_merges_additive_reports_without_double_counting_accounts(
+    async_session: AsyncSession,
+) -> None:
+    repo = ReportsRepository(async_session)
+    async_session.add(_make_account("acc_legacy_reports", "legacy-reports@example.com"))
+    async_session.add_all(
+        [
+            _make_legacy_aggregate(
+                "legacy-april",
+                bucket_date=date(2026, 4, 24),
+                account_id="acc_legacy_reports",
+                request_count=3,
+                input_tokens=30,
+                output_tokens=12,
+                cached_input_tokens=6,
+                cost_usd=0.75,
+            ),
+            _make_historical_fact(
+                9001,
+                account_id="acc_legacy_reports",
+                request_id="exact-june",
+                requested_at=datetime(2026, 6, 12, 12, 0),
+                input_tokens=10,
+                output_tokens=4,
+                cached_input_tokens=2,
+                cost_usd=0.25,
+            ),
+        ]
+    )
+    await async_session.commit()
+
+    exact_only = await repo.aggregate_summary(
+        datetime(2026, 4, 24),
+        datetime(2026, 6, 13),
+    )
+    combined = await repo.aggregate_summary(
+        datetime(2026, 4, 24),
+        datetime(2026, 6, 13),
+        include_legacy=True,
+    )
+
+    assert exact_only.total_requests == 1
+    assert combined.total_requests == 4
+    assert combined.total_input_tokens == 40
+    assert combined.total_output_tokens == 16
+    assert combined.total_cached_tokens == 8
+    assert combined.total_cost_usd == pytest.approx(1.0)
+    assert combined.active_accounts == 1
+
+    by_model = await repo.aggregate_by_model(
+        datetime(2026, 4, 24),
+        datetime(2026, 6, 13),
+        include_legacy=True,
+    )
+    by_account = await repo.aggregate_by_account(
+        datetime(2026, 4, 24),
+        datetime(2026, 6, 13),
+        include_legacy=True,
+    )
+    by_useragent = await repo.aggregate_by_useragent(
+        datetime(2026, 4, 24),
+        datetime(2026, 6, 13),
+        include_legacy=True,
+    )
+
+    assert [(row.model, row.request_count, row.cost_usd) for row in by_model] == [("gpt-5.1", 4, 1.0)]
+    assert [(row.account_id, row.request_count, row.cost_usd) for row in by_account] == [("acc_legacy_reports", 4, 1.0)]
+    assert [(row.useragent_group, row.request_count, row.cost_usd) for row in by_useragent] == [("opencode", 4, 1.0)]
+
+
+@pytest.mark.asyncio
+async def test_legacy_daily_rows_are_explicitly_aggregate_only(
+    async_session: AsyncSession,
+) -> None:
+    repo = ReportsRepository(async_session)
+    async_session.add(_make_account("acc_legacy_daily", "legacy-daily@example.com"))
+    async_session.add(
+        _make_legacy_aggregate(
+            "legacy-daily",
+            bucket_date=date(2026, 4, 24),
+            account_id="acc_legacy_daily",
+        )
+    )
+    await async_session.commit()
+
+    excluded = await repo.aggregate_daily_rows(
+        date(2026, 4, 24),
+        date(2026, 4, 24),
+        timezone.utc,
+    )
+    included = await repo.aggregate_daily_rows(
+        date(2026, 4, 24),
+        date(2026, 4, 24),
+        timezone.utc,
+        include_legacy=True,
+    )
+    coverage = await repo.legacy_coverage()
+
+    assert excluded == []
+    assert len(included) == 1
+    assert included[0].date == "2026-04-24"
+    assert included[0].requests == 3
+    assert included[0].history_resolution == "legacy_aggregate"
+    assert included[0].median_ttft_ms is None
+    assert included[0].median_tps is None
+    assert coverage.start_date == date(2026, 4, 24)
+    assert coverage.end_date == date(2026, 4, 24)
+    assert coverage.aggregate_rows == 1
+    assert coverage.request_count == 3
+
+
+@pytest.mark.asyncio
+async def test_legacy_report_filters_keep_warmups_and_blank_useragents_out(
+    async_session: AsyncSession,
+) -> None:
+    repo = ReportsRepository(async_session)
+    async_session.add(_make_account("acc_legacy_filters", "legacy-filters@example.com"))
+    async_session.add_all(
+        [
+            _make_legacy_aggregate(
+                "legacy-visible",
+                bucket_date=date(2026, 4, 24),
+                account_id="acc_legacy_filters",
+                useragent_group=None,
+            ),
+            _make_legacy_aggregate(
+                "legacy-warmup",
+                bucket_date=date(2026, 4, 24),
+                account_id="acc_legacy_filters",
+                request_kind="warmup",
+                source="limit_warmup",
+                request_count=99,
+            ),
+            _make_legacy_aggregate(
+                "legacy-blank-useragent",
+                bucket_date=date(2026, 4, 24),
+                account_id="acc_legacy_filters",
+                useragent_group="",
+                cost_usd=0.5,
+            ),
+        ]
+    )
+    await async_session.commit()
+
+    summary = await repo.aggregate_summary(
+        datetime(2026, 4, 24),
+        datetime(2026, 4, 25),
+        include_legacy=True,
+    )
+    missing_useragent = await repo.aggregate_by_useragent(
+        datetime(2026, 4, 24),
+        datetime(2026, 4, 25),
+        useragent_group=MISSING_USERAGENT_GROUP,
+        include_legacy=True,
+    )
+
+    assert summary.total_requests == 6
+    assert [(row.useragent_group, row.request_count) for row in missing_useragent] == [(MISSING_USERAGENT_GROUP, 3)]

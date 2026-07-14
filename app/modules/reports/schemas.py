@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import Field
 
 from app.modules.shared.schemas import DashboardModel
@@ -14,8 +16,21 @@ class DailyReportRow(DashboardModel):
     cost_usd: float
     active_accounts: int
     error_count: int = 0
-    median_ttft_ms: float = 0.0
-    median_tps: float = 0.0
+    median_ttft_ms: float | None = 0.0
+    median_tps: float | None = 0.0
+    history_resolution: Literal["exact", "legacy_aggregate"] = "exact"
+
+
+class LegacyReportCoverage(DashboardModel):
+    available: bool = False
+    included: bool = False
+    overlaps_selected_range: bool = False
+    bucket_timezone: Literal["UTC"] = "UTC"
+    start_date: str | None = None
+    end_date: str | None = None
+    aggregate_rows: int = 0
+    request_count: int = 0
+    unsupported_metrics: list[str] = Field(default_factory=list)
 
 
 class ModelCostEntry(DashboardModel):
@@ -69,3 +84,4 @@ class ReportsResponse(DashboardModel):
     by_model: list[ModelCostEntry] = Field(default_factory=list)
     by_account: list[AccountCostEntry] = Field(default_factory=list)
     by_useragent: list[UserAgentCostEntry] = Field(default_factory=list)
+    legacy_coverage: LegacyReportCoverage = Field(default_factory=LegacyReportCoverage)

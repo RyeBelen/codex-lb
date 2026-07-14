@@ -8,6 +8,7 @@ from app.modules.reports.repository import MAX_DAILY_REPORT_DAYS, DailyReportRan
 from app.modules.reports.schemas import (
     AccountCostEntry,
     DailyReportRow,
+    LegacyReportCoverage,
     ModelCostEntry,
     ReportComparison,
     ReportComparisonPrevious,
@@ -31,6 +32,7 @@ class ReportsService:
         useragent_group: str | None = None,
     ) -> ReportsResponse:
         timezone_info = _resolve_timezone(report_timezone)
+        include_legacy = _is_utc_timezone(timezone_info)
         now = utcnow().replace(tzinfo=timezone.utc).astimezone(timezone_info)
         if end_date is None:
             end_date = now.date()
@@ -48,15 +50,35 @@ class ReportsService:
         previous_start_at = _local_midnight_to_utc_naive(previous_start_date, timezone_info)
         previous_end_at = _local_midnight_to_utc_naive(previous_end_date + timedelta(days=1), timezone_info)
 
-        summary = await self._repository.aggregate_summary(start_at, end_at, account_ids, model, useragent_group)
+        legacy_coverage_row = await self._repository.legacy_coverage()
+        overlaps_selected_range = (
+            legacy_coverage_row.start_date is not None
+            and legacy_coverage_row.end_date is not None
+            and legacy_coverage_row.start_date <= end_date
+            and legacy_coverage_row.end_date >= start_date
+        )
+        summary = await self._repository.aggregate_summary(
+            start_at,
+            end_at,
+            account_ids,
+            model,
+            useragent_group,
+            include_legacy=include_legacy,
+        )
         previous_summary = await self._repository.aggregate_summary(
             previous_start_at,
             previous_end_at,
             account_ids,
             model,
             useragent_group,
+            include_legacy=include_legacy,
         )
-        earliest_activity_at = await self._repository.earliest_report_activity_at(account_ids, model, useragent_group)
+        earliest_activity_at = await self._repository.earliest_report_activity_at(
+            account_ids,
+            model,
+            useragent_group,
+            include_legacy=include_legacy,
+        )
         daily_rows = await self._repository.aggregate_daily_rows(
             start_date,
             end_date,
@@ -64,6 +86,7 @@ class ReportsService:
             account_ids,
             model,
             useragent_group,
+            include_legacy=include_legacy,
         )
         daily = [
             DailyReportRow(
@@ -75,19 +98,35 @@ class ReportsService:
                 cost_usd=round(row.cost_usd, 4),
                 active_accounts=row.active_accounts,
                 error_count=row.error_count,
-                median_ttft_ms=round(row.median_ttft_ms, 2),
-                median_tps=round(row.median_tps, 2),
+                median_ttft_ms=round(row.median_ttft_ms, 2) if row.median_ttft_ms is not None else None,
+                median_tps=round(row.median_tps, 2) if row.median_tps is not None else None,
+                history_resolution=row.history_resolution,
             )
             for row in daily_rows
         ]
-        by_model = await self._repository.aggregate_by_model(start_at, end_at, account_ids, model, useragent_group)
-        by_account = await self._repository.aggregate_by_account(start_at, end_at, account_ids, model, useragent_group)
+        by_model = await self._repository.aggregate_by_model(
+            start_at,
+            end_at,
+            account_ids,
+            model,
+            useragent_group,
+            include_legacy=include_legacy,
+        )
+        by_account = await self._repository.aggregate_by_account(
+            start_at,
+            end_at,
+            account_ids,
+            model,
+            useragent_group,
+            include_legacy=include_legacy,
+        )
         by_useragent = await self._repository.aggregate_by_useragent(
             start_at,
             end_at,
             account_ids,
             model,
             useragent_group,
+            include_legacy=include_legacy,
         )
 
         day_count = max((end_at.date() - start_at.date()).days, 1)
@@ -144,6 +183,24 @@ class ReportsService:
                 )
                 for u in by_useragent
             ],
+            legacy_coverage=LegacyReportCoverage(
+                available=legacy_coverage_row.aggregate_rows > 0,
+                included=include_legacy and overlaps_selected_range,
+                overlaps_selected_range=overlaps_selected_range,
+                start_date=(legacy_coverage_row.start_date.isoformat() if legacy_coverage_row.start_date else None),
+                end_date=(legacy_coverage_row.end_date.isoformat() if legacy_coverage_row.end_date else None),
+                aggregate_rows=legacy_coverage_row.aggregate_rows,
+                request_count=legacy_coverage_row.request_count,
+                unsupported_metrics=[
+                    "request_detail",
+                    "response_ownership",
+                    "median_ttft_ms",
+                    "median_tps",
+                    "non_utc_daily_buckets",
+                ]
+                if legacy_coverage_row.aggregate_rows > 0
+                else [],
+            ),
         )
 
 
@@ -154,6 +211,12 @@ def _resolve_timezone(timezone_name: str | None) -> ZoneInfo | timezone:
         return ZoneInfo(timezone_name)
     except (ValueError, ZoneInfoNotFoundError):
         return timezone.utc
+
+
+def _is_utc_timezone(timezone_info: ZoneInfo | timezone) -> bool:
+    winter = datetime(2026, 1, 1, tzinfo=timezone_info).utcoffset()
+    summer = datetime(2026, 7, 1, tzinfo=timezone_info).utcoffset()
+    return winter == timedelta(0) and summer == timedelta(0)
 
 
 def _local_midnight_to_utc_naive(value: date, timezone_info: ZoneInfo | timezone) -> datetime:

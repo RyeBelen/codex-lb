@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 import pytest
 
 from app.core.crypto import TokenEncryptor
-from app.db.models import Account, AccountStatus, RequestLog
+from app.db.models import Account, AccountStatus, RequestLog, RequestLogLegacyDailyAggregate
 from app.db.session import SessionLocal
 
 pytestmark = pytest.mark.integration
@@ -28,6 +28,114 @@ def _make_account(account_id: str, email: str) -> Account:
 
 def _naive_utc(value: datetime) -> datetime:
     return value.replace(tzinfo=None)
+
+
+def _legacy_report_aggregate() -> RequestLogLegacyDailyAggregate:
+    return RequestLogLegacyDailyAggregate(
+        aggregate_key="legacy-report-api",
+        bucket_date=date(2026, 4, 24),
+        api_key_id=None,
+        account_id="acc_reports_legacy",
+        model="gpt-5.1",
+        status="success",
+        error_code=None,
+        request_kind="normal",
+        service_tier=None,
+        requested_service_tier=None,
+        actual_service_tier=None,
+        transport="http",
+        upstream_transport="http",
+        source=None,
+        useragent_group="CodexCLI",
+        plan_type="plus",
+        is_deleted=False,
+        request_count=3,
+        error_count=0,
+        input_tokens=30,
+        output_tokens=12,
+        effective_output_tokens=12,
+        cached_input_tokens=6,
+        reasoning_tokens=0,
+        cost_usd=0.75,
+        cost_microdollars=750_000,
+        account_request_count=3,
+        account_input_tokens=30,
+        account_output_tokens=12,
+        account_cached_input_tokens=6,
+        account_cost_usd=0.75,
+        latency_ms_sum=0,
+        latency_ms_count=0,
+        latency_first_token_ms_sum=0,
+        latency_first_token_ms_count=0,
+        source_snapshot_sha256="a" * 64,
+        source_row_sha256="b" * 64,
+    )
+
+
+async def test_reports_api_requires_utc_to_include_legacy_aggregate_history(async_client, db_setup):
+    async with SessionLocal() as session:
+        session.add(_make_account("acc_reports_legacy", "reports-legacy@example.com"))
+        session.add(_legacy_report_aggregate())
+        await session.commit()
+
+    local_response = await async_client.get(
+        "/api/reports",
+        params={
+            "start_date": "2026-04-24",
+            "end_date": "2026-04-24",
+            "timezone": "Asia/Manila",
+        },
+    )
+    utc_response = await async_client.get(
+        "/api/reports",
+        params={
+            "start_date": "2026-04-24",
+            "end_date": "2026-04-24",
+            "timezone": "UTC",
+        },
+    )
+
+    assert local_response.status_code == 200
+    local_payload = local_response.json()
+    assert local_payload["summary"]["totalRequests"] == 0
+    assert local_payload["legacyCoverage"] == {
+        "available": True,
+        "included": False,
+        "overlapsSelectedRange": True,
+        "bucketTimezone": "UTC",
+        "startDate": "2026-04-24",
+        "endDate": "2026-04-24",
+        "aggregateRows": 1,
+        "requestCount": 3,
+        "unsupportedMetrics": [
+            "request_detail",
+            "response_ownership",
+            "median_ttft_ms",
+            "median_tps",
+            "non_utc_daily_buckets",
+        ],
+    }
+
+    assert utc_response.status_code == 200
+    utc_payload = utc_response.json()
+    assert utc_payload["summary"]["totalRequests"] == 3
+    assert utc_payload["summary"]["totalCostUsd"] == 0.75
+    assert utc_payload["legacyCoverage"]["included"] is True
+    assert utc_payload["daily"] == [
+        {
+            "date": "2026-04-24",
+            "requests": 3,
+            "inputTokens": 30,
+            "outputTokens": 12,
+            "cachedInputTokens": 6,
+            "costUsd": 0.75,
+            "activeAccounts": 1,
+            "errorCount": 0,
+            "medianTtftMs": None,
+            "medianTps": None,
+            "historyResolution": "legacy_aggregate",
+        }
+    ]
 
 
 async def test_reports_api_returns_null_account_bucket(async_client, db_setup):
@@ -84,6 +192,7 @@ async def test_reports_api_returns_null_account_bucket(async_client, db_setup):
             "outputTokens": 5,
             "medianTtftMs": 0.0,
             "medianTps": 0.0,
+            "historyResolution": "exact",
         }
     ]
     assert payload["byAccount"] == [
@@ -171,6 +280,7 @@ async def test_reports_api_includes_preserved_deleted_account_history(async_clie
             "outputTokens": 7,
             "medianTtftMs": 0.0,
             "medianTps": 0.0,
+            "historyResolution": "exact",
         }
     ]
     assert payload["byModel"] == [{"model": "gpt-5.1", "costUsd": 0.42, "requests": 1, "percentage": 100.0}]
@@ -312,6 +422,7 @@ async def test_reports_api_interprets_dates_in_requested_timezone(async_client, 
             "outputTokens": 2,
             "medianTtftMs": 0.0,
             "medianTps": 0.0,
+            "historyResolution": "exact",
         }
     ]
 
@@ -560,6 +671,7 @@ async def test_reports_api_default_range_uses_last_seven_calendar_days_in_reques
             "outputTokens": 1,
             "medianTtftMs": 0.0,
             "medianTps": 0.0,
+            "historyResolution": "exact",
         },
         {
             "activeAccounts": 1,
@@ -572,6 +684,7 @@ async def test_reports_api_default_range_uses_last_seven_calendar_days_in_reques
             "outputTokens": 1,
             "medianTtftMs": 0.0,
             "medianTps": 0.0,
+            "historyResolution": "exact",
         },
     ]
 
@@ -659,6 +772,7 @@ async def test_reports_api_uses_dst_aware_boundaries_for_requested_timezone(asyn
             "outputTokens": 2,
             "medianTtftMs": 0.0,
             "medianTps": 0.0,
+            "historyResolution": "exact",
         }
     ]
 
@@ -1428,6 +1542,7 @@ async def test_reports_api_summary_uses_sql_range_totals_not_rounded_daily_rows(
             "outputTokens": 1,
             "medianTtftMs": 0.0,
             "medianTps": 0.0,
+            "historyResolution": "exact",
         },
         {
             "activeAccounts": 1,
@@ -1440,6 +1555,7 @@ async def test_reports_api_summary_uses_sql_range_totals_not_rounded_daily_rows(
             "outputTokens": 1,
             "medianTtftMs": 0.0,
             "medianTps": 0.0,
+            "historyResolution": "exact",
         },
         {
             "activeAccounts": 1,
@@ -1452,5 +1568,6 @@ async def test_reports_api_summary_uses_sql_range_totals_not_rounded_daily_rows(
             "outputTokens": 1,
             "medianTtftMs": 0.0,
             "medianTps": 0.0,
+            "historyResolution": "exact",
         },
     ]

@@ -3,13 +3,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from itertools import batched
+from typing import Literal
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import and_, case, func, literal, or_, select, union_all
+from sqlalchemy import and_, case, func, literal, or_, select, union, union_all
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.selectable import Subquery
 
-from app.db.models import Account
+from app.db.models import Account, RequestLogLegacyDailyAggregate
 from app.modules.request_logs.history import request_history_selectable
 
 _INTERNAL_LIMIT_WARMUP_SOURCE = "limit_warmup"
@@ -34,8 +35,17 @@ class DailyReportAggregateRow:
     cost_usd: float
     active_accounts: int
     error_count: int
-    median_ttft_ms: float
-    median_tps: float
+    median_ttft_ms: float | None
+    median_tps: float | None
+    history_resolution: Literal["exact", "legacy_aggregate"] = "exact"
+
+
+@dataclass(frozen=True)
+class LegacyReportCoverageRow:
+    start_date: date | None
+    end_date: date | None
+    aggregate_rows: int
+    request_count: int
 
 
 @dataclass(frozen=True)
@@ -83,6 +93,7 @@ class ReportsRepository:
         account_ids: list[str] | None = None,
         model: str | None = None,
         useragent_group: str | None = None,
+        include_legacy: bool = False,
     ) -> list[DailyReportAggregateRow]:
         window_days = (end_date - start_date).days + 1
         if window_days > MAX_DAILY_REPORT_DAYS:
@@ -123,6 +134,21 @@ class ReportsRepository:
                 )
                 for row in result.all()
             )
+        if include_legacy:
+            rows = _merge_daily_rows(
+                [
+                    *rows,
+                    *(
+                        await self._aggregate_legacy_daily_rows(
+                            start_date,
+                            end_date,
+                            account_ids,
+                            model,
+                            useragent_group,
+                        )
+                    ),
+                ]
+            )
         return rows
 
     async def aggregate_summary(
@@ -132,6 +158,7 @@ class ReportsRepository:
         account_ids: list[str] | None = None,
         model: str | None = None,
         useragent_group: str | None = None,
+        include_legacy: bool = False,
     ) -> SummaryAggregateRow:
         history = request_history_selectable(name="report_summary_history")
         conditions = _report_conditions(history, start_date, end_date, account_ids, model, useragent_group)
@@ -151,7 +178,7 @@ class ReportsRepository:
             ).where(and_(*conditions))
         )
         row = result.one()
-        return SummaryAggregateRow(
+        exact = SummaryAggregateRow(
             total_cost_usd=float(row.total_cost_usd),
             total_input_tokens=int(row.total_input_tokens),
             total_output_tokens=int(row.total_output_tokens),
@@ -159,6 +186,30 @@ class ReportsRepository:
             total_requests=int(row.total_requests),
             total_errors=int(row.total_errors),
             active_accounts=int(row.active_accounts),
+        )
+        if not include_legacy:
+            return exact
+        legacy = await self._aggregate_legacy_summary(
+            start_date,
+            end_date,
+            account_ids,
+            model,
+            useragent_group,
+        )
+        return SummaryAggregateRow(
+            total_cost_usd=exact.total_cost_usd + legacy.total_cost_usd,
+            total_input_tokens=exact.total_input_tokens + legacy.total_input_tokens,
+            total_output_tokens=exact.total_output_tokens + legacy.total_output_tokens,
+            total_cached_tokens=exact.total_cached_tokens + legacy.total_cached_tokens,
+            total_requests=exact.total_requests + legacy.total_requests,
+            total_errors=exact.total_errors + legacy.total_errors,
+            active_accounts=await self._count_active_accounts_with_legacy(
+                start_date,
+                end_date,
+                account_ids,
+                model,
+                useragent_group,
+            ),
         )
 
     async def aggregate_by_model(
@@ -168,6 +219,7 @@ class ReportsRepository:
         account_ids: list[str] | None = None,
         model: str | None = None,
         useragent_group: str | None = None,
+        include_legacy: bool = False,
     ) -> list[ModelAggregateRow]:
         history = request_history_selectable(name="report_model_history")
         conditions = [
@@ -186,7 +238,7 @@ class ReportsRepository:
             .order_by(func.coalesce(func.sum(history.c.cost_usd), 0.0).desc())
         )
         result = await self._session.execute(stmt)
-        return [
+        rows = [
             ModelAggregateRow(
                 model=row.model,
                 cost_usd=float(row.cost_usd),
@@ -194,6 +246,17 @@ class ReportsRepository:
             )
             for row in result.all()
         ]
+        if include_legacy:
+            rows.extend(
+                await self._aggregate_legacy_by_model(
+                    start_date,
+                    end_date,
+                    account_ids,
+                    model,
+                    useragent_group,
+                )
+            )
+        return _merge_model_rows(rows)
 
     async def aggregate_by_account(
         self,
@@ -202,6 +265,7 @@ class ReportsRepository:
         account_ids: list[str] | None = None,
         model: str | None = None,
         useragent_group: str | None = None,
+        include_legacy: bool = False,
     ) -> list[AccountAggregateRow]:
         history = request_history_selectable(name="report_account_history")
         conditions = _report_conditions(history, start_date, end_date, account_ids, model, useragent_group)
@@ -217,7 +281,25 @@ class ReportsRepository:
             .order_by(func.coalesce(func.sum(history.c.cost_usd), 0.0).desc())
         )
         result = await self._session.execute(stmt)
-        rows = result.all()
+        rows = [
+            AccountAggregateRow(
+                account_id=row.account_id,
+                alias=None,
+                cost_usd=float(row.cost_usd),
+                request_count=int(row.request_count),
+            )
+            for row in result.all()
+        ]
+        if include_legacy:
+            rows.extend(
+                await self._aggregate_legacy_by_account(
+                    start_date,
+                    end_date,
+                    account_ids,
+                    model,
+                    useragent_group,
+                )
+            )
 
         account_ids_found = [row.account_id for row in rows if row.account_id]
         alias_map: dict[str | None, str | None] = {}
@@ -227,15 +309,17 @@ class ReportsRepository:
             )
             alias_map = {account_id: alias for account_id, alias in alias_result.all()}
 
-        return [
-            AccountAggregateRow(
-                account_id=row.account_id,
-                alias=alias_map.get(row.account_id),
-                cost_usd=float(row.cost_usd),
-                request_count=int(row.request_count),
-            )
-            for row in rows
-        ]
+        return _merge_account_rows(
+            [
+                AccountAggregateRow(
+                    account_id=row.account_id,
+                    alias=alias_map.get(row.account_id),
+                    cost_usd=row.cost_usd,
+                    request_count=row.request_count,
+                )
+                for row in rows
+            ]
+        )
 
     async def aggregate_by_useragent(
         self,
@@ -244,6 +328,7 @@ class ReportsRepository:
         account_ids: list[str] | None = None,
         model: str | None = None,
         useragent_group: str | None = None,
+        include_legacy: bool = False,
     ) -> list[UserAgentAggregateRow]:
         history = request_history_selectable(name="report_useragent_history")
         useragent_group_bucket = _useragent_group_bucket_expr(history)
@@ -263,7 +348,7 @@ class ReportsRepository:
             .order_by(func.coalesce(func.sum(history.c.cost_usd), 0.0).desc())
         )
         result = await self._session.execute(stmt)
-        return [
+        rows = [
             UserAgentAggregateRow(
                 useragent_group=row.useragent_group,
                 cost_usd=float(row.cost_usd),
@@ -271,6 +356,17 @@ class ReportsRepository:
             )
             for row in result.all()
         ]
+        if include_legacy:
+            rows.extend(
+                await self._aggregate_legacy_by_useragent(
+                    start_date,
+                    end_date,
+                    account_ids,
+                    model,
+                    useragent_group,
+                )
+            )
+        return _merge_useragent_rows(rows)
 
     async def count_active_accounts(
         self,
@@ -279,6 +375,7 @@ class ReportsRepository:
         account_ids: list[str] | None = None,
         model: str | None = None,
         useragent_group: str | None = None,
+        include_legacy: bool = False,
     ) -> int:
         history = request_history_selectable(name="report_active_accounts_history")
         conditions = [
@@ -289,13 +386,23 @@ class ReportsRepository:
         result = await self._session.execute(
             select(func.count(func.distinct(history.c.account_id))).where(and_(*conditions))
         )
-        return int(result.scalar_one() or 0)
+        exact = int(result.scalar_one() or 0)
+        if not include_legacy:
+            return exact
+        return await self._count_active_accounts_with_legacy(
+            start_date,
+            end_date,
+            account_ids,
+            model,
+            useragent_group,
+        )
 
     async def earliest_report_activity_at(
         self,
         account_ids: list[str] | None = None,
         model: str | None = None,
         useragent_group: str | None = None,
+        include_legacy: bool = False,
     ) -> datetime | None:
         history = request_history_selectable(name="report_earliest_history")
         conditions = [_normal_traffic_clause(history)]
@@ -309,7 +416,210 @@ class ReportsRepository:
 
         result = await self._session.execute(select(func.min(history.c.requested_at)).where(and_(*conditions)))
         value = result.scalar_one_or_none()
-        return value if isinstance(value, datetime) else None
+        exact_value = value if isinstance(value, datetime) else None
+        if not include_legacy:
+            return exact_value
+        legacy_conditions = _legacy_dimension_conditions(account_ids, model, useragent_group)
+        legacy_result = await self._session.execute(
+            select(func.min(RequestLogLegacyDailyAggregate.bucket_date)).where(and_(*legacy_conditions))
+        )
+        legacy_value = legacy_result.scalar_one_or_none()
+        legacy_datetime = (
+            datetime.combine(legacy_value, datetime.min.time()) if isinstance(legacy_value, date) else None
+        )
+        candidates = [candidate for candidate in (exact_value, legacy_datetime) if candidate is not None]
+        return min(candidates) if candidates else None
+
+    async def legacy_coverage(self) -> LegacyReportCoverageRow:
+        result = await self._session.execute(
+            select(
+                func.min(RequestLogLegacyDailyAggregate.bucket_date),
+                func.max(RequestLogLegacyDailyAggregate.bucket_date),
+                func.count(),
+                func.coalesce(func.sum(RequestLogLegacyDailyAggregate.request_count), 0),
+            )
+        )
+        row = result.one()
+        return LegacyReportCoverageRow(
+            start_date=row[0] if isinstance(row[0], date) else None,
+            end_date=row[1] if isinstance(row[1], date) else None,
+            aggregate_rows=int(row[2] or 0),
+            request_count=int(row[3] or 0),
+        )
+
+    async def _aggregate_legacy_daily_rows(
+        self,
+        start_date: date,
+        end_date: date,
+        account_ids: list[str] | None,
+        model: str | None,
+        useragent_group: str | None,
+    ) -> list[DailyReportAggregateRow]:
+        conditions = _legacy_date_conditions(start_date, end_date, account_ids, model, useragent_group)
+        result = await self._session.execute(
+            select(
+                RequestLogLegacyDailyAggregate.bucket_date,
+                func.coalesce(func.sum(RequestLogLegacyDailyAggregate.request_count), 0).label("requests"),
+                func.coalesce(func.sum(RequestLogLegacyDailyAggregate.input_tokens), 0).label("input_tokens"),
+                func.coalesce(func.sum(RequestLogLegacyDailyAggregate.output_tokens), 0).label("output_tokens"),
+                func.coalesce(func.sum(RequestLogLegacyDailyAggregate.cached_input_tokens), 0).label(
+                    "cached_input_tokens"
+                ),
+                func.coalesce(func.sum(RequestLogLegacyDailyAggregate.cost_usd), 0.0).label("cost_usd"),
+                func.count(func.distinct(RequestLogLegacyDailyAggregate.account_id)).label("active_accounts"),
+                func.coalesce(func.sum(RequestLogLegacyDailyAggregate.error_count), 0).label("error_count"),
+            )
+            .where(and_(*conditions))
+            .group_by(RequestLogLegacyDailyAggregate.bucket_date)
+            .order_by(RequestLogLegacyDailyAggregate.bucket_date)
+        )
+        return [
+            DailyReportAggregateRow(
+                date=row.bucket_date.isoformat(),
+                requests=int(row.requests or 0),
+                input_tokens=int(row.input_tokens or 0),
+                output_tokens=int(row.output_tokens or 0),
+                cached_input_tokens=int(row.cached_input_tokens or 0),
+                cost_usd=float(row.cost_usd or 0.0),
+                active_accounts=int(row.active_accounts or 0),
+                error_count=int(row.error_count or 0),
+                median_ttft_ms=None,
+                median_tps=None,
+                history_resolution="legacy_aggregate",
+            )
+            for row in result.all()
+        ]
+
+    async def _aggregate_legacy_summary(
+        self,
+        start_date: datetime,
+        end_date: datetime,
+        account_ids: list[str] | None,
+        model: str | None,
+        useragent_group: str | None,
+    ) -> SummaryAggregateRow:
+        conditions = _legacy_datetime_conditions(start_date, end_date, account_ids, model, useragent_group)
+        result = await self._session.execute(
+            select(
+                func.coalesce(func.sum(RequestLogLegacyDailyAggregate.cost_usd), 0.0),
+                func.coalesce(func.sum(RequestLogLegacyDailyAggregate.input_tokens), 0),
+                func.coalesce(func.sum(RequestLogLegacyDailyAggregate.output_tokens), 0),
+                func.coalesce(func.sum(RequestLogLegacyDailyAggregate.cached_input_tokens), 0),
+                func.coalesce(func.sum(RequestLogLegacyDailyAggregate.request_count), 0),
+                func.coalesce(func.sum(RequestLogLegacyDailyAggregate.error_count), 0),
+                func.count(func.distinct(RequestLogLegacyDailyAggregate.account_id)),
+            ).where(and_(*conditions))
+        )
+        row = result.one()
+        return SummaryAggregateRow(
+            total_cost_usd=float(row[0] or 0.0),
+            total_input_tokens=int(row[1] or 0),
+            total_output_tokens=int(row[2] or 0),
+            total_cached_tokens=int(row[3] or 0),
+            total_requests=int(row[4] or 0),
+            total_errors=int(row[5] or 0),
+            active_accounts=int(row[6] or 0),
+        )
+
+    async def _aggregate_legacy_by_model(
+        self,
+        start_date: datetime,
+        end_date: datetime,
+        account_ids: list[str] | None,
+        model: str | None,
+        useragent_group: str | None,
+    ) -> list[ModelAggregateRow]:
+        conditions = _legacy_datetime_conditions(start_date, end_date, account_ids, model, useragent_group)
+        result = await self._session.execute(
+            select(
+                RequestLogLegacyDailyAggregate.model,
+                func.coalesce(func.sum(RequestLogLegacyDailyAggregate.cost_usd), 0.0).label("cost_usd"),
+                func.coalesce(func.sum(RequestLogLegacyDailyAggregate.request_count), 0).label("request_count"),
+            )
+            .where(and_(*conditions), RequestLogLegacyDailyAggregate.model.is_not(None))
+            .group_by(RequestLogLegacyDailyAggregate.model)
+        )
+        return [
+            ModelAggregateRow(row.model, float(row.cost_usd or 0.0), int(row.request_count or 0))
+            for row in result.all()
+        ]
+
+    async def _aggregate_legacy_by_account(
+        self,
+        start_date: datetime,
+        end_date: datetime,
+        account_ids: list[str] | None,
+        model: str | None,
+        useragent_group: str | None,
+    ) -> list[AccountAggregateRow]:
+        conditions = _legacy_datetime_conditions(start_date, end_date, account_ids, model, useragent_group)
+        result = await self._session.execute(
+            select(
+                RequestLogLegacyDailyAggregate.account_id,
+                func.coalesce(func.sum(RequestLogLegacyDailyAggregate.cost_usd), 0.0).label("cost_usd"),
+                func.coalesce(func.sum(RequestLogLegacyDailyAggregate.request_count), 0).label("request_count"),
+            )
+            .where(and_(*conditions))
+            .group_by(RequestLogLegacyDailyAggregate.account_id)
+        )
+        return [
+            AccountAggregateRow(row.account_id, None, float(row.cost_usd or 0.0), int(row.request_count or 0))
+            for row in result.all()
+        ]
+
+    async def _aggregate_legacy_by_useragent(
+        self,
+        start_date: datetime,
+        end_date: datetime,
+        account_ids: list[str] | None,
+        model: str | None,
+        useragent_group: str | None,
+    ) -> list[UserAgentAggregateRow]:
+        conditions = _legacy_datetime_conditions(start_date, end_date, account_ids, model, useragent_group)
+        bucket = _legacy_useragent_group_bucket_expr()
+        result = await self._session.execute(
+            select(
+                bucket.label("useragent_group"),
+                func.coalesce(func.sum(RequestLogLegacyDailyAggregate.cost_usd), 0.0).label("cost_usd"),
+                func.coalesce(func.sum(RequestLogLegacyDailyAggregate.request_count), 0).label("request_count"),
+            )
+            .where(
+                and_(*conditions),
+                or_(
+                    RequestLogLegacyDailyAggregate.useragent_group.is_(None),
+                    func.trim(RequestLogLegacyDailyAggregate.useragent_group) != "",
+                ),
+            )
+            .group_by(bucket)
+        )
+        return [
+            UserAgentAggregateRow(row.useragent_group, float(row.cost_usd or 0.0), int(row.request_count or 0))
+            for row in result.all()
+        ]
+
+    async def _count_active_accounts_with_legacy(
+        self,
+        start_date: datetime,
+        end_date: datetime,
+        account_ids: list[str] | None,
+        model: str | None,
+        useragent_group: str | None,
+    ) -> int:
+        history = request_history_selectable(name="report_active_accounts_combined_history")
+        exact_conditions = [
+            *_report_conditions(history, start_date, end_date, account_ids, model, useragent_group),
+            history.c.account_id.is_not(None),
+        ]
+        legacy_conditions = [
+            *_legacy_datetime_conditions(start_date, end_date, account_ids, model, useragent_group),
+            RequestLogLegacyDailyAggregate.account_id.is_not(None),
+        ]
+        account_ids_union = union(
+            select(history.c.account_id.label("account_id")).where(and_(*exact_conditions)),
+            select(RequestLogLegacyDailyAggregate.account_id.label("account_id")).where(and_(*legacy_conditions)),
+        ).subquery()
+        result = await self._session.execute(select(func.count()).select_from(account_ids_union))
+        return int(result.scalar_one() or 0)
 
 
 def _report_conditions(
@@ -358,6 +668,139 @@ def _normal_traffic_clause(history: Subquery):
             history.c.request_kind.not_in(_INTERNAL_WARMUP_REQUEST_KINDS),
         ),
     )
+
+
+def _legacy_useragent_group_bucket_expr():
+    return case(
+        (RequestLogLegacyDailyAggregate.useragent_group.is_(None), literal(MISSING_USERAGENT_GROUP)),
+        else_=RequestLogLegacyDailyAggregate.useragent_group,
+    )
+
+
+def _legacy_useragent_group_filter_clause(useragent_group: str | None):
+    if not useragent_group:
+        return None
+    if useragent_group == MISSING_USERAGENT_GROUP:
+        return RequestLogLegacyDailyAggregate.useragent_group.is_(None)
+    return RequestLogLegacyDailyAggregate.useragent_group == useragent_group
+
+
+def _normal_legacy_traffic_clause():
+    return and_(
+        or_(
+            RequestLogLegacyDailyAggregate.source.is_(None),
+            RequestLogLegacyDailyAggregate.source != _INTERNAL_LIMIT_WARMUP_SOURCE,
+        ),
+        or_(
+            RequestLogLegacyDailyAggregate.request_kind.is_(None),
+            RequestLogLegacyDailyAggregate.request_kind.not_in(_INTERNAL_WARMUP_REQUEST_KINDS),
+        ),
+    )
+
+
+def _legacy_dimension_conditions(
+    account_ids: list[str] | None,
+    model: str | None,
+    useragent_group: str | None,
+) -> list:
+    conditions = [_normal_legacy_traffic_clause()]
+    if account_ids:
+        conditions.append(RequestLogLegacyDailyAggregate.account_id.in_(account_ids))
+    if model:
+        conditions.append(RequestLogLegacyDailyAggregate.model == model)
+    useragent_group_clause = _legacy_useragent_group_filter_clause(useragent_group)
+    if useragent_group_clause is not None:
+        conditions.append(useragent_group_clause)
+    return conditions
+
+
+def _legacy_date_conditions(
+    start_date: date,
+    end_date: date,
+    account_ids: list[str] | None,
+    model: str | None,
+    useragent_group: str | None,
+) -> list:
+    return [
+        RequestLogLegacyDailyAggregate.bucket_date >= start_date,
+        RequestLogLegacyDailyAggregate.bucket_date <= end_date,
+        *_legacy_dimension_conditions(account_ids, model, useragent_group),
+    ]
+
+
+def _legacy_datetime_conditions(
+    start_date: datetime,
+    end_date: datetime,
+    account_ids: list[str] | None,
+    model: str | None,
+    useragent_group: str | None,
+) -> list:
+    return [
+        RequestLogLegacyDailyAggregate.bucket_date >= start_date.date(),
+        RequestLogLegacyDailyAggregate.bucket_date < end_date.date(),
+        *_legacy_dimension_conditions(account_ids, model, useragent_group),
+    ]
+
+
+def _merge_daily_rows(rows: list[DailyReportAggregateRow]) -> list[DailyReportAggregateRow]:
+    merged: dict[str, DailyReportAggregateRow] = {}
+    for row in rows:
+        existing = merged.get(row.date)
+        if existing is None:
+            merged[row.date] = row
+            continue
+        has_legacy = "legacy_aggregate" in (existing.history_resolution, row.history_resolution)
+        merged[row.date] = DailyReportAggregateRow(
+            date=row.date,
+            requests=existing.requests + row.requests,
+            input_tokens=existing.input_tokens + row.input_tokens,
+            output_tokens=existing.output_tokens + row.output_tokens,
+            cached_input_tokens=existing.cached_input_tokens + row.cached_input_tokens,
+            cost_usd=existing.cost_usd + row.cost_usd,
+            active_accounts=existing.active_accounts + row.active_accounts,
+            error_count=existing.error_count + row.error_count,
+            median_ttft_ms=None if has_legacy else existing.median_ttft_ms,
+            median_tps=None if has_legacy else existing.median_tps,
+            history_resolution="legacy_aggregate" if has_legacy else "exact",
+        )
+    return [merged[key] for key in sorted(merged)]
+
+
+def _merge_model_rows(rows: list[ModelAggregateRow]) -> list[ModelAggregateRow]:
+    merged: dict[str, ModelAggregateRow] = {}
+    for row in rows:
+        existing = merged.get(row.model)
+        merged[row.model] = ModelAggregateRow(
+            model=row.model,
+            cost_usd=row.cost_usd + (existing.cost_usd if existing else 0.0),
+            request_count=row.request_count + (existing.request_count if existing else 0),
+        )
+    return sorted(merged.values(), key=lambda row: row.cost_usd, reverse=True)
+
+
+def _merge_account_rows(rows: list[AccountAggregateRow]) -> list[AccountAggregateRow]:
+    merged: dict[str | None, AccountAggregateRow] = {}
+    for row in rows:
+        existing = merged.get(row.account_id)
+        merged[row.account_id] = AccountAggregateRow(
+            account_id=row.account_id,
+            alias=row.alias or (existing.alias if existing else None),
+            cost_usd=row.cost_usd + (existing.cost_usd if existing else 0.0),
+            request_count=row.request_count + (existing.request_count if existing else 0),
+        )
+    return sorted(merged.values(), key=lambda row: row.cost_usd, reverse=True)
+
+
+def _merge_useragent_rows(rows: list[UserAgentAggregateRow]) -> list[UserAgentAggregateRow]:
+    merged: dict[str, UserAgentAggregateRow] = {}
+    for row in rows:
+        existing = merged.get(row.useragent_group)
+        merged[row.useragent_group] = UserAgentAggregateRow(
+            useragent_group=row.useragent_group,
+            cost_usd=row.cost_usd + (existing.cost_usd if existing else 0.0),
+            request_count=row.request_count + (existing.request_count if existing else 0),
+        )
+    return sorted(merged.values(), key=lambda row: row.cost_usd, reverse=True)
 
 
 def _day_ranges_cte(day_ranges: list[tuple[str, datetime, datetime]]):
