@@ -73,13 +73,15 @@ export function ReportsPage({ initialFilters }: ReportsPageProps = {}) {
   const [selectedPresetDays, setSelectedPresetDays] = useState<number | null>(
     DEFAULT_PRESET_DAYS,
   );
-  const [reportsTimeZone, setReportsTimeZone] = useState<string | undefined>(() =>
-    getBrowserReportsTimeZone(),
-  );
+  const [browserReportsTimeZone, setBrowserReportsTimeZone] = useState<
+    string | undefined
+  >(() => getBrowserReportsTimeZone());
+  const [useLegacyUTC, setUseLegacyUTC] = useState(false);
+  const reportsTimeZone = useLegacyUTC ? "UTC" : browserReportsTimeZone;
 
   useEffect(() => {
     const refreshReportsTimeZone = () => {
-      setReportsTimeZone((currentTimeZone) => {
+      setBrowserReportsTimeZone((currentTimeZone) => {
         const nextTimeZone = getBrowserReportsTimeZone();
         return currentTimeZone === nextTimeZone ? currentTimeZone : nextTimeZone;
       });
@@ -154,6 +156,17 @@ export function ReportsPage({ initialFilters }: ReportsPageProps = {}) {
   const hasAnyError = Boolean(
     mainReportsError || sharedOptionsError || accountOptionsError,
   );
+  const legacyCoverage = reportsQuery.data?.legacyCoverage;
+  const showExcludedLegacyCoverage = Boolean(
+    legacyCoverage?.available &&
+      legacyCoverage.overlapsSelectedRange &&
+      !legacyCoverage.included,
+  );
+  const showIncludedLegacyCoverage = Boolean(
+    legacyCoverage?.available &&
+      legacyCoverage.overlapsSelectedRange &&
+      legacyCoverage.included,
+  );
 
   const handleRetry = async () => {
     await Promise.allSettled([
@@ -164,6 +177,7 @@ export function ReportsPage({ initialFilters }: ReportsPageProps = {}) {
   };
 
   const handlePresetSelect = (days: number) => {
+    setUseLegacyUTC(false);
     setSelectedPresetDays(days);
     setFilters((current) => ({
       ...current,
@@ -177,6 +191,7 @@ export function ReportsPage({ initialFilters }: ReportsPageProps = {}) {
       nextFilters.startDate !== filters.startDate ||
       nextFilters.endDate !== filters.endDate
     ) {
+      setUseLegacyUTC(false);
       setSelectedPresetDays(null);
     }
     setFilters(nextFilters);
@@ -202,6 +217,38 @@ export function ReportsPage({ initialFilters }: ReportsPageProps = {}) {
         onPresetSelect={handlePresetSelect}
         onFiltersChange={handleFiltersChange}
       />
+
+      {showExcludedLegacyCoverage ? (
+        <AlertMessage variant="warning">
+          Older usage overlaps this date range, but it is stored in UTC daily
+          aggregates and is excluded from the current timezone report.
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className="ml-2 h-7"
+            onClick={() => setUseLegacyUTC(true)}
+          >
+            Include older history (UTC)
+          </Button>
+        </AlertMessage>
+      ) : null}
+      {showIncludedLegacyCoverage && legacyCoverage ? (
+        <AlertMessage variant="warning">
+          This report includes {legacyCoverage.requestCount.toLocaleString()} older
+          requests recovered from UTC daily aggregates. Per-request details and speed
+          medians are unavailable for aggregate-only days.
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className="ml-2 h-7"
+            onClick={() => setUseLegacyUTC(false)}
+          >
+            Use browser timezone
+          </Button>
+        </AlertMessage>
+      ) : null}
 
       {mainReportsError ? (
         <AlertMessage variant="error">

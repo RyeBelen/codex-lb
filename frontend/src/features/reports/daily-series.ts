@@ -37,6 +37,7 @@ function isISODate(value: string): boolean {
 function createZeroRow(date: string): DailyReportRow {
   return {
     date,
+    historyResolution: "exact",
     requests: 0,
     inputTokens: 0,
     outputTokens: 0,

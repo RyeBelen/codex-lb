@@ -58,6 +58,17 @@ const EMPTY_REPORT: ReportsResponse = {
       totalRequests: 0,
     },
   },
+  legacyCoverage: {
+    available: false,
+    included: false,
+    overlapsSelectedRange: false,
+    bucketTimezone: "UTC",
+    startDate: null,
+    endDate: null,
+    aggregateRows: 0,
+    requestCount: 0,
+    unsupportedMetrics: [],
+  },
   daily: [],
   byModel: [],
   byUseragent: [],
@@ -139,6 +150,92 @@ describe("ReportsPage", () => {
       }),
       "America/Los_Angeles",
     );
+  });
+
+  it("switches to UTC to include overlapping legacy aggregates and back to browser time", async () => {
+    const user = userEvent.setup();
+    useReportsMock.mockImplementation((_filters, timeZone) =>
+      asUseReportsResult({
+        data: {
+          ...EMPTY_REPORT,
+          legacyCoverage: {
+            available: true,
+            included: timeZone === "UTC",
+            overlapsSelectedRange: true,
+            bucketTimezone: "UTC",
+            startDate: "2026-04-01",
+            endDate: "2026-06-30",
+            aggregateRows: 91,
+            requestCount: 12_345,
+            unsupportedMetrics: ["medianTtftMs", "medianTps"],
+          },
+        },
+        isLoading: false,
+        isError: false,
+        refetch: vi.fn(),
+      }),
+    );
+
+    renderWithProviders(<ReportsPage />);
+
+    expect(
+      screen.getByText(/older usage overlaps this date range/i),
+    ).toBeInTheDocument();
+
+    await user.click(
+      screen.getByRole("button", { name: /include older history \(utc\)/i }),
+    );
+
+    expect(useReportsMock).toHaveBeenLastCalledWith(expect.any(Object), "UTC");
+    expect(
+      screen.getByText(/includes 12,345 older requests recovered/i),
+    ).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "30d" }));
+
+    expect(useReportsMock).toHaveBeenLastCalledWith(
+      expect.any(Object),
+      "America/Los_Angeles",
+    );
+
+    await user.click(
+      screen.getByRole("button", { name: /include older history \(utc\)/i }),
+    );
+
+    await user.click(
+      screen.getByRole("button", { name: /use browser timezone/i }),
+    );
+
+    expect(useReportsMock).toHaveBeenLastCalledWith(
+      expect.any(Object),
+      "America/Los_Angeles",
+    );
+    expect(
+      screen.getByText(/older usage overlaps this date range/i),
+    ).toBeInTheDocument();
+  });
+
+  it("does not prompt for legacy recovery outside the selected range", () => {
+    useReportsMock.mockReturnValue(
+      asUseReportsResult({
+        data: {
+          ...EMPTY_REPORT,
+          legacyCoverage: {
+            ...EMPTY_REPORT.legacyCoverage,
+            available: true,
+          },
+        },
+        isLoading: false,
+        isError: false,
+        refetch: vi.fn(),
+      }),
+    );
+
+    renderWithProviders(<ReportsPage />);
+
+    expect(
+      screen.queryByRole("button", { name: /include older history/i }),
+    ).not.toBeInTheDocument();
   });
 
   it("uses the live valid timezone for reports queries even when a cached value exists", async () => {

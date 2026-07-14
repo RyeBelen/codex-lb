@@ -236,12 +236,42 @@ describe("DailyDetailTable", () => {
     expect(revokeObjectURL).toHaveBeenCalledWith("blob:daily-breakdown");
     await expect(blobText()).resolves.toBe(
       [
-        "Date,Requests,Input Tokens,Output Tokens,Cached Tokens,Cost USD,Active Accounts,Errors",
-        "2026-06-05,8,100,20,1,1.0000,3,0",
-        "2026-06-06,2,200,30,2,2.0000,1,0",
-        "2026-06-07,5,300,40,3,3.0000,2,0",
+        "Date,Resolution,Requests,Input Tokens,Output Tokens,Cached Tokens,Cost USD,Active Accounts,Errors",
+        "2026-06-05,exact,8,100,20,1,1.0000,3,0",
+        "2026-06-06,exact,2,200,30,2,2.0000,1,0",
+        "2026-06-07,exact,5,300,40,3,3.0000,2,0",
       ].join("\n"),
     );
+  });
+
+  it("marks aggregate-only rows in the daily table", () => {
+    render(
+      <DailyDetailTable
+        startDate="2026-04-01"
+        endDate="2026-04-01"
+        data={[
+          {
+            date: "2026-04-01",
+            historyResolution: "legacy_aggregate",
+            requests: 25,
+            inputTokens: 100,
+            outputTokens: 50,
+            cachedInputTokens: 20,
+            costUsd: 1,
+            activeAccounts: 2,
+            errorCount: 0,
+            medianTtftMs: null,
+            medianTps: null,
+          },
+        ]}
+      />,
+    );
+
+    expect(
+      within(screen.getByTestId("daily-breakdown-row-2026-04-01")).getByText(
+        "Aggregate",
+      ),
+    ).toBeInTheDocument();
   });
 
   it.each([

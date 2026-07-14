@@ -24,7 +24,7 @@ function formatTps(value: number): string {
 export function TokensPerSecondChart({ startDate, endDate, data }: TokensPerSecondChartProps) {
   const chartData = buildContinuousDailyRows(startDate, endDate, data).map((d) => ({
     date: d.date.slice(5),
-    tps: d.medianTps ?? 0,
+    tps: d.medianTps,
   }));
 
   return (

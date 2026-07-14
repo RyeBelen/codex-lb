@@ -2,8 +2,20 @@ import { describe, expect, it } from "vitest";
 
 import { ReportsResponseSchema } from "./schemas";
 
+const LEGACY_COVERAGE = {
+  available: true,
+  included: true,
+  overlapsSelectedRange: true,
+  bucketTimezone: "UTC",
+  startDate: "2026-04-01",
+  endDate: "2026-06-30",
+  aggregateRows: 91,
+  requestCount: 12_345,
+  unsupportedMetrics: ["medianTtftMs", "medianTps"],
+};
+
 describe("ReportsResponseSchema", () => {
-  it("parses the required comparison block", () => {
+  it("parses legacy coverage and nullable aggregate-only metrics", () => {
     const parsed = ReportsResponseSchema.parse({
       summary: {
         totalCostUsd: 12.5,
@@ -24,7 +36,22 @@ describe("ReportsResponseSchema", () => {
           totalRequests: 20,
         },
       },
-      daily: [],
+      legacyCoverage: LEGACY_COVERAGE,
+      daily: [
+        {
+          date: "2026-04-01",
+          historyResolution: "legacy_aggregate",
+          requests: 100,
+          inputTokens: 300,
+          outputTokens: 200,
+          cachedInputTokens: 50,
+          costUsd: 1.25,
+          activeAccounts: 2,
+          errorCount: 1,
+          medianTtftMs: null,
+          medianTps: null,
+        },
+      ],
       byModel: [
         {
           model: "gpt-5.1",
@@ -50,6 +77,12 @@ describe("ReportsResponseSchema", () => {
     expect(parsed.comparison.previous.totalRequests).toBe(20);
     expect(parsed.byModel[0]?.requests).toBe(25);
     expect(parsed.byUseragent[0]?.useragent).toBe("claude-code");
+    expect(parsed.legacyCoverage.overlapsSelectedRange).toBe(true);
+    expect(parsed.daily[0]).toMatchObject({
+      historyResolution: "legacy_aggregate",
+      medianTtftMs: null,
+      medianTps: null,
+    });
   });
 
   it("rejects payloads without the comparison block", () => {
@@ -66,6 +99,7 @@ describe("ReportsResponseSchema", () => {
           avgCostPerDay: 4.17,
           avgRequestsPerDay: 8.33,
         },
+        legacyCoverage: LEGACY_COVERAGE,
         daily: [],
         byModel: [],
         byUseragent: [],
@@ -91,6 +125,7 @@ describe("ReportsResponseSchema", () => {
         comparison: {
           canCompare: false,
         },
+        legacyCoverage: LEGACY_COVERAGE,
         daily: [],
         byModel: [],
         byUseragent: [],
@@ -121,6 +156,7 @@ describe("ReportsResponseSchema", () => {
             totalRequests: 20,
           },
         },
+        legacyCoverage: LEGACY_COVERAGE,
         daily: [],
         byModel: [
           {
@@ -157,6 +193,7 @@ describe("ReportsResponseSchema", () => {
             totalRequests: 20,
           },
         },
+        legacyCoverage: LEGACY_COVERAGE,
         daily: [],
         byModel: [
           {

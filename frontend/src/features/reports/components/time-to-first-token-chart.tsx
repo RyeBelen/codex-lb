@@ -24,7 +24,7 @@ function formatSeconds(value: number): string {
 export function TimeToFirstTokenChart({ startDate, endDate, data }: TimeToFirstTokenChartProps) {
   const chartData = buildContinuousDailyRows(startDate, endDate, data).map((d) => ({
     date: d.date.slice(5),
-    ttft: d.medianTtftMs ?? 0,
+    ttft: d.medianTtftMs,
   }));
 
   return (

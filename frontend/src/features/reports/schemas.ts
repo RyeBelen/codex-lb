@@ -2,6 +2,10 @@ import { z } from "zod";
 
 const DailyReportRowSchema = z.object({
   date: z.string(),
+  historyResolution: z
+    .enum(["exact", "legacy_aggregate"])
+    .optional()
+    .default("exact"),
   requests: z.number(),
   inputTokens: z.number(),
   outputTokens: z.number(),
@@ -9,8 +13,20 @@ const DailyReportRowSchema = z.object({
   costUsd: z.number(),
   activeAccounts: z.number(),
   errorCount: z.number(),
-  medianTtftMs: z.number().optional().default(0),
-  medianTps: z.number().optional().default(0),
+  medianTtftMs: z.number().nullable().optional().default(0),
+  medianTps: z.number().nullable().optional().default(0),
+});
+
+const LegacyCoverageSchema = z.object({
+  available: z.boolean(),
+  included: z.boolean(),
+  overlapsSelectedRange: z.boolean(),
+  bucketTimezone: z.string(),
+  startDate: z.string().nullable(),
+  endDate: z.string().nullable(),
+  aggregateRows: z.number(),
+  requestCount: z.number(),
+  unsupportedMetrics: z.array(z.string()),
 });
 
 const ModelCostEntrySchema = z.object({
@@ -60,6 +76,7 @@ const ReportComparisonSchema = z.object({
 export const ReportsResponseSchema = z.object({
   summary: ReportSummarySchema,
   comparison: ReportComparisonSchema,
+  legacyCoverage: LegacyCoverageSchema,
   daily: z.array(DailyReportRowSchema),
   byModel: z.array(ModelCostEntrySchema),
   byUseragent: z.array(UseragentCostEntrySchema),

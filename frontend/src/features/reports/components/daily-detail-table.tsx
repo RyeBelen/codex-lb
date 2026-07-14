@@ -95,6 +95,7 @@ export function DailyDetailTable({ startDate, endDate, data }: DailyDetailTableP
                 direction={sort.direction}
                 onClick={() => toggleSort("activeAccounts")}
               />
+              <th className="pb-2 text-right font-medium">Resolution</th>
             </tr>
           </thead>
         </table>
@@ -131,6 +132,11 @@ export function DailyDetailTable({ startDate, endDate, data }: DailyDetailTableP
                   </td>
                   <td className="py-2.5 text-right text-muted-foreground">
                     {row.activeAccounts}
+                  </td>
+                  <td className="py-2.5 text-right text-muted-foreground">
+                    {row.historyResolution === "legacy_aggregate"
+                      ? "Aggregate"
+                      : "Exact"}
                   </td>
                 </tr>
               ))}
@@ -188,11 +194,12 @@ function ColumnGroup() {
   return (
     <colgroup>
       <col style={{ width: "18%" }} />
-      <col style={{ width: "14%" }} />
-      <col style={{ width: "20%" }} />
-      <col style={{ width: "20%" }} />
-      <col style={{ width: "14%" }} />
-      <col style={{ width: "14%" }} />
+      <col style={{ width: "12%" }} />
+      <col style={{ width: "18%" }} />
+      <col style={{ width: "18%" }} />
+      <col style={{ width: "12%" }} />
+      <col style={{ width: "10%" }} />
+      <col style={{ width: "12%" }} />
     </colgroup>
   );
 }
@@ -222,9 +229,19 @@ function sortRows(
 }
 
 function exportCSV(rows: DailyReportRow[]) {
-  const headers = ["Date", "Requests", "Input Tokens", "Output Tokens", "Cached Tokens", "Cost USD", "Active Accounts", "Errors"];
+  const headers = ["Date", "Resolution", "Requests", "Input Tokens", "Output Tokens", "Cached Tokens", "Cost USD", "Active Accounts", "Errors"];
   const lines = rows.map((r) =>
-    [r.date, r.requests, r.inputTokens, r.outputTokens, r.cachedInputTokens, r.costUsd.toFixed(4), r.activeAccounts, r.errorCount].join(","),
+    [
+      r.date,
+      r.historyResolution === "legacy_aggregate" ? "legacy_aggregate" : "exact",
+      r.requests,
+      r.inputTokens,
+      r.outputTokens,
+      r.cachedInputTokens,
+      r.costUsd.toFixed(4),
+      r.activeAccounts,
+      r.errorCount,
+    ].join(","),
   );
   const csv = [headers.join(","), ...lines].join("\n");
   const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
