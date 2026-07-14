@@ -139,6 +139,28 @@ async def test_fallback_does_not_overwrite_sticky_when_pinned_rate_limited():
 
 
 @pytest.mark.asyncio
+async def test_sticky_affinity_does_not_reuse_weekly_exhausted_account():
+    now = time.time()
+    acc_a = AccountState(
+        "a",
+        AccountStatus.QUOTA_EXCEEDED,
+        used_percent=100.0,
+        reset_at=now + 3600,
+        secondary_used_percent=100.0,
+        secondary_reset_at=int(now + 3600),
+    )
+    acc_b = _active("b", used_percent=40.0, secondary_used_percent=20.0)
+    repo = _make_sticky_repo(existing_account_id="a")
+
+    result = await _invoke_stickiness([acc_a, acc_b], "weekly-full", repo)
+
+    assert result.account is not None
+    assert result.account.account_id == "b"
+    repo.delete.assert_called_once_with("weekly-full", kind=StickySessionKind.PROMPT_CACHE)
+    repo.upsert.assert_called_once_with("weekly-full", "b", kind=StickySessionKind.PROMPT_CACHE)
+
+
+@pytest.mark.asyncio
 async def test_all_accounts_unavailable_does_not_overwrite_sticky():
     """When the pinned account is down AND no fallback is available,
     the sticky mapping must still be preserved (not deleted or overwritten)."""

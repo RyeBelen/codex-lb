@@ -1166,7 +1166,7 @@ async def test_accounts_list_recovers_zero_capacity_rate_limited_status(async_cl
 
 
 @pytest.mark.asyncio
-async def test_accounts_list_preserves_credit_backed_rate_limited_reset_guard(async_client, db_setup):
+async def test_accounts_list_reports_weekly_exhaustion_despite_rate_limit_and_credits(async_client, db_setup):
     future_reset = int((utcnow() + timedelta(hours=2)).timestamp())
     account = _make_account("acc_credit_rate_limited", "credit-rate-limited@example.com")
     account.status = AccountStatus.RATE_LIMITED
@@ -1194,7 +1194,7 @@ async def test_accounts_list_preserves_credit_backed_rate_limited_reset_guard(as
     payload = response.json()
     accounts = {item["accountId"]: item for item in payload["accounts"]}
 
-    assert accounts["acc_credit_rate_limited"]["status"] == "rate_limited"
+    assert accounts["acc_credit_rate_limited"]["status"] == "quota_exceeded"
 
 
 @pytest.mark.asyncio

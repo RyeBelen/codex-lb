@@ -76,7 +76,7 @@ def _secondary_usage(**overrides) -> UsageHistory:
     return UsageHistory(**values)
 
 
-def test_effective_status_uses_secondary_credits_to_reactivate_quota_exceeded_account() -> None:
+def test_effective_status_keeps_weekly_exhaustion_with_secondary_credits() -> None:
     account = _account()
     primary = _primary_usage()
     secondary = _secondary_usage(
@@ -97,11 +97,11 @@ def test_effective_status_uses_secondary_credits_to_reactivate_quota_exceeded_ac
             monthly_used_percent=None,
             runtime_reset=float(account.reset_at) if account.reset_at else None,
         )
-        == AccountStatus.ACTIVE
+        == AccountStatus.QUOTA_EXCEEDED
     )
 
 
-def test_effective_status_uses_primary_credits_when_secondary_has_no_credit_fields() -> None:
+def test_effective_status_keeps_weekly_exhaustion_with_primary_credits() -> None:
     account = _account()
     primary = _primary_usage(credits_balance=25.0)
     secondary = _secondary_usage()
@@ -118,11 +118,11 @@ def test_effective_status_uses_primary_credits_when_secondary_has_no_credit_fiel
             monthly_used_percent=None,
             runtime_reset=float(account.reset_at) if account.reset_at else None,
         )
-        == AccountStatus.ACTIVE
+        == AccountStatus.QUOTA_EXCEEDED
     )
 
 
-def test_effective_status_keeps_primary_exhaustion_rate_limited_with_credits() -> None:
+def test_effective_status_weekly_exhaustion_wins_when_both_windows_are_full() -> None:
     account = _account(AccountStatus.ACTIVE)
     primary = _primary_usage(used_percent=100.0, reset_at=1_700_000_300, credits_balance=25.0)
     secondary = _secondary_usage(used_percent=100.0, credits_balance=25.0)
@@ -139,7 +139,7 @@ def test_effective_status_keeps_primary_exhaustion_rate_limited_with_credits() -
             monthly_used_percent=None,
             runtime_reset=float(account.reset_at) if account.reset_at else None,
         )
-        == AccountStatus.RATE_LIMITED
+        == AccountStatus.QUOTA_EXCEEDED
     )
 
 

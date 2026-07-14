@@ -2174,6 +2174,9 @@ def _state_from_account(
         credits_unlimited=credits_unlimited,
         credits_balance=credits_balance,
         infer_status_from_usage=False,
+        infer_secondary_status_from_usage=(
+            effective_secondary_entry is not None and effective_secondary_entry.window != "monthly"
+        ),
     )
     if resetless_rate_limit_without_evidence and primary_used is None and status == AccountStatus.ACTIVE:
         status = AccountStatus.RATE_LIMITED
