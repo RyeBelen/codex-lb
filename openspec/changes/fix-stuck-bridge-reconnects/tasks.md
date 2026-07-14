@@ -8,4 +8,4 @@
 
 - [x] 2.1 Add focused regression tests for terminal timeout, fail-all cleanup, healthy active streams, and gate release
 - [x] 2.2 Run strict OpenSpec validation, lint/type checks, and focused bridge suites
-- [ ] 2.3 Deploy once from the tested fix branch, verify health and reconnect/error logs, then restore the Railway source to main after merge
+- [x] 2.3 Deploy once from the tested fix branch, verify health and reconnect/error logs, and disconnect automatic source deploys until the PR stack merges
