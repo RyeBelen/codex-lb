@@ -35,6 +35,11 @@ status from `primary_window.used_percent`:
 - `used_percent >= 100` on the primary rate-limit window: `RATE_LIMITED`
 - `used_percent < 100`: `ACTIVE`
 
+Credit metadata is informational for this decision. Missing credit fields,
+`credits_has`, `credits_unlimited`, and `credits_balance` do not override a
+current exhausted weekly window. A remaining 5-hour balance cannot compensate
+for the enclosing weekly cap.
+
 There is no manual reset step inside codex-lb. Recovery is driven by the next
 refresh tick that observes a sub-100 value from `/wham/usage`.
 
@@ -80,6 +85,9 @@ behavior can set the threshold to `100.0`.
   `/wham/usage` still reports the account as fully used. That only masks the
   upstream state and can route traffic back to an account that the upstream
   limiter will reject.
+- Standard foreground routing fails closed when the current weekly sample is
+  exhausted. Independently gated additional-quota requests retain their
+  documented exception.
 
 ## Verification Example
 
@@ -100,6 +108,11 @@ If `primary_window.used_percent` is still `100` here while Settings -> Account
 shows the account as reset, codex-lb has nothing fresher to mirror. The account
 is inside the upstream propagation window, and the practical fix is to wait or,
 once #677 lands, use the Probe action.
+
+For example, primary usage at `1%` with weekly usage at `100%` is
+`QUOTA_EXCEEDED` even when the payload reports credits. The account remains out
+of standard routing until the weekly reset deadline elapses or a newer weekly
+sample reports available capacity.
 
 ## Related Work
 
