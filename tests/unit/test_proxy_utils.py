@@ -16299,6 +16299,65 @@ async def test_next_websocket_receive_timeout_ignores_draining_requests(monkeypa
 
 
 @pytest.mark.asyncio
+async def test_next_websocket_receive_timeout_bounds_precreated_upstream_wait(monkeypatch):
+    monkeypatch.setattr(proxy_service.time, "monotonic", lambda: 100.0)
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req_precreated_stuck",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=1.0,
+        upstream_sent_at=90.0,
+        awaiting_response_created=True,
+    )
+
+    timeout = await service._next_websocket_receive_timeout(
+        deque([request_state]),
+        pending_lock=anyio.Lock(),
+        proxy_request_budget_seconds=7200.0,
+        stream_idle_timeout_seconds=7200.0,
+        response_created_timeout_seconds=12.0,
+    )
+
+    assert timeout is not None
+    assert timeout.timeout_seconds == pytest.approx(2.0)
+    assert timeout.error_code == "response_created_timeout"
+    assert timeout.fail_all_pending is True
+
+
+@pytest.mark.asyncio
+async def test_next_websocket_receive_timeout_ignores_created_active_generation(monkeypatch):
+    monkeypatch.setattr(proxy_service.time, "monotonic", lambda: 100.0)
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req_active_generation",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=90.0,
+        upstream_sent_at=90.0,
+        response_id="resp_active_generation",
+        awaiting_response_created=False,
+    )
+
+    timeout = await service._next_websocket_receive_timeout(
+        deque([request_state]),
+        pending_lock=anyio.Lock(),
+        proxy_request_budget_seconds=7200.0,
+        stream_idle_timeout_seconds=7200.0,
+        response_created_timeout_seconds=1.0,
+    )
+
+    assert timeout is not None
+    assert timeout.error_code != "response_created_timeout"
+    assert timeout.timeout_seconds > 1.0
+    assert timeout.fail_all_pending is False
+
+
+@pytest.mark.asyncio
 async def test_fail_expired_pending_websocket_requests_keeps_newer_requests(monkeypatch):
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
