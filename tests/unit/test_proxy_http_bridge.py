@@ -1986,9 +1986,16 @@ async def test_http_bridge_times_out_before_response_created(monkeypatch: pytest
     monkeypatch.setattr(proxy_service, "_HTTP_BRIDGE_STARTUP_KEEPALIVE_GRACE_SECONDS", 0.001)
     session = _make_bridge_session()
     state = proxy_service._WebSocketRequestState(
-        request_id="req-created-timeout", model="gpt-5.6-sol", service_tier=None,
-        reasoning_effort=None, api_key_reservation=None, started_at=time.monotonic(),
-        event_queue=asyncio.Queue(), transport="http", awaiting_response_created=True,
+        request_id="req-created-timeout",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        upstream_sent_at=time.monotonic() - 1.0,
+        event_queue=asyncio.Queue(),
+        transport="http",
+        awaiting_response_created=True,
     )
 
     async def fake_submit(*args: object, **kwargs: object) -> None:
@@ -1996,8 +2003,12 @@ async def test_http_bridge_times_out_before_response_created(monkeypatch: pytest
 
     monkeypatch.setattr(service, "_submit_http_bridge_request", fake_submit)
     stream = service._stream_http_bridge_session_events(
-        session, request_state=state, text_data="{}", queue_limit=8,
-        propagate_http_errors=True, downstream_turn_state=None,
+        session,
+        request_state=state,
+        text_data="{}",
+        queue_limit=8,
+        propagate_http_errors=True,
+        downstream_turn_state=None,
     )
 
     block = await asyncio.wait_for(anext(stream), timeout=1.0)
@@ -15505,9 +15516,11 @@ async def test_http_bridge_reader_uses_bridge_request_budget(
     )
     original_next_timeout = service._next_websocket_receive_timeout
     seen_budgets: list[float] = []
+    seen_response_created_timeouts: list[float] = []
 
     async def record_next_timeout(*args: Any, **kwargs: Any):
         seen_budgets.append(kwargs["proxy_request_budget_seconds"])
+        seen_response_created_timeouts.append(kwargs["response_created_timeout_seconds"])
         return await original_next_timeout(*args, **kwargs)
 
     monkeypatch.setattr(service, "_next_websocket_receive_timeout", record_next_timeout)
@@ -15517,6 +15530,7 @@ async def test_http_bridge_reader_uses_bridge_request_budget(
     await service._relay_http_bridge_upstream_messages(session)
 
     assert seen_budgets == [2222.0]
+    assert seen_response_created_timeouts == [120.0]
 
 
 @pytest.mark.asyncio

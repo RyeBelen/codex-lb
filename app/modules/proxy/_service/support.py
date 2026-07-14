@@ -364,6 +364,7 @@ class _WebSocketRequestState:
     reasoning_effort: str | None
     api_key_reservation: ApiKeyUsageReservationData | None
     started_at: float
+    upstream_sent_at: float | None = None
     responses_lite_model: str | None = None
     latency_first_token_ms: int | None = None
     latency_response_created_ms: int | None = None

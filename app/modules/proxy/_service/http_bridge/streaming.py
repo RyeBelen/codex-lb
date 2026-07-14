@@ -1987,13 +1987,14 @@ class _HTTPBridgeStreamingMixin:
                             getattr(
                                 settings,
                                 "http_responses_session_bridge_response_created_timeout_seconds",
-                                30.0,
+                                120.0,
                             )
                         )
                         if (
                             request_state.latency_response_created_ms is None
                             and request_state.awaiting_response_created
-                            and _service_time().monotonic() - request_state.started_at
+                            and request_state.upstream_sent_at is not None
+                            and _service_time().monotonic() - request_state.upstream_sent_at
                             >= response_created_timeout_seconds
                         ):
                             logger.warning(

@@ -261,6 +261,13 @@ class _HTTPBridgeUpstreamEventsMixin:
                     pending_lock=session.pending_lock,
                     proxy_request_budget_seconds=_http_bridge_request_budget_seconds(runtime_settings),
                     stream_idle_timeout_seconds=runtime_settings.stream_idle_timeout_seconds,
+                    response_created_timeout_seconds=float(
+                        getattr(
+                            runtime_settings,
+                            "http_responses_session_bridge_response_created_timeout_seconds",
+                            120.0,
+                        )
+                    ),
                 )
                 try:
                     if receive_timeout is None:
