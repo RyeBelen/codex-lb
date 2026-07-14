@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import os
 import sqlite3
 import sys
 from collections.abc import Sequence
+from datetime import date
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -59,6 +61,42 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     backfill.add_argument("--expect-id-sha256")
     backfill.add_argument("--batch-size", type=int, default=10_000)
     backfill.add_argument("--apply", action="store_true", help="Insert facts; default is verified dry-run.")
+
+    legacy = subparsers.add_parser(
+        "legacy-report-aggregates",
+        help="Manage immutable recovered UTC-day report aggregates.",
+        formatter_class=_CliHelpFormatter,
+    )
+    legacy_subparsers = legacy.add_subparsers(dest="legacy_report_aggregates_command")
+    legacy_import = legacy_subparsers.add_parser(
+        "import",
+        help="Import verified retired daily aggregates from a SQLite snapshot.",
+        formatter_class=_CliHelpFormatter,
+    )
+    legacy_import.add_argument("--snapshot", type=Path, required=True)
+    legacy_import.add_argument("--source-sha256", required=True)
+    legacy_import.add_argument("--source-revision", required=True)
+    legacy_import.add_argument("--expect-row-count", type=int, required=True)
+    legacy_import.add_argument("--expect-aggregate-key-sha256", required=True)
+    legacy_import.add_argument("--expect-first-bucket-date", type=date.fromisoformat, required=True)
+    legacy_import.add_argument("--expect-last-bucket-date", type=date.fromisoformat, required=True)
+    for measure in (
+        "request-count",
+        "error-count",
+        "input-tokens",
+        "output-tokens",
+        "effective-output-tokens",
+        "cached-input-tokens",
+        "reasoning-tokens",
+        "cost-microdollars",
+    ):
+        legacy_import.add_argument(f"--expect-{measure}", type=int, required=True)
+    legacy_import.add_argument("--batch-size", type=int, default=10_000)
+    legacy_import.add_argument(
+        "--apply",
+        action="store_true",
+        help="Insert verified aggregate rows; default is dry-run.",
+    )
     retag.add_argument("--to", dest="target_provider", metavar="PROVIDER", required=True, help="Provider tag to write.")
     retag.add_argument(
         "--codex-home",
@@ -115,6 +153,11 @@ def main(argv: Sequence[str] | None = None) -> None:
             _run_historical_request_facts_backfill(args)
             return
         raise SystemExit("historical-request-facts requires a subcommand")
+    if args.command == "legacy-report-aggregates":
+        if args.legacy_report_aggregates_command == "import":
+            _run_legacy_report_aggregates_import(args)
+            return
+        raise SystemExit("legacy-report-aggregates requires a subcommand")
     if bool(args.ssl_certfile) ^ bool(args.ssl_keyfile):
         raise SystemExit("Both --ssl-certfile and --ssl-keyfile must be provided together.")
 
@@ -258,6 +301,51 @@ def _run_historical_request_facts_backfill(args: argparse.Namespace) -> None:
     print(f"- Candidate id SHA-256: {result.candidate_id_sha256}")
     print(f"- Candidate id range: {result.first_request_log_id}..{result.last_request_log_id}")
     print(f"- Candidate time range: {result.first_requested_at}..{result.last_requested_at}")
+    print(f"- Inserted: {result.inserted_count}")
+
+
+def _run_legacy_report_aggregates_import(args: argparse.Namespace) -> None:
+    from app.core.config.settings import get_settings
+    from app.modules.request_logs.legacy_aggregate_import import (
+        LegacyAggregateTotals,
+        import_legacy_daily_aggregates,
+    )
+
+    expected_totals = LegacyAggregateTotals(
+        request_count=args.expect_request_count,
+        error_count=args.expect_error_count,
+        input_tokens=args.expect_input_tokens,
+        output_tokens=args.expect_output_tokens,
+        effective_output_tokens=args.expect_effective_output_tokens,
+        cached_input_tokens=args.expect_cached_input_tokens,
+        reasoning_tokens=args.expect_reasoning_tokens,
+        cost_microdollars=args.expect_cost_microdollars,
+    )
+    result = asyncio.run(
+        import_legacy_daily_aggregates(
+            database_url=get_settings().database_url,
+            snapshot_path=args.snapshot,
+            expected_source_sha256=args.source_sha256,
+            expected_source_revision=args.source_revision,
+            expected_row_count=args.expect_row_count,
+            expected_aggregate_key_sha256=args.expect_aggregate_key_sha256,
+            expected_first_bucket_date=args.expect_first_bucket_date,
+            expected_last_bucket_date=args.expect_last_bucket_date,
+            expected_totals=expected_totals,
+            apply=args.apply,
+            batch_size=args.batch_size,
+        )
+    )
+    print("")
+    print("Legacy report aggregate import")
+    print(f"- Mode: {'dry-run' if result.dry_run else 'apply'}")
+    print(f"- Source SHA-256: {result.source_sha256}")
+    print(f"- Source revision: {result.source_revision}")
+    print(f"- Source rows: {result.source_row_count}")
+    print(f"- Aggregate-key SHA-256: {result.aggregate_key_sha256}")
+    print(f"- UTC bucket range: {result.first_bucket_date}..{result.last_bucket_date}")
+    print(f"- Requests represented: {result.totals.request_count}")
+    print(f"- Candidates: {result.candidate_count}")
     print(f"- Inserted: {result.inserted_count}")
 
 

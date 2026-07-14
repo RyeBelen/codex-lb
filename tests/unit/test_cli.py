@@ -4,6 +4,7 @@ import json
 import logging
 import sqlite3
 import sys
+from datetime import date
 from types import SimpleNamespace
 from typing import Any
 
@@ -129,6 +130,74 @@ def test_main_reports_invalid_keep_alive_timeout_env(monkeypatch):
 
     with pytest.raises(SystemExit, match="--timeout-keep-alive/UVICORN_TIMEOUT_KEEP_ALIVE must be an integer"):
         cli.main()
+
+
+def test_legacy_report_aggregate_import_cli_is_dry_run_by_default(monkeypatch, capsys, tmp_path):
+    from app.core.config import settings as settings_module
+    from app.modules.request_logs import legacy_aggregate_import as import_module
+
+    captured: dict[str, Any] = {}
+
+    async def fake_import(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(
+            dry_run=True,
+            source_sha256="a" * 64,
+            source_revision="source-revision",
+            source_row_count=1,
+            aggregate_key_sha256="b" * 64,
+            first_bucket_date=date(2026, 4, 24),
+            last_bucket_date=date(2026, 4, 24),
+            totals=SimpleNamespace(request_count=3),
+            candidate_count=1,
+            inserted_count=0,
+        )
+
+    monkeypatch.setattr(settings_module, "get_settings", lambda: SimpleNamespace(database_url="sqlite:///target.db"))
+    monkeypatch.setattr(import_module, "import_legacy_daily_aggregates", fake_import)
+    cli.main(
+        [
+            "legacy-report-aggregates",
+            "import",
+            "--snapshot",
+            str(tmp_path / "source.db"),
+            "--source-sha256",
+            "a" * 64,
+            "--source-revision",
+            "source-revision",
+            "--expect-row-count",
+            "1",
+            "--expect-aggregate-key-sha256",
+            "b" * 64,
+            "--expect-first-bucket-date",
+            "2026-04-24",
+            "--expect-last-bucket-date",
+            "2026-04-24",
+            "--expect-request-count",
+            "3",
+            "--expect-error-count",
+            "1",
+            "--expect-input-tokens",
+            "30",
+            "--expect-output-tokens",
+            "15",
+            "--expect-effective-output-tokens",
+            "17",
+            "--expect-cached-input-tokens",
+            "4",
+            "--expect-reasoning-tokens",
+            "2",
+            "--expect-cost-microdollars",
+            "123456",
+        ]
+    )
+
+    assert captured["apply"] is False
+    assert captured["expected_first_bucket_date"] == date(2026, 4, 24)
+    assert captured["expected_totals"].request_count == 3
+    output = capsys.readouterr().out
+    assert "Mode: dry-run" in output
+    assert "Candidates: 1" in output
 
 
 def test_codex_sessions_retag_refuses_noninteractive_write_without_yes(monkeypatch, tmp_path):

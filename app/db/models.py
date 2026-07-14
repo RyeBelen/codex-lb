@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 from enum import Enum
 
 from sqlalchemy import (
     BigInteger,
     Boolean,
+    Date,
     DateTime,
     Float,
     ForeignKey,
@@ -351,6 +352,56 @@ class RequestLogHistoricalFact(Base):
     cost_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
     latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     latency_first_token_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+
+class RequestLogLegacyDailyAggregate(Base):
+    """Immutable UTC-day analytics recovered from the retired fork rollup."""
+
+    __tablename__ = "request_log_legacy_daily_aggregates"
+    __table_args__ = (
+        Index("idx_legacy_request_aggregates_date", "bucket_date"),
+        Index("idx_legacy_request_aggregates_account_date", "account_id", "bucket_date"),
+        Index("idx_legacy_request_aggregates_api_key_date", "api_key_id", "bucket_date"),
+    )
+
+    aggregate_key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    bucket_date: Mapped[date] = mapped_column(Date, nullable=False)
+    api_key_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    account_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    model: Mapped[str] = mapped_column(String, nullable=False)
+    status: Mapped[str] = mapped_column(String, nullable=False)
+    error_code: Mapped[str | None] = mapped_column(String, nullable=True)
+    request_kind: Mapped[str] = mapped_column(String, nullable=False)
+    service_tier: Mapped[str | None] = mapped_column(String, nullable=True)
+    requested_service_tier: Mapped[str | None] = mapped_column(String, nullable=True)
+    actual_service_tier: Mapped[str | None] = mapped_column(String, nullable=True)
+    transport: Mapped[str | None] = mapped_column(String, nullable=True)
+    upstream_transport: Mapped[str | None] = mapped_column(String, nullable=True)
+    source: Mapped[str | None] = mapped_column(String, nullable=True)
+    useragent_group: Mapped[str | None] = mapped_column(String, nullable=True)
+    plan_type: Mapped[str | None] = mapped_column(String, nullable=True)
+    is_deleted: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    request_count: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    error_count: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    input_tokens: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    output_tokens: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    effective_output_tokens: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    cached_input_tokens: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    reasoning_tokens: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    cost_usd: Mapped[float] = mapped_column(Float, nullable=False)
+    cost_microdollars: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    account_request_count: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    account_input_tokens: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    account_output_tokens: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    account_cached_input_tokens: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    account_cost_usd: Mapped[float] = mapped_column(Float, nullable=False)
+    latency_ms_sum: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    latency_ms_count: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    latency_first_token_ms_sum: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    latency_first_token_ms_count: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    source_snapshot_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    source_row_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    imported_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
 
 
 class ProxyEndpoint(Base):
