@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from typing import Any, cast
 
 import pytest
+from fastapi import Request
 
 import app.modules.proxy.api as proxy_api_module
 from app.core.openai.models import CompactResponsePayload
@@ -15,6 +16,69 @@ pytestmark = pytest.mark.unit
 async def _iter_blocks(*blocks: str) -> AsyncIterator[str]:
     for block in blocks:
         yield block
+
+
+def _request_with_headers(headers: Mapping[str, str]) -> Request:
+    return Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/backend-api/codex/responses",
+            "headers": [(key.encode(), value.encode()) for key, value in headers.items()],
+        }
+    )
+
+
+@pytest.mark.parametrize(
+    ("headers", "expected"),
+    [
+        (
+            {
+                "accept": "text/event-stream",
+                "originator": "Codex Desktop",
+                "user-agent": (
+                    "Codex Desktop/0.144.2 (Windows 10.0.26200; x86_64) unknown (Codex Desktop; 26.707.72221)"
+                ),
+            },
+            False,
+        ),
+        (
+            {
+                "accept": "text/event-stream",
+                "user-agent": "codex_cli_rs/0.144.2 (Windows 10.0.26200; x86_64)",
+            },
+            False,
+        ),
+        (
+            {
+                "accept": "text/event-stream",
+                "user-agent": "custom-responses-client/1.0",
+            },
+            True,
+        ),
+        (
+            {
+                "accept": "text/event-stream",
+                "originator": "Codex Desktop",
+                "user-agent": "Codex Desktop/0.144.2",
+                "x-stainless-runtime": "python",
+            },
+            True,
+        ),
+    ],
+)
+def test_openai_sdk_request_classification_preserves_explicit_client_identity(
+    headers: Mapping[str, str],
+    expected: bool,
+) -> None:
+    payload: dict[str, JsonValue] = {
+        "model": "gpt-5.5",
+        "input": "hi",
+        "instructions": None,
+        "stream": True,
+    }
+
+    assert proxy_api_module._is_openai_sdk_request(_request_with_headers(headers), payload) is expected
 
 
 def test_strip_blank_reasoning_comment_preserves_unmatched_whitespace_and_inline_comments() -> None:

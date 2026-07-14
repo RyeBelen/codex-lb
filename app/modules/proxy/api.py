@@ -43,7 +43,7 @@ from app.core.auth.dependencies import (
 from app.core.auth.refresh import RefreshError
 from app.core.cache.invalidation import NAMESPACE_RESET_CREDITS, bump_cache_invalidation_local
 from app.core.clients.files import FileProxyError
-from app.core.clients.proxy import ProxyResponseError
+from app.core.clients.proxy import ProxyResponseError, _is_native_codex_request
 from app.core.clients.rate_limit_reset_credits import (
     ConsumeResetCreditError,
     ResetCreditFetchError,
@@ -417,6 +417,8 @@ def _is_openai_sdk_request(
     user_agent = request.headers.get("user-agent", "").lower()
     if "openai" in user_agent:
         return True
+    if _is_native_codex_request(request.headers):
+        return False
     if payload is None or not _has_openai_responses_shape(payload):
         return False
     if isinstance(payload, Mapping):
