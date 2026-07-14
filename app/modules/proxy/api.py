@@ -4966,6 +4966,9 @@ async def _wait_for_first_stream_probe(
                     capacity_wait_event.clear()
                 return True
             if capacity_wait_event.is_set():
+                if capacity_ready_event is None:
+                    capacity_wait_event.clear()
+                    continue
                 recovery_ready_task = (
                     asyncio.create_task(capacity_ready_event.wait()) if capacity_ready_event is not None else None
                 )

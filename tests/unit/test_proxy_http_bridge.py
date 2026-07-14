@@ -2012,8 +2012,82 @@ async def test_http_bridge_times_out_before_response_created(monkeypatch: pytest
     )
 
     block = await asyncio.wait_for(anext(stream), timeout=1.0)
-    payload = proxy_service.parse_sse_data_json(block)
-    assert payload["response"]["error"]["code"] == "response_created_timeout"
+    assert '"code":"response_created_timeout"' in block
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_reader_timeout_fails_only_stalled_precreated_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    monkeypatch.setattr(
+        proxy_service,
+        "get_settings",
+        lambda: SimpleNamespace(
+            http_responses_session_bridge_response_created_timeout_seconds=0.001,
+            stream_idle_timeout_seconds=7200.0,
+        ),
+    )
+    session = _make_bridge_session()
+    stale_request = proxy_service._WebSocketRequestState(
+        request_id="req-stalled",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic() - 1.0,
+        upstream_sent_at=time.monotonic() - 1.0,
+        event_queue=asyncio.Queue(),
+        transport="http",
+        awaiting_response_created=True,
+    )
+    active_request = proxy_service._WebSocketRequestState(
+        request_id="req-active",
+        model="gpt-5.6-sol",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=time.monotonic(),
+        response_id="resp-active",
+        event_queue=asyncio.Queue(),
+        transport="http",
+    )
+    session.pending_requests.extend((stale_request, active_request))
+    session.queued_request_count = 2
+
+    async def receive_forever() -> UpstreamWebSocketMessage:
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+    session.upstream = cast(UpstreamResponsesWebSocket, SimpleNamespace(receive=receive_forever))
+    finalize = AsyncMock()
+    retry = AsyncMock(return_value=False)
+    retire_after_drain = AsyncMock(return_value=False)
+    monkeypatch.setattr(service, "_finalize_websocket_request_state", finalize)
+    monkeypatch.setattr(service, "_retry_http_bridge_precreated_request", retry)
+    monkeypatch.setattr(service, "_retire_http_bridge_after_drain_if_ready", retire_after_drain)
+
+    reader_task = asyncio.create_task(service._relay_http_bridge_upstream_messages(session))
+    stale_event_queue = stale_request.event_queue
+    assert stale_event_queue is not None
+    try:
+        event_block = await asyncio.wait_for(stale_event_queue.get(), timeout=1.0)
+        assert event_block is not None
+        assert '"code":"response_created_timeout"' in event_block
+        assert await asyncio.wait_for(stale_event_queue.get(), timeout=1.0) is None
+
+        assert stale_request.draining_until_terminal is True
+        assert active_request.draining_until_terminal is False
+        assert active_request in session.pending_requests
+        assert session.queued_request_count == 1
+        finalize.assert_awaited_once()
+        assert finalize.await_args.args[0] is stale_request
+        retry.assert_not_awaited()
+        retire_after_drain.assert_awaited_once_with(session)
+    finally:
+        reader_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await reader_task
 
 
 @pytest.mark.asyncio
@@ -3444,8 +3518,7 @@ async def test_select_account_with_budget_prefers_durable_account_id_when_availa
     assert selection.account.id == "acc-preferred"
     assert select_account.await_count == 1
     first_call = select_account.await_args_list[0]
-    assert first_call.kwargs["account_ids"] is None
-    assert first_call.kwargs["preferred_account_id"] == "acc-preferred"
+    assert first_call.kwargs["account_ids"] == {"acc-preferred"}
 
 
 @pytest.mark.asyncio
@@ -4222,9 +4295,7 @@ async def test_select_account_with_budget_required_file_pin_does_not_fallback_on
     assert selection.error_code == "account_stream_cap"
     assert select_account.await_count == 1
     first_call = select_account.await_args_list[0]
-    assert first_call.kwargs["account_ids"] is None
-    assert first_call.kwargs["preferred_account_id"] == "acc-file-owner"
-    assert first_call.kwargs["require_preferred_account"] is True
+    assert first_call.kwargs["account_ids"] == {"acc-file-owner"}
 
 
 @pytest.mark.asyncio
@@ -4269,9 +4340,7 @@ async def test_select_account_with_budget_required_file_pin_overrides_single_acc
     assert selection.account.id == "acc-file-owner"
     assert select_account.await_count == 1
     first_call = select_account.await_args_list[0]
-    assert first_call.kwargs["account_ids"] is None
-    assert first_call.kwargs["preferred_account_id"] == "acc-file-owner"
-    assert first_call.kwargs["require_preferred_account"] is True
+    assert first_call.kwargs["account_ids"] == {"acc-file-owner"}
 
 
 @pytest.mark.asyncio
@@ -4315,9 +4384,8 @@ async def test_select_account_with_budget_keeps_burn_pool_visible_for_single_acc
     assert selection.account is burn_account
     call = select_account.await_args
     assert call is not None
-    assert call.kwargs["account_ids"] is None
+    assert call.kwargs["account_ids"] == {"acc-configured"}
     assert call.kwargs["routing_strategy"] == "single_account"
-    assert call.kwargs["single_account_id"] == "acc-configured"
 
 
 @pytest.mark.asyncio
@@ -4353,12 +4421,7 @@ async def test_select_account_with_budget_required_preferred_does_not_fallback_w
 
     assert selection.account is None
     assert selection.error_code == "preferred_account_unavailable"
-    select_account.assert_awaited_once()
-    call = select_account.await_args
-    assert call is not None
-    assert call.kwargs["exclude_account_ids"] == {"acc-file-owner"}
-    assert call.kwargs["preferred_account_id"] == "acc-file-owner"
-    assert call.kwargs["require_preferred_account"] is True
+    select_account.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -4397,9 +4460,7 @@ async def test_select_account_with_budget_soft_preference_can_fallback_after_acc
     assert select_account.await_count == 1
     call = select_account.await_args
     assert call is not None
-    assert call.kwargs["account_ids"] is None
-    assert call.kwargs["preferred_account_id"] == "acc-soft"
-    assert call.kwargs["require_preferred_account"] is False
+    assert call.kwargs["account_ids"] == {"acc-soft"}
 
 
 def test_headers_with_authorization_restores_missing_proxy_api_header() -> None:

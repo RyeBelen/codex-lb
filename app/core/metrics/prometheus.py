@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 from importlib import import_module
+from types import ModuleType
 from typing import Protocol
 
 
@@ -26,11 +27,14 @@ class HistogramLike(Protocol):
     def labels(self, *args: str, **kwargs: str) -> "HistogramLike": ...
 
 
+prometheus_client: ModuleType | None
+
 try:
-    import prometheus_client
+    import prometheus_client as _prometheus_client  # type: ignore[unresolved-import]
+
+    prometheus_client = _prometheus_client
 except ImportError:
     prometheus_client = None
-
 
 PROMETHEUS_AVAILABLE = prometheus_client is not None
 MULTIPROCESS_MODE = bool(os.environ.get("PROMETHEUS_MULTIPROC_DIR"))

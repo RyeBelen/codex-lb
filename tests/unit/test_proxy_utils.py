@@ -572,6 +572,7 @@ async def test_chat_startup_probe_consumes_repeated_capacity_markers_before_firs
             capacity_wait_event=capacity_wait_event,
         )
     )
+    release_next_event.set()
     try:
         stream, startup_error = await asyncio.wait_for(probe_task, timeout=0.1)
     finally:

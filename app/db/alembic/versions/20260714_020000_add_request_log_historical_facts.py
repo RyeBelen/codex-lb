@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import sqlalchemy as sa
 from alembic import op
+from sqlalchemy.engine import Connection
 
 revision = "20260714_020000_add_request_log_historical_facts"
 down_revision = "20260714_010000_import_fork_retention_rollups"
@@ -27,7 +28,13 @@ _INDEXES = (
 )
 
 
+def _table_exists(connection: Connection) -> bool:
+    return sa.inspect(connection).has_table(_TABLE)
+
+
 def upgrade() -> None:
+    if _table_exists(op.get_bind()):
+        return
     op.create_table(
         _TABLE,
         sa.Column("request_log_id", sa.BigInteger(), nullable=False),
@@ -60,6 +67,8 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    if not _table_exists(op.get_bind()):
+        return
     for name, _columns in reversed(_INDEXES):
         op.drop_index(name, table_name=_TABLE)
     op.drop_table(_TABLE)

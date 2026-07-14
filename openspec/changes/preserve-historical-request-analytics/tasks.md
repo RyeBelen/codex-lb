@@ -2,7 +2,7 @@
 
 - [x] 1.1 Add typed compact historical-fact ORM metadata and a single-head Alembic migration with evidence-based indexes
 - [x] 1.2 Add one reusable raw-plus-fact selectable with identical typed columns and no diagnostic-list integration
-- [ ] 1.3 Add SQLite/PostgreSQL migration, drift, and query-plan coverage
+- [x] 1.3 Add SQLite/PostgreSQL migration, drift, and query-plan coverage
 
 ## 2. Atomic retention and lifecycle
 

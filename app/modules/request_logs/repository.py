@@ -93,6 +93,7 @@ class RequestLogsRepository:
             history.request_id == response_id_value,
             history.status == "success",
             history.account_id.is_not(None),
+            func.trim(history.account_id) != "",
         ]
         if api_key_id is not None:
             conditions.append(history.api_key_id == api_key_id)
