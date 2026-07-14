@@ -46,4 +46,13 @@
 - OpenSpec CLI was unavailable in the local shell; artifact structure and
   normative/context separation were checked directly.
 
-Production remains unchanged. Railway staging verification is still required.
+### Isolation decision
+
+A duplicated Railway environment was created but its deployment was stopped
+while still building, then the environment was deleted before it could run.
+Production remained on deployment `74341c34` from `main`; no production source,
+variables, volume, or deployment changed. Further pre-production validation uses
+the production clone plus credential-free GitHub CI so no copied service can
+call or compete with live upstream APIs.
+
+Production remains unchanged. Final GitHub CI is still required.

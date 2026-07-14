@@ -71,9 +71,9 @@ aggregate-only notice and gaps speed charts for aggregate-only days.
 1. Add the archive table and indexes with a forward Alembic revision.
 2. Add import CLI, Reports read path, API coverage metadata, and UI mode.
 3. Rehearse on production clones and prove expected totals and second-run zero.
-4. Commit/push and deploy to an isolated Railway environment with separate
-   storage; import deterministic fixtures and the verified clone export.
-5. Verify migrations, report parity, UTC/non-UTC behavior, health, and redeploy.
+4. Commit/push and validate in credential-free GitHub CI, including Docker
+   build, SQLite/PostgreSQL migration checks, and backend/frontend suites.
+5. Verify the production clone locally without starting a second service that
+   contains copied production accounts, schedulers, or upstream credentials.
 6. Only after explicit acceptance, merge through repository gates and perform a
    fresh-backup production import.
-

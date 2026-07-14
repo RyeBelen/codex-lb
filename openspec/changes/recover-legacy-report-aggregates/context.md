@@ -48,6 +48,7 @@ The immutable source is
 `store.pre-prune-20260714T012557Z.db`, SHA-256
 `f6f0d2d3a508f9dab3a8ab6556d031fc12e0bbafc948394aa8c2995367089d61`.
 The import target is exactly 1,043 rows and 23,080 requests. Production rollout
-requires a fresh online backup, a clone rehearsal, an isolated Railway staging
-deployment, an idempotency rerun, and report parity evidence.
-
+requires a fresh online backup, a clone rehearsal, an idempotency rerun,
+credential-free CI, and report parity evidence. A duplicated Railway production
+environment is explicitly prohibited because copied account and scheduler
+configuration could compete with the live APIs even when storage is separate.

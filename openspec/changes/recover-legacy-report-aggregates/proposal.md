@@ -17,8 +17,9 @@ Reports timeline still omits almost seven weeks of recoverable activity.
   aggregate-only history and switches the report to UTC when included.
 - Keep per-request diagnostics, response ownership, arbitrary API-key windows,
   and median speed metrics unavailable for aggregate-only days.
-- Prove recovery on a production clone and isolated Railway staging before any
-  production deployment or data import.
+- Prove recovery on a production clone and credential-free isolated CI before
+  any production deployment or data import. The verification environment MUST
+  NOT duplicate production services, credentials, or upstream integrations.
 
 ## Capabilities
 
@@ -40,4 +41,3 @@ Affected areas include ORM/Alembic schema, snapshot recovery CLI, Reports
 repository/service/schema, Reports frontend, and clone/staging verification.
 Lifetime rollups and the production database are not modified until staging
 evidence is accepted.
-
