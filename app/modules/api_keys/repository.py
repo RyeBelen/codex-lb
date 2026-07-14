@@ -8,6 +8,8 @@ from enum import Enum
 from sqlalchemy import BigInteger, Integer, cast, delete, func, select, true, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import load_only, selectinload
+from sqlalchemy.sql.elements import ColumnElement
+from sqlalchemy.sql.selectable import Subquery
 
 from app.core.utils.time import utcnow
 from app.db.models import (
@@ -23,11 +25,11 @@ from app.db.models import (
     LimitType,
     LimitWindow,
     ModelSource,
-    RequestLog,
 )
 from app.db.session import sqlite_writer_section
 from app.modules.accounts.usage_rollup import api_key_usage_aggregate_stmt, read_api_key_rollup_state
 from app.modules.api_keys.limit_windows import advance_limit_reset
+from app.modules.request_logs.history import request_history_selectable
 
 
 @dataclass(frozen=True, slots=True)
@@ -138,8 +140,8 @@ class ApiKeysRepository:
         return account_costs
 
     @staticmethod
-    def _exclude_warmup_clause():
-        return RequestLog.request_kind.not_in(("warmup", "limit_warmup"))
+    def _exclude_warmup_clause(history: Subquery) -> ColumnElement[bool]:
+        return history.c.request_kind.not_in(("warmup", "limit_warmup"))
 
     def _select_api_key(self):
         return (
@@ -262,30 +264,31 @@ class ApiKeysRepository:
         if limit_type == LimitType.CREDITS:
             return 0
 
+        history = request_history_selectable(name="api_key_limit_history")
         if limit_type == LimitType.TOTAL_TOKENS:
-            value_expr = func.coalesce(RequestLog.input_tokens, 0) + func.coalesce(
-                RequestLog.output_tokens,
-                RequestLog.reasoning_tokens,
+            value_expr = func.coalesce(history.c.input_tokens, 0) + func.coalesce(
+                history.c.output_tokens,
+                history.c.reasoning_tokens,
                 0,
             )
         elif limit_type == LimitType.INPUT_TOKENS:
-            value_expr = func.coalesce(RequestLog.input_tokens, 0)
+            value_expr = func.coalesce(history.c.input_tokens, 0)
         elif limit_type == LimitType.OUTPUT_TOKENS:
-            value_expr = func.coalesce(RequestLog.output_tokens, RequestLog.reasoning_tokens, 0)
+            value_expr = func.coalesce(history.c.output_tokens, history.c.reasoning_tokens, 0)
         elif limit_type == LimitType.COST_USD:
-            value_expr = cast(func.floor(func.coalesce(RequestLog.cost_usd, 0.0) * 1_000_000), BigInteger)
+            value_expr = cast(func.floor(func.coalesce(history.c.cost_usd, 0.0) * 1_000_000), BigInteger)
         else:
             return 0
 
         stmt = select(func.coalesce(func.sum(value_expr), 0)).where(
-            RequestLog.api_key_id == key_id,
-            RequestLog.status == "success",
-            self._exclude_warmup_clause(),
-            RequestLog.requested_at >= since,
-            RequestLog.requested_at < until,
+            history.c.api_key_id == key_id,
+            history.c.status == "success",
+            self._exclude_warmup_clause(history),
+            history.c.requested_at >= since,
+            history.c.requested_at < until,
         )
         if model_filter is not None:
-            stmt = stmt.where(RequestLog.model == model_filter)
+            stmt = stmt.where(history.c.model == model_filter)
 
         result = await self._session.execute(stmt)
         value = result.scalar_one()
@@ -846,22 +849,23 @@ class ApiKeysRepository:
         since: datetime,
         until: datetime,
     ) -> list[ApiKeyAccountCost]:
-        deleted_expr = func.coalesce(RequestLog.deleted_at.is_not(None), False)
+        history = request_history_selectable(name="api_key_account_cost_history")
+        deleted_expr = func.coalesce(history.c.deleted_at.is_not(None), False)
         stmt = (
             select(
-                RequestLog.account_id,
+                history.c.account_id,
                 Account.email,
                 deleted_expr.label("is_deleted"),
-                func.coalesce(func.sum(RequestLog.cost_usd), 0.0).label("cost_usd"),
+                func.coalesce(func.sum(history.c.cost_usd), 0.0).label("cost_usd"),
             )
-            .outerjoin(Account, Account.id == RequestLog.account_id)
+            .select_from(history.outerjoin(Account, Account.id == history.c.account_id))
             .where(
-                RequestLog.api_key_id == key_id,
-                RequestLog.requested_at >= since,
-                RequestLog.requested_at < until,
-                self._exclude_warmup_clause(),
+                history.c.api_key_id == key_id,
+                history.c.requested_at >= since,
+                history.c.requested_at < until,
+                self._exclude_warmup_clause(history),
             )
-            .group_by(RequestLog.account_id, Account.email, deleted_expr)
+            .group_by(history.c.account_id, Account.email, deleted_expr)
         )
         result = await self._session.execute(stmt)
         return self._build_account_costs(result.all())
@@ -873,30 +877,31 @@ class ApiKeysRepository:
         until: datetime,
         bucket_seconds: int = 3600,
     ) -> list[ApiKeyTrendBucket]:
+        history = request_history_selectable(name="api_key_trend_history")
         bind = self._session.get_bind()
         dialect = bind.dialect.name if bind else "sqlite"
         if dialect == "postgresql":
-            bucket_expr = func.floor(func.extract("epoch", RequestLog.requested_at) / bucket_seconds) * bucket_seconds
+            bucket_expr = func.floor(func.extract("epoch", history.c.requested_at) / bucket_seconds) * bucket_seconds
         else:
-            epoch_col = cast(func.strftime("%s", RequestLog.requested_at), Integer)
+            epoch_col = cast(func.strftime("%s", history.c.requested_at), Integer)
             bucket_expr = cast(epoch_col / bucket_seconds, Integer) * bucket_seconds
         bucket_col = bucket_expr.label("bucket_epoch")
 
         stmt = (
             select(
                 bucket_col,
-                func.coalesce(func.sum(RequestLog.input_tokens), 0).label("total_input_tokens"),
+                func.coalesce(func.sum(history.c.input_tokens), 0).label("total_input_tokens"),
                 func.coalesce(
-                    func.sum(func.coalesce(RequestLog.output_tokens, RequestLog.reasoning_tokens, 0)),
+                    func.sum(func.coalesce(history.c.output_tokens, history.c.reasoning_tokens, 0)),
                     0,
                 ).label("total_output_tokens"),
-                func.coalesce(func.sum(RequestLog.cost_usd), 0.0).label("total_cost_usd"),
+                func.coalesce(func.sum(history.c.cost_usd), 0.0).label("total_cost_usd"),
             )
             .where(
-                RequestLog.api_key_id == key_id,
-                RequestLog.requested_at >= since,
-                RequestLog.requested_at < until,
-                self._exclude_warmup_clause(),
+                history.c.api_key_id == key_id,
+                history.c.requested_at >= since,
+                history.c.requested_at < until,
+                self._exclude_warmup_clause(history),
             )
             .group_by(bucket_col)
             .order_by(bucket_col)
@@ -912,22 +917,23 @@ class ApiKeysRepository:
         ]
 
     async def usage_7d(self, key_id: str, since: datetime, until: datetime) -> ApiKeyUsageTotals:
+        history = request_history_selectable(name="api_key_usage_history")
         filtered_logs = (
             select(
-                RequestLog.id.label("id"),
-                RequestLog.account_id.label("account_id"),
-                RequestLog.deleted_at.label("deleted_at"),
-                RequestLog.input_tokens.label("input_tokens"),
-                RequestLog.output_tokens.label("output_tokens"),
-                RequestLog.reasoning_tokens.label("reasoning_tokens"),
-                RequestLog.cached_input_tokens.label("cached_input_tokens"),
-                RequestLog.cost_usd.label("cost_usd"),
+                history.c.id,
+                history.c.account_id,
+                history.c.deleted_at,
+                history.c.input_tokens,
+                history.c.output_tokens,
+                history.c.reasoning_tokens,
+                history.c.cached_input_tokens,
+                history.c.cost_usd,
             )
             .where(
-                RequestLog.api_key_id == key_id,
-                RequestLog.requested_at >= since,
-                RequestLog.requested_at < until,
-                self._exclude_warmup_clause(),
+                history.c.api_key_id == key_id,
+                history.c.requested_at >= since,
+                history.c.requested_at < until,
+                self._exclude_warmup_clause(history),
             )
             .cte("filtered_logs")
         )

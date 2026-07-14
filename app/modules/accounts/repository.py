@@ -24,6 +24,7 @@ from app.db.models import (
     HttpBridgeSessionRecord,
     HttpBridgeSessionState,
     RequestLog,
+    RequestLogHistoricalFact,
     StickySession,
     UsageHistory,
 )
@@ -453,6 +454,11 @@ class AccountsRepository:
         await self._session.execute(
             update(RequestLog).where(RequestLog.account_id.in_(duplicate_ids)).values(account_id=canonical.id)
         )
+        await self._session.execute(
+            update(RequestLogHistoricalFact)
+            .where(RequestLogHistoricalFact.account_id.in_(duplicate_ids))
+            .values(account_id=canonical.id)
+        )
         await self._reconcile_limit_warmups(canonical.id, duplicate_ids)
         await self._session.execute(
             update(StickySession).where(StickySession.account_id.in_(duplicate_ids)).values(account_id=canonical.id)
@@ -635,14 +641,24 @@ class AccountsRepository:
 
     async def delete(self, account_id: str, *, delete_history: bool = False) -> bool:
         async with sqlite_writer_section():
+            await lock_fold_state(self._session)
             await self._session.execute(delete(UsageHistory).where(UsageHistory.account_id == account_id))
             if delete_history:
                 await self._session.execute(delete(RequestLog).where(RequestLog.account_id == account_id))
+                await self._session.execute(
+                    delete(RequestLogHistoricalFact).where(RequestLogHistoricalFact.account_id == account_id)
+                )
             else:
+                deleted_at = utcnow()
                 await self._session.execute(
                     update(RequestLog)
                     .where(RequestLog.account_id == account_id)
-                    .values(account_id=None, deleted_at=utcnow()),
+                    .values(account_id=None, deleted_at=deleted_at),
+                )
+                await self._session.execute(
+                    update(RequestLogHistoricalFact)
+                    .where(RequestLogHistoricalFact.account_id == account_id)
+                    .values(account_id=None, deleted_at=deleted_at),
                 )
             await self._session.execute(delete(StickySession).where(StickySession.account_id == account_id))
             await self._session.execute(delete(AccountUsageRollup).where(AccountUsageRollup.account_id == account_id))

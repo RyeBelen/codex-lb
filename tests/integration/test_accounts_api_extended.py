@@ -5,16 +5,17 @@ import json
 from datetime import datetime, timedelta, timezone
 
 import pytest
-from sqlalchemy import select, update
+from sqlalchemy import insert, select, update
 
 from app.core.auth import fallback_account_id, generate_unique_account_id
 from app.core.crypto import TokenEncryptor
 from app.core.usage.refresh_scheduler import reconcile_recoverable_account_statuses
 from app.core.utils.time import utcnow
-from app.db.models import Account, AccountStatus, RequestLog
+from app.db.models import Account, AccountStatus, RequestLog, RequestLogHistoricalFact
 from app.db.session import SessionLocal
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.proxy.account_cache import clear_account_routing_unavailable, is_account_routing_unavailable
+from app.modules.request_logs.history import FACT_INSERT_COLUMNS, historical_fact_projection
 from app.modules.request_logs.repository import RequestLogsRepository
 from app.modules.usage.repository import UsageRepository
 
@@ -597,7 +598,7 @@ async def test_delete_account_soft_deletes_request_logs(async_client, db_setup):
         accounts_repo = AccountsRepository(session)
         logs_repo = RequestLogsRepository(session)
         await accounts_repo.upsert(_make_account("acc_delete_logs", "delete-logs@example.com"))
-        await logs_repo.add_log(
+        log = await logs_repo.add_log(
             account_id="acc_delete_logs",
             request_id="req_delete_logs_1",
             model="gpt-5.1",
@@ -608,6 +609,10 @@ async def test_delete_account_soft_deletes_request_logs(async_client, db_setup):
             error_code=None,
             requested_at=utcnow(),
         )
+        await session.execute(
+            insert(RequestLogHistoricalFact).from_select(FACT_INSERT_COLUMNS, historical_fact_projection([log.id]))
+        )
+        await session.commit()
 
     delete = await async_client.delete("/api/accounts/acc_delete_logs")
     assert delete.status_code == 200
@@ -618,6 +623,12 @@ async def test_delete_account_soft_deletes_request_logs(async_client, db_setup):
         ).scalar_one()
         assert row.account_id is None
         assert row.deleted_at is not None
+        fact = await session.scalar(
+            select(RequestLogHistoricalFact).where(RequestLogHistoricalFact.request_log_id == row.id)
+        )
+        assert fact is not None
+        assert fact.account_id is None
+        assert fact.deleted_at == row.deleted_at
 
     request_logs = await async_client.get("/api/request-logs?limit=10")
     assert request_logs.status_code == 200
@@ -634,7 +645,7 @@ async def test_delete_account_with_delete_history_hard_deletes_request_logs(asyn
         accounts_repo = AccountsRepository(session)
         logs_repo = RequestLogsRepository(session)
         await accounts_repo.upsert(_make_account("acc_hard_delete", "hard-delete@example.com"))
-        await logs_repo.add_log(
+        log = await logs_repo.add_log(
             account_id="acc_hard_delete",
             request_id="req_hard_delete_1",
             model="gpt-5.1",
@@ -645,6 +656,10 @@ async def test_delete_account_with_delete_history_hard_deletes_request_logs(asyn
             error_code=None,
             requested_at=utcnow(),
         )
+        await session.execute(
+            insert(RequestLogHistoricalFact).from_select(FACT_INSERT_COLUMNS, historical_fact_projection([log.id]))
+        )
+        await session.commit()
 
     delete = await async_client.delete("/api/accounts/acc_hard_delete?delete_history=true")
     assert delete.status_code == 200
@@ -653,6 +668,12 @@ async def test_delete_account_with_delete_history_hard_deletes_request_logs(asyn
     async with SessionLocal() as session:
         result = await session.execute(select(RequestLog).where(RequestLog.request_id == "req_hard_delete_1"))
         assert result.scalar_one_or_none() is None
+        assert (
+            await session.scalar(
+                select(RequestLogHistoricalFact).where(RequestLogHistoricalFact.request_log_id == log.id)
+            )
+            is None
+        )
 
     request_logs = await async_client.get("/api/request-logs?limit=10")
     assert request_logs.status_code == 200

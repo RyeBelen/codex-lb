@@ -363,8 +363,8 @@ class Settings(BaseSettings):
     @field_validator("request_log_retention_days")
     @classmethod
     def _validate_request_log_retention(cls, value: int) -> int:
-        if value != 0 and value < 30:
-            raise ValueError("request_log_retention_days must be 0 (disabled) or >= 30")
+        if value != 0 and value < 7:
+            raise ValueError("request_log_retention_days must be 0 (disabled) or >= 7")
         return value
 
     @field_validator("usage_history_retention_days")

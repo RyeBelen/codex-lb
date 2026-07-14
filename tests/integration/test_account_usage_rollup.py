@@ -4,14 +4,21 @@ import asyncio
 from datetime import timedelta
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import insert, select
 
 from app.core.crypto import TokenEncryptor
 from app.core.utils.time import utcnow
-from app.db.models import Account, AccountStatus, AccountUsageRollup, AccountUsageRollupState
+from app.db.models import (
+    Account,
+    AccountStatus,
+    AccountUsageRollup,
+    AccountUsageRollupState,
+    RequestLogHistoricalFact,
+)
 from app.db.session import SessionLocal
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.accounts.usage_rollup import FOLD_LAG, run_fold_pass
+from app.modules.request_logs.history import FACT_INSERT_COLUMNS, historical_fact_projection
 from app.modules.request_logs.repository import RequestLogsRepository
 
 pytestmark = pytest.mark.integration
@@ -258,13 +265,20 @@ async def test_identity_merge_preserves_folded_usage(db_setup):
             requested_at=now - timedelta(days=2),
             input_tokens=1_000,
         )
-        await _add_log(
+        copy_log = await _add_log(
             logs_repo,
             account_id="acc_canon__copy",
             request_id="req_copy",
             requested_at=now - timedelta(days=2),
             input_tokens=500,
         )
+        await session.execute(
+            insert(RequestLogHistoricalFact).from_select(
+                FACT_INSERT_COLUMNS,
+                historical_fact_projection([copy_log.id]),
+            )
+        )
+        await session.commit()
 
     await run_fold_pass(now=now)
     assert len(await _rollup_rows()) == 2
@@ -280,6 +294,13 @@ async def test_identity_merge_preserves_folded_usage(db_setup):
     assert rows[0].account_id == "acc_canon"
     assert rows[0].request_count == 2
     assert rows[0].input_tokens == 1_500
+
+    async with SessionLocal() as session:
+        fact = await session.scalar(
+            select(RequestLogHistoricalFact).where(RequestLogHistoricalFact.request_log_id == copy_log.id)
+        )
+        assert fact is not None
+        assert fact.account_id == "acc_canon"
 
     summaries = await _summaries()
     assert "acc_canon__copy" not in summaries
