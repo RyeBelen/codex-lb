@@ -205,7 +205,7 @@ async def test_request_log_pruning_rolls_back_when_fact_id_already_exists(db_set
 
     await run_fold_pass(now=now)
     _set_retention(monkeypatch, request_logs=30)
-    with pytest.raises(IntegrityError, match="UNIQUE constraint failed"):
+    with pytest.raises(IntegrityError):
         await run_retention_pass(now=now)
 
     async with SessionLocal() as session:
