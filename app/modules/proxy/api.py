@@ -4667,25 +4667,33 @@ def _compact_response_output_item(payload: CompactResponsePayload) -> dict[str, 
             if item is None:
                 continue
             item_type = item.get("type")
-            encrypted_content = item.get("encrypted_content")
             if isinstance(item_type, str) and item_type in {"compaction", "compaction_summary"}:
-                if isinstance(encrypted_content, str):
-                    return {
-                        "type": "compaction",
-                        "encrypted_content": encrypted_content,
-                    }
+                normalized_item = _normalize_compaction_output_item(item)
+                if normalized_item is not None:
+                    return normalized_item
     summary = getattr(payload, "compaction_summary", None)
     if summary is None:
         summary = extra.get("compaction_summary")
     summary_mapping = _json_mapping_from_model_or_mapping(summary)
     if summary_mapping is not None:
-        encrypted_content = summary_mapping.get("encrypted_content")
-        if isinstance(encrypted_content, str):
-            return {
-                "type": "compaction",
-                "encrypted_content": encrypted_content,
-            }
+        return _normalize_compaction_output_item(summary_mapping)
     return None
+
+
+def _normalize_compaction_output_item(
+    item: Mapping[str, JsonValue],
+) -> dict[str, JsonValue] | None:
+    encrypted_content = item.get("encrypted_content")
+    if not isinstance(encrypted_content, str):
+        return None
+    normalized_item: dict[str, JsonValue] = {
+        "type": "compaction",
+        "encrypted_content": encrypted_content,
+    }
+    item_id = item.get("id")
+    if isinstance(item_id, str) and item_id:
+        normalized_item["id"] = item_id
+    return normalized_item
 
 
 def _json_mapping_from_model_or_mapping(value: object) -> Mapping[str, JsonValue] | None:
@@ -4958,6 +4966,9 @@ async def _wait_for_first_stream_probe(
                     capacity_wait_event.clear()
                 return True
             if capacity_wait_event.is_set():
+                if capacity_ready_event is None:
+                    capacity_wait_event.clear()
+                    continue
                 recovery_ready_task = (
                     asyncio.create_task(capacity_ready_event.wait()) if capacity_ready_event is not None else None
                 )

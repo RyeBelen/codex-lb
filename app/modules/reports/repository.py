@@ -7,8 +7,10 @@ from zoneinfo import ZoneInfo
 
 from sqlalchemy import and_, case, func, literal, or_, select, union_all
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql.selectable import Subquery
 
-from app.db.models import Account, RequestLog
+from app.db.models import Account
+from app.modules.request_logs.history import request_history_selectable
 
 _INTERNAL_LIMIT_WARMUP_SOURCE = "limit_warmup"
 _INTERNAL_WARMUP_REQUEST_KINDS = ("warmup", "limit_warmup")
@@ -131,20 +133,21 @@ class ReportsRepository:
         model: str | None = None,
         useragent_group: str | None = None,
     ) -> SummaryAggregateRow:
-        conditions = _report_conditions(start_date, end_date, account_ids, model, useragent_group)
+        history = request_history_selectable(name="report_summary_history")
+        conditions = _report_conditions(history, start_date, end_date, account_ids, model, useragent_group)
 
         result = await self._session.execute(
             select(
-                func.coalesce(func.sum(RequestLog.cost_usd), 0.0).label("total_cost_usd"),
-                func.coalesce(func.sum(RequestLog.input_tokens), 0).label("total_input_tokens"),
-                func.coalesce(func.sum(RequestLog.output_tokens), 0).label("total_output_tokens"),
-                func.coalesce(func.sum(RequestLog.cached_input_tokens), 0).label("total_cached_tokens"),
+                func.coalesce(func.sum(history.c.cost_usd), 0.0).label("total_cost_usd"),
+                func.coalesce(func.sum(history.c.input_tokens), 0).label("total_input_tokens"),
+                func.coalesce(func.sum(history.c.output_tokens), 0).label("total_output_tokens"),
+                func.coalesce(func.sum(history.c.cached_input_tokens), 0).label("total_cached_tokens"),
                 func.count().label("total_requests"),
                 func.coalesce(
-                    func.sum(case((RequestLog.status != "success", 1), else_=0)),
+                    func.sum(case((history.c.status != "success", 1), else_=0)),
                     0,
                 ).label("total_errors"),
-                func.count(func.distinct(RequestLog.account_id)).label("active_accounts"),
+                func.count(func.distinct(history.c.account_id)).label("active_accounts"),
             ).where(and_(*conditions))
         )
         row = result.one()
@@ -166,20 +169,21 @@ class ReportsRepository:
         model: str | None = None,
         useragent_group: str | None = None,
     ) -> list[ModelAggregateRow]:
+        history = request_history_selectable(name="report_model_history")
         conditions = [
-            *_report_conditions(start_date, end_date, account_ids, model, useragent_group),
-            RequestLog.model.is_not(None),
+            *_report_conditions(history, start_date, end_date, account_ids, model, useragent_group),
+            history.c.model.is_not(None),
         ]
 
         stmt = (
             select(
-                RequestLog.model,
-                func.coalesce(func.sum(RequestLog.cost_usd), 0.0).label("cost_usd"),
+                history.c.model,
+                func.coalesce(func.sum(history.c.cost_usd), 0.0).label("cost_usd"),
                 func.count().label("request_count"),
             )
             .where(and_(*conditions))
-            .group_by(RequestLog.model)
-            .order_by(func.coalesce(func.sum(RequestLog.cost_usd), 0.0).desc())
+            .group_by(history.c.model)
+            .order_by(func.coalesce(func.sum(history.c.cost_usd), 0.0).desc())
         )
         result = await self._session.execute(stmt)
         return [
@@ -199,17 +203,18 @@ class ReportsRepository:
         model: str | None = None,
         useragent_group: str | None = None,
     ) -> list[AccountAggregateRow]:
-        conditions = _report_conditions(start_date, end_date, account_ids, model, useragent_group)
+        history = request_history_selectable(name="report_account_history")
+        conditions = _report_conditions(history, start_date, end_date, account_ids, model, useragent_group)
 
         stmt = (
             select(
-                RequestLog.account_id,
-                func.coalesce(func.sum(RequestLog.cost_usd), 0.0).label("cost_usd"),
+                history.c.account_id,
+                func.coalesce(func.sum(history.c.cost_usd), 0.0).label("cost_usd"),
                 func.count().label("request_count"),
             )
             .where(and_(*conditions))
-            .group_by(RequestLog.account_id)
-            .order_by(func.coalesce(func.sum(RequestLog.cost_usd), 0.0).desc())
+            .group_by(history.c.account_id)
+            .order_by(func.coalesce(func.sum(history.c.cost_usd), 0.0).desc())
         )
         result = await self._session.execute(stmt)
         rows = result.all()
@@ -240,21 +245,22 @@ class ReportsRepository:
         model: str | None = None,
         useragent_group: str | None = None,
     ) -> list[UserAgentAggregateRow]:
-        useragent_group_bucket = _useragent_group_bucket_expr()
+        history = request_history_selectable(name="report_useragent_history")
+        useragent_group_bucket = _useragent_group_bucket_expr(history)
         conditions = [
-            *_report_conditions(start_date, end_date, account_ids, model, useragent_group),
-            or_(RequestLog.useragent_group.is_(None), func.trim(RequestLog.useragent_group) != ""),
+            *_report_conditions(history, start_date, end_date, account_ids, model, useragent_group),
+            or_(history.c.useragent_group.is_(None), func.trim(history.c.useragent_group) != ""),
         ]
 
         stmt = (
             select(
                 useragent_group_bucket.label("useragent_group"),
-                func.coalesce(func.sum(RequestLog.cost_usd), 0.0).label("cost_usd"),
+                func.coalesce(func.sum(history.c.cost_usd), 0.0).label("cost_usd"),
                 func.count().label("request_count"),
             )
             .where(and_(*conditions))
             .group_by(useragent_group_bucket)
-            .order_by(func.coalesce(func.sum(RequestLog.cost_usd), 0.0).desc())
+            .order_by(func.coalesce(func.sum(history.c.cost_usd), 0.0).desc())
         )
         result = await self._session.execute(stmt)
         return [
@@ -274,13 +280,14 @@ class ReportsRepository:
         model: str | None = None,
         useragent_group: str | None = None,
     ) -> int:
+        history = request_history_selectable(name="report_active_accounts_history")
         conditions = [
-            *_report_conditions(start_date, end_date, account_ids, model, useragent_group),
-            RequestLog.account_id.is_not(None),
+            *_report_conditions(history, start_date, end_date, account_ids, model, useragent_group),
+            history.c.account_id.is_not(None),
         ]
 
         result = await self._session.execute(
-            select(func.count(func.distinct(RequestLog.account_id))).where(and_(*conditions))
+            select(func.count(func.distinct(history.c.account_id))).where(and_(*conditions))
         )
         return int(result.scalar_one() or 0)
 
@@ -290,21 +297,23 @@ class ReportsRepository:
         model: str | None = None,
         useragent_group: str | None = None,
     ) -> datetime | None:
-        conditions = [_normal_traffic_clause()]
+        history = request_history_selectable(name="report_earliest_history")
+        conditions = [_normal_traffic_clause(history)]
         if account_ids:
-            conditions.append(RequestLog.account_id.in_(account_ids))
+            conditions.append(history.c.account_id.in_(account_ids))
         if model:
-            conditions.append(RequestLog.model == model)
-        useragent_group_clause = _useragent_group_filter_clause(useragent_group)
+            conditions.append(history.c.model == model)
+        useragent_group_clause = _useragent_group_filter_clause(history, useragent_group)
         if useragent_group_clause is not None:
             conditions.append(useragent_group_clause)
 
-        result = await self._session.execute(select(func.min(RequestLog.requested_at)).where(and_(*conditions)))
+        result = await self._session.execute(select(func.min(history.c.requested_at)).where(and_(*conditions)))
         value = result.scalar_one_or_none()
         return value if isinstance(value, datetime) else None
 
 
 def _report_conditions(
+    history: Subquery,
     start_date: datetime,
     end_date: datetime,
     account_ids: list[str] | None,
@@ -312,41 +321,41 @@ def _report_conditions(
     useragent_group: str | None,
 ) -> list:
     conditions = [
-        RequestLog.requested_at >= start_date,
-        RequestLog.requested_at < end_date,
-        _normal_traffic_clause(),
+        history.c.requested_at >= start_date,
+        history.c.requested_at < end_date,
+        _normal_traffic_clause(history),
     ]
     if account_ids:
-        conditions.append(RequestLog.account_id.in_(account_ids))
+        conditions.append(history.c.account_id.in_(account_ids))
     if model:
-        conditions.append(RequestLog.model == model)
-    useragent_group_clause = _useragent_group_filter_clause(useragent_group)
+        conditions.append(history.c.model == model)
+    useragent_group_clause = _useragent_group_filter_clause(history, useragent_group)
     if useragent_group_clause is not None:
         conditions.append(useragent_group_clause)
     return conditions
 
 
-def _useragent_group_bucket_expr():
+def _useragent_group_bucket_expr(history: Subquery):
     return case(
-        (RequestLog.useragent_group.is_(None), literal(MISSING_USERAGENT_GROUP)),
-        else_=RequestLog.useragent_group,
+        (history.c.useragent_group.is_(None), literal(MISSING_USERAGENT_GROUP)),
+        else_=history.c.useragent_group,
     )
 
 
-def _useragent_group_filter_clause(useragent_group: str | None):
+def _useragent_group_filter_clause(history: Subquery, useragent_group: str | None):
     if not useragent_group:
         return None
     if useragent_group == MISSING_USERAGENT_GROUP:
-        return RequestLog.useragent_group.is_(None)
-    return RequestLog.useragent_group == useragent_group
+        return history.c.useragent_group.is_(None)
+    return history.c.useragent_group == useragent_group
 
 
-def _normal_traffic_clause():
+def _normal_traffic_clause(history: Subquery):
     return and_(
-        or_(RequestLog.source.is_(None), RequestLog.source != _INTERNAL_LIMIT_WARMUP_SOURCE),
+        or_(history.c.source.is_(None), history.c.source != _INTERNAL_LIMIT_WARMUP_SOURCE),
         or_(
-            RequestLog.request_kind.is_(None),
-            RequestLog.request_kind.not_in(_INTERNAL_WARMUP_REQUEST_KINDS),
+            history.c.request_kind.is_(None),
+            history.c.request_kind.not_in(_INTERNAL_WARMUP_REQUEST_KINDS),
         ),
     )
 
@@ -370,41 +379,42 @@ def _daily_speed_medians_stmt(
     model: str | None,
     useragent_group: str | None,
 ):
-    useragent_group_clause = _useragent_group_filter_clause(useragent_group)
+    history = request_history_selectable(name="report_daily_speed_history")
+    useragent_group_clause = _useragent_group_filter_clause(history, useragent_group)
     day_ranges_cte = _day_ranges_cte(day_ranges)
     traffic_join = day_ranges_cte.join(
-        RequestLog,
+        history,
         and_(
-            RequestLog.requested_at >= day_ranges_cte.c.day_start,
-            RequestLog.requested_at < day_ranges_cte.c.day_end,
-            _normal_traffic_clause(),
-            *([RequestLog.account_id.in_(account_ids)] if account_ids else []),
-            *([RequestLog.model == model] if model else []),
+            history.c.requested_at >= day_ranges_cte.c.day_start,
+            history.c.requested_at < day_ranges_cte.c.day_end,
+            _normal_traffic_clause(history),
+            *([history.c.account_id.in_(account_ids)] if account_ids else []),
+            *([history.c.model == model] if model else []),
             *([useragent_group_clause] if useragent_group_clause is not None else []),
         ),
     )
-    token_count = RequestLog.output_tokens
+    token_count = history.c.output_tokens
     ttft_values_cte = (
         select(
             day_ranges_cte.c.report_date,
-            RequestLog.latency_first_token_ms.label("ttft_ms"),
+            history.c.latency_first_token_ms.label("ttft_ms"),
         )
         .select_from(traffic_join)
-        .where(RequestLog.latency_first_token_ms.is_not(None))
+        .where(history.c.latency_first_token_ms.is_not(None))
         .cte("daily_ttft_values")
     )
     tps_values_cte = (
         select(
             day_ranges_cte.c.report_date,
-            (token_count * 1000.0 / (RequestLog.latency_ms - RequestLog.latency_first_token_ms)).label("tps"),
+            (token_count * 1000.0 / (history.c.latency_ms - history.c.latency_first_token_ms)).label("tps"),
         )
         .select_from(traffic_join)
         .where(
             token_count.is_not(None),
             token_count > 0,
-            RequestLog.latency_ms.is_not(None),
-            RequestLog.latency_first_token_ms.is_not(None),
-            RequestLog.latency_ms > RequestLog.latency_first_token_ms,
+            history.c.latency_ms.is_not(None),
+            history.c.latency_first_token_ms.is_not(None),
+            history.c.latency_ms > history.c.latency_first_token_ms,
         )
         .cte("daily_tps_values")
     )
@@ -478,31 +488,32 @@ def _daily_rows_stmt(
     model: str | None,
     useragent_group: str | None,
 ):
-    useragent_group_clause = _useragent_group_filter_clause(useragent_group)
+    history = request_history_selectable(name="report_daily_history")
+    useragent_group_clause = _useragent_group_filter_clause(history, useragent_group)
     day_ranges_cte = _day_ranges_cte(day_ranges)
     return (
         select(
             day_ranges_cte.c.report_date,
-            func.count(RequestLog.id).label("requests"),
-            func.coalesce(func.sum(RequestLog.input_tokens), 0).label("input_tokens"),
-            func.coalesce(func.sum(RequestLog.output_tokens), 0).label("output_tokens"),
-            func.coalesce(func.sum(RequestLog.cached_input_tokens), 0).label("cached_input_tokens"),
-            func.coalesce(func.sum(RequestLog.cost_usd), 0.0).label("cost_usd"),
-            func.count(func.distinct(RequestLog.account_id)).label("active_accounts"),
+            func.count(history.c.id).label("requests"),
+            func.coalesce(func.sum(history.c.input_tokens), 0).label("input_tokens"),
+            func.coalesce(func.sum(history.c.output_tokens), 0).label("output_tokens"),
+            func.coalesce(func.sum(history.c.cached_input_tokens), 0).label("cached_input_tokens"),
+            func.coalesce(func.sum(history.c.cost_usd), 0.0).label("cost_usd"),
+            func.count(func.distinct(history.c.account_id)).label("active_accounts"),
             func.coalesce(
-                func.sum(case((RequestLog.status != "success", 1), else_=0)),
+                func.sum(case((history.c.status != "success", 1), else_=0)),
                 0,
             ).label("error_count"),
         )
         .select_from(
             day_ranges_cte.join(
-                RequestLog,
+                history,
                 and_(
-                    RequestLog.requested_at >= day_ranges_cte.c.day_start,
-                    RequestLog.requested_at < day_ranges_cte.c.day_end,
-                    _normal_traffic_clause(),
-                    *([RequestLog.account_id.in_(account_ids)] if account_ids else []),
-                    *([RequestLog.model == model] if model else []),
+                    history.c.requested_at >= day_ranges_cte.c.day_start,
+                    history.c.requested_at < day_ranges_cte.c.day_end,
+                    _normal_traffic_clause(history),
+                    *([history.c.account_id.in_(account_ids)] if account_ids else []),
+                    *([history.c.model == model] if model else []),
                     *([useragent_group_clause] if useragent_group_clause is not None else []),
                 ),
             )

@@ -460,9 +460,10 @@ def _create_backup(codex_home: Path, jsonl_files: Sequence[Path], state_dbs: Seq
 
 def _backup_sqlite_db(source: Path, destination: Path) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
-    with closing(_connect_sqlite(source, read_only=True)) as source_conn, closing(
-        sqlite3.connect(str(destination))
-    ) as backup_conn:
+    with (
+        closing(_connect_sqlite(source, read_only=True)) as source_conn,
+        closing(sqlite3.connect(str(destination))) as backup_conn,
+    ):
         source_conn.backup(backup_conn)
         backup_conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         backup_conn.execute("PRAGMA journal_mode=DELETE")

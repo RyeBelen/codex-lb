@@ -198,6 +198,7 @@ def test_compact_response_output_item_accepts_modeled_output_field() -> None:
             "object": "response.compaction",
             "output": [
                 {
+                    "id": "cmp_modeled_context",
                     "type": "compaction",
                     "encrypted_content": "MODELED_CONTEXT",
                 }
@@ -206,8 +207,23 @@ def test_compact_response_output_item_accepts_modeled_output_field() -> None:
     )
 
     assert proxy_api_module._compact_response_output_item(payload) == {
+        "id": "cmp_modeled_context",
         "type": "compaction",
         "encrypted_content": "MODELED_CONTEXT",
+    }
+
+
+def test_compact_response_output_item_retains_legacy_idless_shape() -> None:
+    payload = CompactResponsePayload.model_validate(
+        {
+            "object": "response.compaction",
+            "compaction_summary": {"encrypted_content": "LEGACY_CONTEXT"},
+        }
+    )
+
+    assert proxy_api_module._compact_response_output_item(payload) == {
+        "type": "compaction",
+        "encrypted_content": "LEGACY_CONTEXT",
     }
 
 
@@ -228,7 +244,7 @@ async def test_synthetic_compaction_stream_preserves_mapping_usage() -> None:
     blocks = [
         block
         async for block in proxy_api_module._synthetic_compaction_response_stream(
-            {"type": "compaction", "encrypted_content": "SUMMARY"},
+            {"id": "cmp_summary", "type": "compaction", "encrypted_content": "SUMMARY"},
             response_id="resp_mapping_usage",
             usage={"input_tokens": 1, "output_tokens": 2, "total_tokens": 3},
         )
@@ -236,8 +252,18 @@ async def test_synthetic_compaction_stream_preserves_mapping_usage() -> None:
 
     completed = proxy_api_module._parse_sse_payload(blocks[1])
     assert completed is not None
+    output_item = proxy_api_module._parse_sse_payload(blocks[0])
+    assert output_item is not None
     response = completed["response"]
     assert isinstance(response, dict)
+    streamed_item = output_item["item"]
+    completed_output = response["output"]
+    assert isinstance(streamed_item, dict)
+    assert isinstance(completed_output, list)
+    completed_item = completed_output[0]
+    assert isinstance(completed_item, dict)
+    assert streamed_item == completed_item
+    assert streamed_item["id"] == "cmp_summary"
     assert response["usage"] == {"input_tokens": 1, "output_tokens": 2, "total_tokens": 3}
 
 

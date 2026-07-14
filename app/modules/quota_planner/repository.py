@@ -14,10 +14,10 @@ from app.db.models import (
     QuotaPlannerDecision,
     QuotaPlannerSettings,
     QuotaWindowObservation,
-    RequestLog,
 )
 from app.db.session import sqlite_writer_section
 from app.modules.quota_planner.logic import PlannerSettings, encode_working_days, parse_working_days
+from app.modules.request_logs.history import request_history_selectable
 
 _SETTINGS_ID = 1
 
@@ -232,13 +232,14 @@ class QuotaPlannerRepository:
         active_warmups = (
             select(func.count(QuotaPlannerDecision.id)).where(_active_warmup_budget_clause(since)).scalar_subquery()
         )
+        history = request_history_selectable(name="quota_warmup_claim_history")
         warmup_cost = (
-            select(func.coalesce(func.sum(RequestLog.cost_usd), 0.0))
+            select(func.coalesce(func.sum(history.c.cost_usd), 0.0))
             .where(
                 and_(
-                    RequestLog.request_kind == "warmup",
-                    RequestLog.requested_at >= since,
-                    RequestLog.deleted_at.is_(None),
+                    history.c.request_kind == "warmup",
+                    history.c.requested_at >= since,
+                    history.c.deleted_at.is_(None),
                 )
             )
             .scalar_subquery()
@@ -330,11 +331,12 @@ class QuotaPlannerRepository:
 
     async def warmup_cost_since(self, since: datetime) -> float:
         since = to_utc_naive(since)
-        stmt = select(func.coalesce(func.sum(RequestLog.cost_usd), 0.0)).where(
+        history = request_history_selectable(name="quota_warmup_cost_history")
+        stmt = select(func.coalesce(func.sum(history.c.cost_usd), 0.0)).where(
             and_(
-                RequestLog.request_kind == "warmup",
-                RequestLog.requested_at >= since,
-                RequestLog.deleted_at.is_(None),
+                history.c.request_kind == "warmup",
+                history.c.requested_at >= since,
+                history.c.deleted_at.is_(None),
             )
         )
         return float(await self._session.scalar(stmt) or 0.0)
@@ -397,42 +399,43 @@ class QuotaPlannerRepository:
         bucket_seconds: int = 900,
     ) -> list[DemandBin]:
         since = to_utc_naive(since) if since is not None else (utcnow() - timedelta(days=28))
+        history = request_history_selectable(name="quota_demand_history")
         bind = self._session.get_bind()
         dialect = bind.dialect.name if bind else "sqlite"
         if dialect == "postgresql":
-            bucket_expr = func.floor(func.extract("epoch", RequestLog.requested_at) / bucket_seconds) * bucket_seconds
+            bucket_expr = func.floor(func.extract("epoch", history.c.requested_at) / bucket_seconds) * bucket_seconds
         else:
-            epoch_col = cast(func.strftime("%s", RequestLog.requested_at), Integer)
+            epoch_col = cast(func.strftime("%s", history.c.requested_at), Integer)
             bucket_expr = cast(epoch_col / bucket_seconds, Integer) * bucket_seconds
         bucket_col = bucket_expr.label("slot_epoch")
-        request_kind = func.coalesce(RequestLog.request_kind, literal("real")).label("request_kind")
+        request_kind = func.coalesce(history.c.request_kind, literal("real")).label("request_kind")
         stmt = (
             select(
                 bucket_col,
-                RequestLog.account_id,
-                RequestLog.api_key_id,
-                RequestLog.model,
-                RequestLog.reasoning_effort,
+                history.c.account_id,
+                history.c.api_key_id,
+                history.c.model,
+                history.c.reasoning_effort,
                 request_kind,
-                RequestLog.status,
-                func.coalesce(func.sum(RequestLog.input_tokens), 0).label("input_tokens"),
-                func.coalesce(func.sum(RequestLog.cached_input_tokens), 0).label("cached_input_tokens"),
+                history.c.status,
+                func.coalesce(func.sum(history.c.input_tokens), 0).label("input_tokens"),
+                func.coalesce(func.sum(history.c.cached_input_tokens), 0).label("cached_input_tokens"),
                 func.coalesce(
-                    func.sum(func.coalesce(RequestLog.output_tokens, RequestLog.reasoning_tokens, 0)),
+                    func.sum(func.coalesce(history.c.output_tokens, history.c.reasoning_tokens, 0)),
                     0,
                 ).label("output_tokens"),
-                func.coalesce(func.sum(RequestLog.cost_usd), 0.0).label("cost_usd"),
-                func.count(RequestLog.id).label("request_count"),
+                func.coalesce(func.sum(history.c.cost_usd), 0.0).label("cost_usd"),
+                func.count(history.c.id).label("request_count"),
             )
-            .where(and_(RequestLog.requested_at >= since, RequestLog.deleted_at.is_(None)))
+            .where(and_(history.c.requested_at >= since, history.c.deleted_at.is_(None)))
             .group_by(
                 bucket_col,
-                RequestLog.account_id,
-                RequestLog.api_key_id,
-                RequestLog.model,
-                RequestLog.reasoning_effort,
+                history.c.account_id,
+                history.c.api_key_id,
+                history.c.model,
+                history.c.reasoning_effort,
                 request_kind,
-                RequestLog.status,
+                history.c.status,
             )
             .order_by(bucket_col)
         )

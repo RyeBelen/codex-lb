@@ -3,13 +3,20 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timedelta
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, insert, select
 
 from app.core.config.settings import get_settings
 from app.core.utils.time import utcnow
-from app.db.models import AccountUsageRollupState, AdditionalUsageHistory, RequestLog, UsageHistory
+from app.db.models import (
+    AccountUsageRollupState,
+    AdditionalUsageHistory,
+    RequestLog,
+    RequestLogHistoricalFact,
+    UsageHistory,
+)
 from app.db.session import get_background_session, sqlite_writer_section
-from app.modules.accounts.usage_rollup import FOLD_LAG
+from app.modules.accounts.usage_rollup import FOLD_LAG, lock_fold_state
+from app.modules.request_logs.history import FACT_INSERT_COLUMNS, historical_fact_projection
 from app.modules.usage.repository import _clear_bulk_history_since_sqlite_cache
 
 logger = logging.getLogger(__name__)
@@ -73,6 +80,12 @@ async def _prune_request_logs(cutoff: datetime, *, now: datetime) -> int:
                     if total == 0:
                         logger.info("Retention: skipping request_logs pruning (no rollup watermark yet)")
                     return total
+                await lock_fold_state(session)
+                watermark = (
+                    await session.execute(
+                        select(AccountUsageRollupState.folded_through).where(AccountUsageRollupState.id == 1)
+                    )
+                ).scalar_one()
                 if watermark < now - 2 * FOLD_LAG:
                     if total == 0:
                         logger.info(
@@ -81,14 +94,51 @@ async def _prune_request_logs(cutoff: datetime, *, now: datetime) -> int:
                         )
                     return total
                 effective_cutoff = min(cutoff, watermark - FOLD_LAG)
-                batch_ids = (
-                    select(RequestLog.id).where(RequestLog.requested_at < effective_cutoff).limit(BATCH_SIZE)
-                ).scalar_subquery()
-                result = await session.execute(
-                    delete(RequestLog).where(RequestLog.id.in_(batch_ids)).returning(RequestLog.id)
+                selected_ids = tuple(
+                    (
+                        await session.execute(
+                            select(RequestLog.id)
+                            .where(RequestLog.requested_at < effective_cutoff)
+                            .order_by(RequestLog.requested_at, RequestLog.id)
+                            .limit(BATCH_SIZE)
+                            .with_for_update()
+                        )
+                    ).scalars()
                 )
+                if not selected_ids:
+                    return total
+                await session.execute(
+                    insert(RequestLogHistoricalFact).from_select(
+                        FACT_INSERT_COLUMNS,
+                        historical_fact_projection(selected_ids),
+                    )
+                )
+                projected_ids = set(
+                    (
+                        await session.execute(
+                            select(RequestLogHistoricalFact.request_log_id).where(
+                                RequestLogHistoricalFact.request_log_id.in_(selected_ids)
+                            )
+                        )
+                    ).scalars()
+                )
+                selected_set = set(selected_ids)
+                if projected_ids != selected_set:
+                    raise RuntimeError(
+                        "request-log fact projection parity failed "
+                        f"selected={len(selected_set)} projected={len(projected_ids)}"
+                    )
+                result = await session.execute(
+                    delete(RequestLog).where(RequestLog.id.in_(selected_ids)).returning(RequestLog.id)
+                )
+                deleted_ids = set(result.scalars())
+                if deleted_ids != selected_set:
+                    raise RuntimeError(
+                        "request-log fact deletion parity failed "
+                        f"selected={len(selected_set)} deleted={len(deleted_ids)}"
+                    )
                 await session.commit()
-        deleted = len(result.scalars().all())
+        deleted = len(deleted_ids)
         total += deleted
         if deleted < BATCH_SIZE:
             return total

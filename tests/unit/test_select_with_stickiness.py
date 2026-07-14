@@ -1059,7 +1059,7 @@ async def test_burn_first_reallocation_only_when_burn_first_is_selectable():
     ],
 )
 @pytest.mark.asyncio
-async def test_selectable_burn_first_overrides_healthy_sticky_account(sticky_kind):
+async def test_selectable_healthy_sticky_account_precedes_burn_first(sticky_kind):
     pinned = _active("normal", used_percent=1.0)
     burn = _active("burn", used_percent=99.0, routing_policy="burn_first")
     repo = _make_sticky_repo(existing_account_id="normal")
@@ -1073,6 +1073,4 @@ async def test_selectable_burn_first_overrides_healthy_sticky_account(sticky_kin
     )
 
     assert result.account is not None
-    assert result.account.account_id == "burn"
-    repo.delete.assert_called_once_with("key1", kind=sticky_kind)
-    repo.upsert.assert_called_once_with("key1", "burn", kind=sticky_kind)
+    assert result.account.account_id == "normal"

@@ -216,6 +216,7 @@ class Settings(BaseSettings):
         default_factory=list
     )
     http_responses_session_bridge_stuck_gate_retire_after_seconds: float = Field(default=300.0, gt=0)
+    http_responses_session_bridge_response_created_timeout_seconds: float = Field(default=120.0, gt=0)
     http_responses_session_bridge_max_sessions: int = Field(default=256, gt=0)
     http_responses_session_bridge_queue_limit: int = Field(default=8, gt=0)
     http_responses_session_bridge_gateway_safe_mode: bool = False
@@ -363,8 +364,8 @@ class Settings(BaseSettings):
     @field_validator("request_log_retention_days")
     @classmethod
     def _validate_request_log_retention(cls, value: int) -> int:
-        if value != 0 and value < 30:
-            raise ValueError("request_log_retention_days must be 0 (disabled) or >= 30")
+        if value != 0 and value < 7:
+            raise ValueError("request_log_retention_days must be 0 (disabled) or >= 7")
         return value
 
     @field_validator("usage_history_retention_days")
