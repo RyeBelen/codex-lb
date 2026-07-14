@@ -40,6 +40,25 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     retag.add_argument(
         "--from", dest="source_provider", metavar="PROVIDER", required=True, help="Provider tag to replace."
     )
+
+    history = subparsers.add_parser(
+        "historical-request-facts",
+        help="Manage compact historical request facts.",
+        formatter_class=_CliHelpFormatter,
+    )
+    history_subparsers = history.add_subparsers(dest="historical_request_facts_command")
+    backfill = history_subparsers.add_parser(
+        "backfill",
+        help="Backfill missing compact facts from a verified SQLite snapshot.",
+        formatter_class=_CliHelpFormatter,
+    )
+    backfill.add_argument("--snapshot", type=Path, required=True)
+    backfill.add_argument("--source-sha256", required=True)
+    backfill.add_argument("--source-revision", required=True)
+    backfill.add_argument("--expect-count", type=int, required=True)
+    backfill.add_argument("--expect-id-sha256")
+    backfill.add_argument("--batch-size", type=int, default=10_000)
+    backfill.add_argument("--apply", action="store_true", help="Insert facts; default is verified dry-run.")
     retag.add_argument("--to", dest="target_provider", metavar="PROVIDER", required=True, help="Provider tag to write.")
     retag.add_argument(
         "--codex-home",
@@ -91,6 +110,11 @@ def main(argv: Sequence[str] | None = None) -> None:
             _run_codex_sessions_retag(args)
             return
         raise SystemExit("codex-sessions requires a subcommand")
+    if args.command == "historical-request-facts":
+        if args.historical_request_facts_command == "backfill":
+            _run_historical_request_facts_backfill(args)
+            return
+        raise SystemExit("historical-request-facts requires a subcommand")
     if bool(args.ssl_certfile) ^ bool(args.ssl_keyfile):
         raise SystemExit("Both --ssl-certfile and --ssl-keyfile must be provided together.")
 
@@ -208,6 +232,33 @@ def _print_retag_summary(result: RetagResult) -> None:
     print(f"- {action} SQLite rows: {result.sqlite_rows_matched if result.dry_run else result.sqlite_rows_updated}")
     if result.backup_path is not None:
         print(f"- Backup: {result.backup_path}")
+
+
+def _run_historical_request_facts_backfill(args: argparse.Namespace) -> None:
+    from app.core.config.settings import get_settings
+    from app.modules.request_logs.history_backfill import backfill_request_history
+
+    result = backfill_request_history(
+        database_url=get_settings().database_url,
+        snapshot_path=args.snapshot,
+        expected_source_sha256=args.source_sha256,
+        expected_source_revision=args.source_revision,
+        expected_candidate_count=args.expect_count,
+        expected_candidate_id_sha256=args.expect_id_sha256,
+        apply=args.apply,
+        batch_size=args.batch_size,
+    )
+    print("")
+    print("Historical request fact backfill")
+    print(f"- Mode: {'dry-run' if result.dry_run else 'apply'}")
+    print(f"- Source SHA-256: {result.source_sha256}")
+    print(f"- Source revision: {result.source_revision}")
+    print(f"- Source request-log columns: {result.source_column_count}")
+    print(f"- Candidates: {result.candidate_count}")
+    print(f"- Candidate id SHA-256: {result.candidate_id_sha256}")
+    print(f"- Candidate id range: {result.first_request_log_id}..{result.last_request_log_id}")
+    print(f"- Candidate time range: {result.first_requested_at}..{result.last_requested_at}")
+    print(f"- Inserted: {result.inserted_count}")
 
 
 if __name__ == "__main__":
