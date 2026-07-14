@@ -21,5 +21,5 @@
 
 - [x] 4.1 Run strict OpenSpec validation where available, lint, type checks, focused backend suites, frontend tests, and production build
 - [x] 4.2 Rehearse the verified 1,043-row/23,080-request import on a production clone and prove exact totals, disjointness, unchanged lifetime rollups, and second-run zero
-- [ ] 4.3 Commit and push focused changes; pass credential-free GitHub CI including Docker and PostgreSQL checks
-- [ ] 4.4 Confirm production remained unchanged and record final clone/CI evidence before production approval
+- [x] 4.3 Commit and push focused changes; pass credential-free GitHub CI including Docker and PostgreSQL checks
+- [x] 4.4 Confirm production remained unchanged and record final clone/CI evidence before production approval

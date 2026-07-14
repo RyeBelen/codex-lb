@@ -36,8 +36,7 @@
 ### Automated checks
 
 - Backend Ruff: pass.
-- Scoped backend `ty`: pass. Full-tree `ty` has the existing optional
-  `prometheus_client` unresolved-import diagnostic outside this change.
+- Scoped and full-tree backend `ty`: pass.
 - Reports unit/integration/API: 41 passed.
 - Recovery/migration/CLI plus retention/history focus: 81 passed, one
   PostgreSQL-only test skipped locally because no PostgreSQL test URL was set.
@@ -45,6 +44,12 @@
 - Frontend TypeScript, Reports ESLint, and production build: pass.
 - OpenSpec CLI was unavailable in the local shell; artifact structure and
   normative/context separation were checked directly.
+- Credential-free GitHub CI run
+  `https://github.com/RyeBelen/codex-lb/actions/runs/29332117064`: pass on
+  commit `b8fd04fbe63a9ae4bd7a0d8b259edd70b024cb82`, including Docker/Trivy,
+  SQLite and PostgreSQL migration checks, PostgreSQL tests, the complete
+  backend test matrix, frontend tests with coverage, package/build, lint, and
+  type checks.
 
 ### Isolation decision
 
@@ -55,4 +60,7 @@ variables, volume, or deployment changed. Further pre-production validation uses
 the production clone plus credential-free GitHub CI so no copied service can
 call or compete with live upstream APIs.
 
-Production remains unchanged. Final GitHub CI is still required.
+Production remained unchanged on successful deployment `74341c34` from
+`main` commit `4acb84e1800f305272aba5150785fb92ec378668`; the recovery branch was
+not deployed to Railway. Production approval and deployment remain separate
+post-merge decisions.
