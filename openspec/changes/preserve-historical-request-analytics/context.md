@@ -27,7 +27,8 @@ lookup.
 - Missing/invalid snapshot schema or checksum prevents backfill.
 - Backfill reruns insert zero rows after a successful first run.
 - Account hard-delete removes facts; soft-delete anonymizes attribution.
-- Staging uses a separate volume and disabled schedulers while data is seeded.
+- Staging uses a separate environment volume instance, standard authentication,
+  and disabled production-affecting schedulers while test data is seeded.
 - Production rollout requires a fresh online backup and explicit approval after
   staging parity; code-only rollback is not allowed after schema migration.
 

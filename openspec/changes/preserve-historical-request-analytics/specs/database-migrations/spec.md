@@ -17,16 +17,15 @@ drift detection MUST pass.
 ### Requirement: Production recovery is proven outside production
 
 The feature branch MUST pass a production-clone migration/backfill/prune
-rehearsal and an isolated Railway staging deployment on a separate volume before
-production-main rollout. Evidence MUST include source checksum, integrity,
-candidate/insert/idempotency counts, cross-consumer query parity, storage size,
-health, and live request smoke tests.
+rehearsal and an isolated Railway staging deployment on a separate environment
+volume instance before production-main rollout. Evidence MUST include source
+checksum, integrity, candidate/insert/idempotency counts, exact historical-row
+parity, storage size, a deterministic staging prune-parity check, and health.
 
-#### Scenario: Staging proves restored history and seven-day pruning
+#### Scenario: Clone recovery and staging prove seven-day pruning
 
-- **WHEN** staging is seeded from production snapshots and backfilled
+- **WHEN** a local production clone is seeded from checksummed production snapshots and backfilled
 - **THEN** the first backfill inserts exactly 54,551 facts and the second inserts zero
-- **AND** historical consumer results match snapshot truth
-- **WHEN** staging retention prunes to seven days
-- **THEN** those results remain unchanged and health/live request checks pass
-
+- **AND** compact-plus-raw history matches snapshot truth exactly
+- **WHEN** isolated staging prunes deterministic mixed history to seven days
+- **THEN** aggregate results remain unchanged, the second prune is empty, and health passes

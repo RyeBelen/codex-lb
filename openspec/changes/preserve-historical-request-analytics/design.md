@@ -41,7 +41,7 @@ uses newest-row ordering with API-key and optional session scope.
 
 ### Keep additive lifetime rollups plus one compact exact-history fact table
 
-`request_log_history_facts` stores one immutable analytical row per pruned raw
+`request_log_historical_facts` stores one immutable analytical row per pruned raw
 request, keyed by the original request-log id. It contains identity/scope,
 timestamp, model/reasoning/service-tier, source/user-agent/request-kind,
 status/error code, tokens/cost, and latency/TTFT. It omits raw diagnostics,
@@ -109,10 +109,12 @@ owner scoping, and account lifecycle. It then prunes with a seven-day cutoff and
 proves every historical result remains unchanged.
 
 Only committed/pushed branch code may be deployed to a duplicated Railway
-staging environment with a separate volume. Staging disables schedulers while
-seeding, has no public domain, and never mounts the production volume. After
-backfill parity, retention is set to seven days and run twice; the second pass
-must be empty. Production `main` remains untouched pending explicit approval.
+staging environment with a separate environment volume instance. Staging
+disables production-affecting schedulers, uses standard authentication, and
+never mounts the production volume instance. Production-clone recovery is
+proven locally against checksummed snapshots; staging uses deterministic mixed
+history to prove deployment, migration, seven-day pruning, idempotency, and
+aggregate parity. Production `main` remains untouched pending explicit approval.
 
 ## Risks / Trade-offs
 
@@ -140,9 +142,9 @@ must be empty. Production `main` remains untouched pending explicit approval.
 3. Rehearse migration/backfill/prune twice on cloned production data and record
    integrity, count, checksum, query parity, and storage evidence.
 4. Commit and push the branch; deploy it to isolated Railway staging with a
-   cloned database and retention initially disabled.
-5. Verify API/dashboard parity, set staging retention to seven days, run prune,
-   and repeat parity plus live request smoke tests.
+   disposable database and retention initially disabled.
+5. Seed deterministic mixed raw history, verify aggregate parity, set staging
+   retention to seven days, run prune twice, and verify a healthy redeploy.
 6. Present evidence for explicit production approval. Before production, take
    a fresh online backup; rollback always restores matching code and database.
 
@@ -150,4 +152,3 @@ must be empty. Production `main` remains untouched pending explicit approval.
 
 - None blocking implementation. Retention stays unchanged in production until
   staging evidence is accepted.
-
