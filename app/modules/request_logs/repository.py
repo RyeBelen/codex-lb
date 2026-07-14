@@ -19,6 +19,7 @@ from app.core.utils.request_id import ensure_request_id
 from app.core.utils.time import utcnow
 from app.db.models import Account, ApiKey, RequestKind, RequestLog
 from app.db.session import sqlite_writer_section
+from app.modules.request_logs.history import request_history_selectable
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,8 +65,8 @@ class RequestLogsRepository:
         self._session = session
 
     @staticmethod
-    def _exclude_warmup_clause() -> ColumnElement[bool]:
-        return RequestLog.request_kind.not_in((RequestKind.WARMUP.value, "limit_warmup"))
+    def _exclude_warmup_clause(source=RequestLog) -> ColumnElement[bool]:
+        return source.request_kind.not_in((RequestKind.WARMUP.value, "limit_warmup"))
 
     async def list_since(self, since: datetime) -> list[RequestLog]:
         result = await self._session.execute(
@@ -87,35 +88,27 @@ class RequestLogsRepository:
         if not response_id_value:
             return None
 
-        base_conditions = [
-            RequestLog.request_id == response_id_value,
-            RequestLog.status == "success",
-            RequestLog.account_id.is_not(None),
+        history = request_history_selectable(name="response_owner_history").c
+        conditions = [
+            history.request_id == response_id_value,
+            history.status == "success",
+            history.account_id.is_not(None),
         ]
         if api_key_id is not None:
-            base_conditions.append(RequestLog.api_key_id == api_key_id)
-
-        async def _lookup_account_id(conditions: list[ColumnElement[bool]]) -> str | None:
-            stmt = (
-                select(RequestLog.account_id)
-                .where(and_(*conditions))
-                .order_by(RequestLog.requested_at.desc(), RequestLog.id.desc())
-                .limit(1)
-            )
-            result = await self._session.execute(stmt)
-            account_id = result.scalar_one_or_none()
-            if not isinstance(account_id, str):
-                return None
-            stripped = account_id.strip()
-            return stripped or None
+            conditions.append(history.api_key_id == api_key_id)
 
         session_id_value = session_id.strip() if isinstance(session_id, str) else ""
+        ordering = [history.requested_at.desc(), history.id.desc()]
         if session_id_value:
-            scoped_owner = await _lookup_account_id([*base_conditions, RequestLog.session_id == session_id_value])
-            if scoped_owner is not None:
-                return scoped_owner
-
-        return await _lookup_account_id(base_conditions)
+            ordering.insert(0, case((history.session_id == session_id_value, 0), else_=1))
+        result = await self._session.execute(
+            select(history.account_id).where(and_(*conditions)).order_by(*ordering).limit(1)
+        )
+        account_id = result.scalar_one_or_none()
+        if not isinstance(account_id, str):
+            return None
+        stripped = account_id.strip()
+        return stripped or None
 
     async def aggregate_by_bucket(
         self,
@@ -124,30 +117,31 @@ class RequestLogsRepository:
     ) -> list[BucketModelAggregate]:
         bind = self._session.get_bind()
         dialect = bind.dialect.name if bind else "sqlite"
+        history = request_history_selectable(name="bucket_history").c
         if dialect == "postgresql":
-            bucket_expr = func.floor(func.extract("epoch", RequestLog.requested_at) / bucket_seconds) * bucket_seconds
+            bucket_expr = func.floor(func.extract("epoch", history.requested_at) / bucket_seconds) * bucket_seconds
         else:
             # Use explicit integer division for SQLite: CAST(epoch / N AS INTEGER) * N
-            epoch_col = cast(func.strftime("%s", RequestLog.requested_at), Integer)
+            epoch_col = cast(func.strftime("%s", history.requested_at), Integer)
             bucket_expr = cast(epoch_col / bucket_seconds, Integer) * bucket_seconds
         bucket_col = bucket_expr.label("bucket_epoch")
 
         stmt = (
             select(
                 bucket_col,
-                RequestLog.model,
-                RequestLog.service_tier,
+                history.model,
+                history.service_tier,
                 func.count().label("request_count"),
-                func.sum(cast(RequestLog.status != literal_column("'success'"), Integer)).label("error_count"),
-                func.coalesce(func.sum(RequestLog.input_tokens), 0).label("input_tokens"),
-                func.coalesce(func.sum(RequestLog.output_tokens), 0).label("output_tokens"),
-                func.coalesce(func.sum(RequestLog.cached_input_tokens), 0).label("cached_input_tokens"),
-                func.coalesce(func.sum(RequestLog.reasoning_tokens), 0).label("reasoning_tokens"),
-                func.coalesce(func.sum(RequestLog.cost_usd), 0.0).label("cost_usd"),
+                func.sum(cast(history.status != literal_column("'success'"), Integer)).label("error_count"),
+                func.coalesce(func.sum(history.input_tokens), 0).label("input_tokens"),
+                func.coalesce(func.sum(history.output_tokens), 0).label("output_tokens"),
+                func.coalesce(func.sum(history.cached_input_tokens), 0).label("cached_input_tokens"),
+                func.coalesce(func.sum(history.reasoning_tokens), 0).label("reasoning_tokens"),
+                func.coalesce(func.sum(history.cost_usd), 0.0).label("cost_usd"),
             )
-            .where(RequestLog.requested_at >= since)
-            .where(self._exclude_warmup_clause())
-            .group_by(bucket_col, RequestLog.model, RequestLog.service_tier)
+            .where(history.requested_at >= since)
+            .where(self._exclude_warmup_clause(history))
+            .group_by(bucket_col, history.model, history.service_tier)
             .order_by(bucket_col)
         )
         result = await self._session.execute(stmt)
@@ -194,22 +188,23 @@ class RequestLogsRepository:
         )
 
     def _aggregate_activity_stmt(self, since: datetime, until: datetime | None = None):
+        history = request_history_selectable(name="activity_history").c
         stmt = select(
             func.count().label("request_count"),
             func.coalesce(
-                func.sum(cast(RequestLog.status != literal_column("'success'"), Integer)),
+                func.sum(cast(history.status != literal_column("'success'"), Integer)),
                 0,
             ).label("error_count"),
-            func.coalesce(func.sum(RequestLog.input_tokens), 0).label("input_tokens"),
-            func.coalesce(func.sum(RequestLog.output_tokens), 0).label("output_tokens"),
-            func.coalesce(func.sum(RequestLog.cached_input_tokens), 0).label("cached_input_tokens"),
-            func.coalesce(func.sum(RequestLog.cost_usd), 0.0).label("cost_usd"),
+            func.coalesce(func.sum(history.input_tokens), 0).label("input_tokens"),
+            func.coalesce(func.sum(history.output_tokens), 0).label("output_tokens"),
+            func.coalesce(func.sum(history.cached_input_tokens), 0).label("cached_input_tokens"),
+            func.coalesce(func.sum(history.cost_usd), 0.0).label("cost_usd"),
         ).where(
-            RequestLog.requested_at >= since,
-            self._exclude_warmup_clause(),
+            history.requested_at >= since,
+            self._exclude_warmup_clause(history),
         )
         if until is not None:
-            stmt = stmt.where(RequestLog.requested_at < until)
+            stmt = stmt.where(history.requested_at < until)
         return stmt
 
     async def top_error_since(self, since: datetime) -> str | None:
@@ -231,14 +226,15 @@ class RequestLogsRepository:
         # least()/greatest().
         least = func.least if dialect == "postgresql" else func.min
         greatest = func.greatest if dialect == "postgresql" else func.max
+        history = request_history_selectable(name="usage_summary_history").c
 
-        window = [RequestLog.requested_at >= since, self._exclude_warmup_clause()]
-        output_expr = func.coalesce(RequestLog.output_tokens, RequestLog.reasoning_tokens, 0)
-        tokens_expr = func.coalesce(RequestLog.input_tokens, 0) + output_expr
+        window = [history.requested_at >= since, self._exclude_warmup_clause(history)]
+        output_expr = func.coalesce(history.output_tokens, history.reasoning_tokens, 0)
+        tokens_expr = func.coalesce(history.input_tokens, 0) + output_expr
         cached_expr = case(
-            (RequestLog.cached_input_tokens.is_(None), 0),
-            (RequestLog.input_tokens.is_(None), greatest(0, RequestLog.cached_input_tokens)),
-            else_=greatest(0, least(RequestLog.cached_input_tokens, RequestLog.input_tokens)),
+            (history.cached_input_tokens.is_(None), 0),
+            (history.input_tokens.is_(None), greatest(0, history.cached_input_tokens)),
+            else_=greatest(0, least(history.cached_input_tokens, history.input_tokens)),
         )
         # ONE statement = one snapshot: totals, top error, and per-model cost
         # must describe the same committed row set (the legacy path read one
@@ -246,21 +242,21 @@ class RequestLogsRepository:
         # separate statements under READ COMMITTED are not). The grouped
         # result stays tiny (models x error codes) and everything derives
         # from it in Python.
-        is_error_expr = (RequestLog.status != literal_column("'success'")).label("is_error")
+        is_error_expr = (history.status != literal_column("'success'")).label("is_error")
         rows = (
             await self._session.execute(
                 select(
-                    RequestLog.model,
+                    history.model,
                     is_error_expr,
-                    RequestLog.error_code,
+                    history.error_code,
                     func.count().label("request_count"),
                     func.coalesce(func.sum(tokens_expr), 0).label("total_tokens"),
                     func.coalesce(func.sum(cached_expr), 0).label("cached_input_tokens"),
-                    func.sum(RequestLog.cost_usd).label("cost_usd"),
-                    func.count(RequestLog.cost_usd).label("cost_count"),
+                    func.sum(history.cost_usd).label("cost_usd"),
+                    func.count(history.cost_usd).label("cost_count"),
                 )
                 .where(*window)
-                .group_by(RequestLog.model, is_error_expr, RequestLog.error_code)
+                .group_by(history.model, is_error_expr, history.error_code)
             )
         ).all()
 
@@ -307,24 +303,26 @@ class RequestLogsRepository:
         return str(row[0]) if row and row[0] else None
 
     def _top_error_stmt(self, since: datetime, until: datetime | None = None):
+        history = request_history_selectable(name="top_error_history").c
         stmt = (
-            select(RequestLog.error_code, func.count(RequestLog.id).label("error_count"))
+            select(history.error_code, func.count(history.id).label("error_count"))
             .where(
-                RequestLog.requested_at >= since,
-                self._exclude_warmup_clause(),
-                RequestLog.status != "success",
-                RequestLog.error_code.is_not(None),
+                history.requested_at >= since,
+                self._exclude_warmup_clause(history),
+                history.status != "success",
+                history.error_code.is_not(None),
             )
-            .group_by(RequestLog.error_code)
-            .order_by(func.count(RequestLog.id).desc(), RequestLog.error_code.asc())
+            .group_by(history.error_code)
+            .order_by(func.count(history.id).desc(), history.error_code.asc())
             .limit(1)
         )
         if until is not None:
-            stmt = stmt.where(RequestLog.requested_at < until)
+            stmt = stmt.where(history.requested_at < until)
         return stmt
 
     async def earliest_activity_at(self) -> datetime | None:
-        stmt = select(func.min(RequestLog.requested_at)).where(self._exclude_warmup_clause())
+        history = request_history_selectable(name="earliest_history").c
+        stmt = select(func.min(history.requested_at)).where(self._exclude_warmup_clause(history))
         result = await self._session.execute(stmt)
         value = result.scalar_one_or_none()
         return value if isinstance(value, datetime) else None

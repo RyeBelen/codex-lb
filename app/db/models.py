@@ -320,6 +320,39 @@ class RequestLog(Base):
     )
 
 
+class RequestLogHistoricalFact(Base):
+    """Lossless analytical fields retained after a raw request log is pruned."""
+
+    __tablename__ = "request_log_historical_facts"
+
+    request_log_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    account_id: Mapped[str | None] = mapped_column(
+        String,
+        ForeignKey("accounts.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    api_key_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    session_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    request_id: Mapped[str] = mapped_column(String, nullable=False)
+    requested_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    model: Mapped[str] = mapped_column(String, nullable=False)
+    reasoning_effort: Mapped[str | None] = mapped_column(String, nullable=True)
+    service_tier: Mapped[str | None] = mapped_column(String, nullable=True)
+    source: Mapped[str | None] = mapped_column(String, nullable=True)
+    useragent_group: Mapped[str | None] = mapped_column(String, nullable=True)
+    request_kind: Mapped[str] = mapped_column(String, nullable=False)
+    status: Mapped[str] = mapped_column(String, nullable=False)
+    error_code: Mapped[str | None] = mapped_column(String, nullable=True)
+    input_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    output_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    cached_input_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    reasoning_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    cost_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
+    latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    latency_first_token_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+
 class ProxyEndpoint(Base):
     __tablename__ = "proxy_endpoints"
 
@@ -1634,6 +1667,28 @@ Index(
     RequestLog.session_id,
     RequestLog.requested_at.desc(),
     RequestLog.id.desc(),
+)
+Index(
+    "idx_request_history_requested_at_id",
+    RequestLogHistoricalFact.requested_at,
+    RequestLogHistoricalFact.request_log_id,
+)
+Index(
+    "idx_request_history_account_time",
+    RequestLogHistoricalFact.account_id,
+    RequestLogHistoricalFact.requested_at,
+)
+Index(
+    "idx_request_history_api_key_time",
+    RequestLogHistoricalFact.api_key_id,
+    RequestLogHistoricalFact.requested_at,
+)
+Index(
+    "idx_request_history_response_owner",
+    RequestLogHistoricalFact.request_id,
+    RequestLogHistoricalFact.api_key_id,
+    RequestLogHistoricalFact.requested_at.desc(),
+    RequestLogHistoricalFact.request_log_id.desc(),
 )
 Index("idx_sticky_account", StickySession.account_id)
 Index("idx_sticky_kind_updated_at", StickySession.kind, StickySession.updated_at.desc())

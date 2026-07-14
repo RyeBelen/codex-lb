@@ -5,13 +5,21 @@ from datetime import timedelta
 import pytest
 from pydantic import ValidationError
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 
 import app.core.retention.job as retention_job
 from app.core.config.settings import Settings, get_settings
 from app.core.crypto import TokenEncryptor
 from app.core.retention.job import run_retention_pass
 from app.core.utils.time import utcnow
-from app.db.models import Account, AccountStatus, AdditionalUsageHistory, RequestLog, UsageHistory
+from app.db.models import (
+    Account,
+    AccountStatus,
+    AdditionalUsageHistory,
+    RequestLog,
+    RequestLogHistoricalFact,
+    UsageHistory,
+)
 from app.db.session import SessionLocal
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.accounts.usage_rollup import run_fold_pass
@@ -58,10 +66,11 @@ def _set_retention(monkeypatch, *, request_logs: int = 0, usage_history: int = 0
 
 def test_retention_settings_validation():
     assert Settings(request_log_retention_days=0).request_log_retention_days == 0
+    assert Settings(request_log_retention_days=7).request_log_retention_days == 7
     assert Settings(request_log_retention_days=30).request_log_retention_days == 30
     assert Settings(usage_history_retention_days=45).usage_history_retention_days == 45
     with pytest.raises(ValidationError):
-        Settings(request_log_retention_days=7)
+        Settings(request_log_retention_days=6)
     with pytest.raises(ValidationError):
         Settings(usage_history_retention_days=30)
 
@@ -94,6 +103,16 @@ async def test_request_log_pruning_respects_watermark_and_preserves_totals(async
 
     await run_fold_pass(now=now)
 
+    async with SessionLocal() as session:
+        logs_repo = RequestLogsRepository(session)
+        activity_before = await logs_repo.aggregate_activity_since(now - timedelta(days=90))
+        buckets_before = await logs_repo.aggregate_by_bucket(now - timedelta(days=90), bucket_seconds=86_400)
+        owner_before = await logs_repo.find_latest_account_id_for_response_id(
+            response_id="req_60d",
+            api_key_id=None,
+        )
+    assert owner_before == "acc_ret"
+
     async def _request_usage():
         response = await async_client.get("/api/accounts")
         assert response.status_code == 200
@@ -109,9 +128,22 @@ async def test_request_log_pruning_respects_watermark_and_preserves_totals(async
 
     async with SessionLocal() as session:
         remaining = (await session.execute(select(RequestLog.request_id))).scalars().all()
+        projected = (await session.execute(select(RequestLogHistoricalFact.request_id))).scalars().all()
     assert sorted(remaining) == ["req_1d"]
+    assert sorted(projected) == ["req_40d", "req_60d"]
 
     assert await _request_usage() == before
+    async with SessionLocal() as session:
+        logs_repo = RequestLogsRepository(session)
+        assert await logs_repo.aggregate_activity_since(now - timedelta(days=90)) == activity_before
+        assert await logs_repo.aggregate_by_bucket(now - timedelta(days=90), bucket_seconds=86_400) == buckets_before
+        assert (
+            await logs_repo.find_latest_account_id_for_response_id(
+                response_id="req_60d",
+                api_key_id=None,
+            )
+            == owner_before
+        )
 
 
 @pytest.mark.asyncio
@@ -128,6 +160,61 @@ async def test_request_log_pruning_skipped_without_watermark(db_setup, monkeypat
     assert deleted["request_logs"] == 0
     async with SessionLocal() as session:
         assert (await session.execute(select(RequestLog.id))).scalars().all()
+
+
+@pytest.mark.asyncio
+async def test_request_log_pruning_rolls_back_when_fact_id_already_exists(db_setup, monkeypatch):
+    now = utcnow()
+    async with SessionLocal() as session:
+        accounts_repo = AccountsRepository(session)
+        logs_repo = RequestLogsRepository(session)
+        await accounts_repo.upsert(_make_account("acc_conflict", "conflict@example.com"))
+        log = await _add_log(
+            logs_repo,
+            account_id="acc_conflict",
+            request_id="req_conflict",
+            requested_at=now - timedelta(days=60),
+        )
+        session.add(
+            RequestLogHistoricalFact(
+                request_log_id=log.id,
+                account_id="acc_conflict",
+                api_key_id=None,
+                session_id=None,
+                request_id="different-response",
+                requested_at=log.requested_at,
+                deleted_at=None,
+                model=log.model,
+                reasoning_effort=None,
+                service_tier=None,
+                source=None,
+                useragent_group=None,
+                request_kind="normal",
+                status="success",
+                error_code=None,
+                input_tokens=1,
+                output_tokens=1,
+                cached_input_tokens=0,
+                reasoning_tokens=0,
+                cost_usd=0.0,
+                latency_ms=1,
+                latency_first_token_ms=1,
+            )
+        )
+        await session.commit()
+
+    await run_fold_pass(now=now)
+    _set_retention(monkeypatch, request_logs=30)
+    with pytest.raises(IntegrityError, match="UNIQUE constraint failed"):
+        await run_retention_pass(now=now)
+
+    async with SessionLocal() as session:
+        assert await session.scalar(select(RequestLog.id).where(RequestLog.id == log.id)) == log.id
+        fact = await session.scalar(
+            select(RequestLogHistoricalFact).where(RequestLogHistoricalFact.request_log_id == log.id)
+        )
+        assert fact is not None
+        assert fact.request_id == "different-response"
 
 
 @pytest.mark.asyncio
@@ -194,6 +281,7 @@ async def test_pruning_drains_backlog_across_batches(db_setup, monkeypatch):
     assert deleted["request_logs"] == 5
     async with SessionLocal() as session:
         assert (await session.execute(select(RequestLog.id))).scalars().all() == []
+        assert len((await session.execute(select(RequestLogHistoricalFact.request_log_id))).scalars().all()) == 5
 
 
 @pytest.mark.asyncio
