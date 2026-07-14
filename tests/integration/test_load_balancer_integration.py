@@ -37,7 +37,7 @@ async def _repo_factory() -> AsyncIterator[ProxyRepositories]:
 
 
 @pytest.mark.asyncio
-async def test_load_balancer_deprioritizes_secondary_usage_without_persisting_quota_exceeded(db_setup):
+async def test_load_balancer_excludes_secondary_exhaustion_and_persists_quota_exceeded(db_setup):
     encryptor = TokenEncryptor()
     now = utcnow()
     now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
@@ -111,7 +111,8 @@ async def test_load_balancer_deprioritizes_secondary_usage_without_persisting_qu
         refreshed = await session.get(Account, account_a.id)
         assert refreshed is not None
         await session.refresh(refreshed)
-        assert refreshed.status == AccountStatus.ACTIVE
+        assert refreshed.status == AccountStatus.QUOTA_EXCEEDED
+        assert refreshed.reset_at == secondary_reset
 
 
 @pytest.mark.asyncio
@@ -167,7 +168,7 @@ async def test_load_balancer_reactivates_after_secondary_reset(db_setup):
 
 
 @pytest.mark.asyncio
-async def test_load_balancer_treats_weekly_only_primary_as_advisory_quota_window(db_setup):
+async def test_load_balancer_treats_weekly_only_primary_as_authoritative_quota_window(db_setup):
     encryptor = TokenEncryptor()
     now = utcnow()
     now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
@@ -235,7 +236,8 @@ async def test_load_balancer_treats_weekly_only_primary_as_advisory_quota_window
         refreshed_free = await session.get(Account, free_account.id)
         assert refreshed_free is not None
         await session.refresh(refreshed_free)
-        assert refreshed_free.status == AccountStatus.ACTIVE
+        assert refreshed_free.status == AccountStatus.QUOTA_EXCEEDED
+        assert refreshed_free.reset_at == weekly_reset
 
 
 @pytest.mark.asyncio
@@ -354,7 +356,8 @@ async def test_load_balancer_prefers_newer_weekly_primary_over_stale_secondary(d
         refreshed_free = await session.get(Account, free_account.id)
         assert refreshed_free is not None
         await session.refresh(refreshed_free)
-        assert refreshed_free.status == AccountStatus.ACTIVE
+        assert refreshed_free.status == AccountStatus.QUOTA_EXCEEDED
+        assert refreshed_free.reset_at == weekly_reset
 
 
 @pytest.mark.asyncio

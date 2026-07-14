@@ -448,6 +448,9 @@ async def test_dashboard_overview_derives_quota_status_from_current_weekly_usage
             window="primary",
             window_minutes=300,
             recorded_at=now - timedelta(minutes=2),
+            credits_has=True,
+            credits_unlimited=True,
+            credits_balance=25.0,
         )
         await usage_repo.add_entry(
             "acc_weekly_full",
