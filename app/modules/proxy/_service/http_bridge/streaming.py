@@ -2593,9 +2593,7 @@ class _HTTPBridgeStreamingMixin:
                                         break
                                     circuit_keepalive_waiting = True
                                     keepalive_count = 0
-                                    circuit_keepalive_until = (
-                                        _service_time().monotonic() + retry_cooldown_seconds
-                                    )
+                                    circuit_keepalive_until = _service_time().monotonic() + retry_cooldown_seconds
                                     if PROMETHEUS_AVAILABLE and http_bridge_retry_circuit_total is not None:
                                         http_bridge_retry_circuit_total.labels(outcome="keepalive").inc()
                                     logger.info(

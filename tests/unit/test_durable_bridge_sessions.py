@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 from collections.abc import AsyncIterator, Callable
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -22,9 +21,6 @@ from app.db.models import (
     StickySessionKind,
 )
 from app.modules.proxy.continuity import (
-    HTTP_BRIDGE_ACCOUNT_NEUTRAL_REPLAY_KEY_PREFIX,
-    HTTP_BRIDGE_ACCOUNT_NEUTRAL_REPLAY_KIND,
-    is_http_bridge_account_neutral_replay,
     make_http_bridge_account_neutral_replay_key,
 )
 from app.modules.proxy.durable_bridge_coordinator import DurableBridgeSessionCoordinator

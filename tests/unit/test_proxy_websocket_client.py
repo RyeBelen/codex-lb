@@ -48,6 +48,8 @@ class _UnexpectedHttpClient:
 
 
 class _FakeConnection:
+    connection_lost_waiter: asyncio.Future[None]
+
     def __init__(self) -> None:
         self.sent: list[str | bytes] = []
         self.closed = False

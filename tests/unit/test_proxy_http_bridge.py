@@ -17735,6 +17735,10 @@ async def test_http_bridge_reader_wakes_and_retires_lone_eventless_owner_without
     session = _make_bridge_session(key_value=f"eventless-{leading_telemetry}")
     session.upstream = cast(UpstreamResponsesWebSocket, upstream)
     service._http_bridge_sessions[session.key] = session
+    await service._record_http_bridge_retry_circuit_failure(
+        session,
+        detail="stream_incomplete",
+    )
     settings = _make_app_settings(
         sse_keepalive_interval_seconds=0.0,
         stream_idle_timeout_seconds=60.0,
@@ -17831,6 +17835,12 @@ async def test_http_bridge_reader_wakes_and_retires_lone_eventless_owner_without
         reason="missing_response_created_timeout",
         session=session,
     )
+    retry_circuits = cast(Any, service)._http_bridge_retry_circuits
+    assert retry_circuits[session.key].consecutive_failures == 2
+    assert retry_circuits[session.key].last_detail == "missing_response_created_timeout"
+    assert retry_circuits[session.key].cooldown_until > time.monotonic()
+    retried_session = _make_bridge_session(key=session.key)
+    assert await service._http_bridge_precreated_retry_allowed(retried_session) is False
     assert "http_bridge_event event=missing_response_created_timeout" in caplog.text
 
 
@@ -18479,7 +18489,7 @@ async def test_http_bridge_retry_circuit_restores_persisted_cooldown() -> None:
     )
     assert await service._http_bridge_precreated_retry_allowed(hard_session) is False
     assert await service._http_bridge_precreated_retry_cooldown_seconds(hard_session) > 0
-    service._durable_bridge.lookup_retry_circuit.assert_awaited_count(2)
+    assert service._durable_bridge.lookup_retry_circuit.await_count == 2
 
 
 @pytest.mark.asyncio
@@ -18528,16 +18538,15 @@ async def test_http_bridge_retry_circuit_drops_local_state_after_durable_clear()
 async def test_http_bridge_retry_circuit_refreshes_conflict_merged_persisted_state() -> None:
     service = proxy_service.ProxyService(cast(Any, nullcontext()))
     hard_session = _make_bridge_session(key_value="bridge-conflict-merged-circuit")
+    persisted = SimpleNamespace(
+        consecutive_failures=2,
+        cooldown_until_epoch=time.time() + 60.0,
+        last_detail="stream_incomplete",
+        updated_at_epoch=time.time(),
+    )
     service._durable_bridge = SimpleNamespace(
-        lookup_retry_circuit=AsyncMock(return_value=None),
-        persist_retry_circuit=AsyncMock(
-            return_value=SimpleNamespace(
-                consecutive_failures=2,
-                cooldown_until_epoch=time.time() + 60.0,
-                last_detail="stream_incomplete",
-                updated_at_epoch=time.time(),
-            )
-        ),
+        lookup_retry_circuit=AsyncMock(side_effect=[None, persisted]),
+        persist_retry_circuit=AsyncMock(return_value=persisted),
     )
 
     await service._record_http_bridge_retry_circuit_failure(hard_session, detail="stream_incomplete")

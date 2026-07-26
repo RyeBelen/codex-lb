@@ -300,20 +300,7 @@ class _HTTPBridgeRequestSubmitMixin:
 
     @staticmethod
     def _http_bridge_clean_close_retry_jitter_seconds() -> float:
-        settings = _service_get_settings()
-        maximum = max(
-            0.0,
-            min(
-                30.0,
-                float(
-                    getattr(
-                        settings,
-                        "http_responses_session_bridge_clean_close_retry_jitter_max_seconds",
-                        _HTTP_BRIDGE_CLEAN_CLOSE_RETRY_JITTER_MAX_SECONDS,
-                    )
-                ),
-            ),
-        )
+        maximum = max(0.0, min(30.0, _HTTP_BRIDGE_CLEAN_CLOSE_RETRY_JITTER_MAX_SECONDS))
         return random.uniform(0.0, maximum) if maximum > 0 else 0.0
 
     def _prepare_http_bridge_request(
@@ -1608,9 +1595,7 @@ class _HTTPBridgeRequestSubmitMixin:
                 # Account-scoped uploaded files cannot be replayed on a
                 # different owner. Keep the preferred account mandatory for
                 # both silent recovery and clean-close recovery.
-                require_preferred_reconnect = (
-                    account_neutral_recovery or request_state.file_required_preferred_account
-                )
+                require_preferred_reconnect = account_neutral_recovery or request_state.file_required_preferred_account
                 request_text = _prepare_websocket_request_state_for_visible_output_replay(request_state)
                 if request_text is None:
                     return False

@@ -8,6 +8,9 @@ from typing import Any
 import anyio
 
 from app.core.metrics.prometheus import PROMETHEUS_AVAILABLE, http_bridge_retry_circuit_total
+from app.modules.proxy._service.http_bridge.helpers import (
+    _HTTP_BRIDGE_MISSING_RESPONSE_CREATED_TIMEOUT_DETAIL,
+)
 from app.modules.proxy._service.observability import _hash_identifier
 from app.modules.proxy._service.support import _HTTPBridgeSession
 from app.modules.proxy.durable_bridge_repository import DURABLE_BRIDGE_RETRY_CIRCUIT_STATE_TTL_SECONDS
@@ -18,6 +21,14 @@ _HTTP_BRIDGE_RETRY_CIRCUIT_FAILURE_THRESHOLD = 2
 _HTTP_BRIDGE_RETRY_CIRCUIT_BASE_BACKOFF_SECONDS = 60.0
 _HTTP_BRIDGE_RETRY_CIRCUIT_MAX_BACKOFF_SECONDS = 600.0
 _HTTP_BRIDGE_RETRY_CIRCUIT_CLEAN_CLOSE_MAX_BACKOFF_SECONDS = 30.0
+_HTTP_BRIDGE_RETRY_CIRCUIT_FAILURE_DETAILS = frozenset(
+    {
+        "stream_incomplete",
+        "clean_close",
+        "stream_idle_timeout",
+        _HTTP_BRIDGE_MISSING_RESPONSE_CREATED_TIMEOUT_DETAIL,
+    }
+)
 
 
 @dataclass(slots=True)
@@ -213,7 +224,7 @@ class _HTTPBridgeRetryCircuitMixin:
         *,
         detail: str,
     ) -> None:
-        if session.key.strength != "hard" or detail not in {"stream_incomplete", "clean_close", "stream_idle_timeout"}:
+        if session.key.strength != "hard" or detail not in _HTTP_BRIDGE_RETRY_CIRCUIT_FAILURE_DETAILS:
             return
 
         await self._load_http_bridge_retry_circuit(session)

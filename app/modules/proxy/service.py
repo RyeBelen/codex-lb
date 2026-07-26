@@ -1318,9 +1318,10 @@ class ProxyService(
                         session_closed=bridge_session.closed,
                     )
                 )
-                if not should_retire_stuck_session and any(
-                    max(0.0, now - state.started_at) >= threshold_seconds for state in pending_states
-                ):
+                stale_candidate_states = [
+                    state for state in pending_states if max(0.0, now - state.started_at) >= threshold_seconds
+                ]
+                if not should_retire_stuck_session and stale_candidate_states:
                     # A gate waiter starved past the stuck threshold without the
                     # watchdog firing: dump every pending state's verdict inputs
                     # so the blocking condition is identifiable from prod logs.
@@ -1343,7 +1344,11 @@ class ProxyService(
                                 f" created_ms={state.latency_response_created_ms}"
                                 f" dsvis={state.downstream_visible}"
                                 f" age={max(0.0, now - state.started_at):.0f}"
-                                f" gate_wait_age={max(0.0, now - state.response_create_gate_wait_started_at) if state.response_create_gate_wait_started_at is not None else None}"
+                                f" gate_wait_age={
+                                    max(0.0, now - state.response_create_gate_wait_started_at)
+                                    if state.response_create_gate_wait_started_at is not None
+                                    else None
+                                }"
                             )
                             for state in pending_states
                         ),

@@ -113,7 +113,8 @@ For a hard-affinity bridge key, the proxy MUST scope retry-circuit state by
 affinity kind, affinity key, and API-key scope (using a stable anonymous scope
 when no API key is present). The proxy MUST record only the documented
 pre-response failure classes (`stream_incomplete`, `clean_close`, and
-`stream_idle_timeout`).
+`stream_idle_timeout`) plus the client-safe watchdog's
+`missing_response_created_timeout`.
 
 The default circuit MUST open after two consecutive recorded failures. Once
 open, it MUST suppress pre-created replay until the persisted cooldown expires,
@@ -123,9 +124,9 @@ failure count, cooldown deadline, last failure detail, and update time in the
 `http_bridge_retry_circuits` table and MUST merge conflict updates so concurrent
 replicas cannot shorten an existing cooldown.
 
-The clean-close retry jitter maximum MUST be read from the
-`http_responses_session_bridge_clean_close_retry_jitter_max_seconds` runtime
-setting and MUST be bounded to the inclusive range 0–30 seconds.
+The clean-close retry jitter maximum MUST remain implementation-bounded to two
+seconds and MUST NOT add an operator setting to the runtime configuration
+surface.
 
 The proxy MUST evict process-local circuit entries and their loaded/persisted
 markers after one hour without use, independently of durable-row cleanup, so
@@ -146,6 +147,15 @@ and durable circuit state.
 - **THEN** the proxy opens the retry circuit
 - **AND** persists at least two consecutive failures and a cooldown deadline
 - **AND** subsequent pre-created replay is suppressed until that deadline
+
+#### Scenario: missing response-created timeout completes the failure sequence
+
+- **GIVEN** a hard-affinity key has one recorded `stream_incomplete` failure
+- **AND** the native client retries the same continuation
+- **WHEN** that retry reaches `missing_response_created_timeout`
+- **THEN** the proxy records the timeout as the second eligible failure
+- **AND** opens and persists the retry-circuit cooldown for that hard-affinity key
+- **AND** a subsequent pre-created replay is suppressed until the cooldown expires
 
 #### Scenario: retry decisions observe a cooldown opened by another replica
 

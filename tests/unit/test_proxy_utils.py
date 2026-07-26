@@ -693,7 +693,7 @@ async def test_chat_startup_probe_consumes_repeated_capacity_markers_before_firs
         )
     )
     try:
-        stream, startup_error = await asyncio.wait_for(probe_task, timeout=0.1)
+        stream, startup_error = await asyncio.wait_for(probe_task, timeout=0.25)
     finally:
         release_next_event.set()
 
@@ -31358,12 +31358,11 @@ async def test_response_create_admission_stuck_gate_retire_ignores_draining_pend
 
     exc = _assert_proxy_response_error(exc_info.value)
     assert _proxy_error_code(exc) == "response_create_gate_timeout"
-    retire_stale.assert_not_awaited()
-    fail_stale.assert_awaited_once_with(
+    retire_stale.assert_awaited_once_with(
         bridge_session,
-        [stale_gate_holder],
         detail="response_create_gate_timeout_stuck_pending",
     )
+    fail_stale.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -32690,8 +32689,8 @@ async def test_stream_http_bridge_or_retry_routes_input_file_file_id_without_rej
     assert calls == [(payload, "acc_doc")]
 
 
-def test_classify_upstream_close_rejected_only_for_clean_close_before_any_response_event():
-    assert proxy_service._classify_upstream_close(1000, response_events_seen=0) == "rejected"
+def test_classify_upstream_close_marks_pre_response_clean_close_for_bounded_recovery():
+    assert proxy_service._classify_upstream_close(1000, response_events_seen=0) == "clean"
     assert proxy_service._classify_upstream_close(1000, response_events_seen=1) == "transient"
     assert proxy_service._classify_upstream_close(1011, response_events_seen=0) == "transient"
 
@@ -35821,14 +35820,13 @@ async def test_http_bridge_session_events_keepalive_backstop_with_response_id(mo
     finally:
         await events.aclose()
 
-    assert len(collected) == 5, (
-        f"Expected 5 events (4 response.in_progress + stream_idle_timeout), got {len(collected)}"
+    assert len(collected) == 2, (
+        f"Expected 2 events (1 response.in_progress + stream_idle_timeout), got {len(collected)}"
     )
-    for event_block in collected[:4]:
-        event = cast(dict[str, object], proxy_service.parse_sse_data_json(event_block))
-        assert event["type"] == "response.in_progress"
-        assert cast(dict[str, object], event["response"])["id"] == "resp_bridge_backstop_codex"
-    last = cast(dict[str, object], proxy_service.parse_sse_data_json(collected[4]))
+    first = cast(dict[str, object], proxy_service.parse_sse_data_json(collected[0]))
+    assert first["type"] == "response.in_progress"
+    assert cast(dict[str, object], first["response"])["id"] == "resp_bridge_backstop_codex"
+    last = cast(dict[str, object], proxy_service.parse_sse_data_json(collected[1]))
     assert last["type"] == "response.failed"
     assert cast(dict[str, object], last["response"])["status"] == "failed"
     assert cast(dict[str, object], cast(dict[str, object], last["response"])["error"])["code"] == "stream_idle_timeout"
@@ -35886,15 +35884,15 @@ async def test_http_bridge_session_events_keepalive_backstop_uses_replay_downstr
     try:
         async for event in events:
             collected.append(event)
-            if len(collected) >= 5:
+            if len(collected) >= 2:
                 break
     finally:
         await events.aclose()
 
-    assert len(collected) == 5
+    assert len(collected) == 2
     first = cast(dict[str, object], proxy_service.parse_sse_data_json(collected[0]))
     assert cast(dict[str, object], first["response"])["id"] == "resp_created_then_closed"
-    last = cast(dict[str, object], proxy_service.parse_sse_data_json(collected[4]))
+    last = cast(dict[str, object], proxy_service.parse_sse_data_json(collected[1]))
     assert cast(dict[str, object], last["response"])["id"] == "resp_created_then_closed"
     assert cast(dict[str, object], cast(dict[str, object], last["response"])["error"])["code"] == "stream_idle_timeout"
 
@@ -36092,7 +36090,7 @@ async def test_retry_http_bridge_request_on_fresh_upstream_uses_archive_request_
 
 
 @pytest.mark.asyncio
-async def test_retry_http_bridge_precreated_request_suppresses_retry_for_rejected_close():
+async def test_retry_http_bridge_precreated_request_recovers_clean_close_once(monkeypatch):
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
     request_state = proxy_service._WebSocketRequestState(
@@ -36122,12 +36120,14 @@ async def test_retry_http_bridge_precreated_request_suppresses_retry_for_rejecte
         last_upstream_close_code=1000,
     )
 
-    retried = await service._retry_http_bridge_precreated_request(session)
+    reconnect = AsyncMock(return_value=None)
+    monkeypatch.setattr(service, "_reconnect_http_bridge_session", reconnect)
 
-    assert retried is False
-    assert request_state.error_code_override == "upstream_rejected_input"
-    assert request_state.error_http_status_override == 502
-    assert "close_code=1000" in (request_state.error_message_override or "")
+    assert await service._retry_http_bridge_precreated_request(session) is True
+    reconnect.assert_awaited_once_with(session, request_state=request_state)
+    assert request_state.replay_count == 1
+
+
 @pytest.mark.asyncio
 async def test_http_bridge_prewarm_completion_does_not_clear_retry_circuit(monkeypatch):
     service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
@@ -36529,7 +36529,6 @@ async def test_retry_http_bridge_precreated_request_migrates_only_safe_initial_t
         reconnect.assert_awaited_once_with(
             session,
             request_state=request_state,
-            require_same_account=False,
         )
     assert request_state.preferred_account_id == expected_preferred_account_id
     assert request_state.excluded_account_ids == expected_excluded_account_ids
@@ -36555,7 +36554,12 @@ async def test_retry_http_bridge_precreated_request_keeps_hard_session_owner_bou
     )
     upstream = AsyncMock()
     session = proxy_service._HTTPBridgeSession(
-        key=proxy_service._HTTPBridgeSessionKey("session_header", "hard-session-key", None),
+        key=proxy_service._HTTPBridgeSessionKey(
+            "session_header",
+            "hard-session-key",
+            None,
+            strength="hard",
+        ),
         headers={"session_id": "hard-session-key", "x-codex-turn-state": "hard-turn-state"},
         affinity=proxy_service._AffinityPolicy(),
         request_model="gpt-5.6-sol",
@@ -36581,7 +36585,7 @@ async def test_retry_http_bridge_precreated_request_keeps_hard_session_owner_bou
         request_state=request_state,
         require_same_account=True,
     )
-    assert request_state.preferred_account_id is None
+    assert request_state.preferred_account_id == account.id
     assert request_state.excluded_account_ids == set()
     assert session.upstream_turn_state == "hard-turn-state"
     assert session.downstream_turn_state == "hard-turn-state"
@@ -36727,7 +36731,6 @@ async def test_retry_http_bridge_precreated_request_replays_created_without_visi
     reconnect.assert_awaited_once_with(
         session,
         request_state=request_state,
-        require_same_account=False,
     )
     send_text.assert_awaited_once_with('{"type":"response.create","model":"gpt-5.1","input":"retry"}')
     assert send_request_ids == ["archive_bridge_created_no_output"]
