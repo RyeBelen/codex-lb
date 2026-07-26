@@ -1,4 +1,5 @@
 import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
 import { AccountCards } from "@/features/dashboard/components/account-cards";
@@ -37,6 +38,77 @@ describe("AccountCards", () => {
       "[scrollbar-width:none]",
       "[&::-webkit-scrollbar]:hidden",
     );
+  });
+
+  it("hides non-operational statuses by default and lets operators include them", async () => {
+    const user = userEvent.setup();
+    render(
+      <AccountCards
+        accounts={[
+          createAccountSummary({
+            accountId: "acc-active",
+            email: "active@example.com",
+            displayName: "Active Account",
+            status: "active",
+          }),
+          createAccountSummary({
+            accountId: "acc-paused",
+            email: "paused@example.com",
+            displayName: "Paused Account",
+            status: "paused",
+          }),
+          createAccountSummary({
+            accountId: "acc-reauth",
+            email: "reauth@example.com",
+            displayName: "Reauth Account",
+            status: "reauth_required",
+          }),
+          createAccountSummary({
+            accountId: "acc-deactivated",
+            email: "deactivated@example.com",
+            displayName: "Deactivated Account",
+            status: "deactivated",
+          }),
+        ]}
+        onAction={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("Active Account")).toBeInTheDocument();
+    expect(screen.getByText("Paused Account")).toBeInTheDocument();
+    expect(screen.queryByText("Reauth Account")).not.toBeInTheDocument();
+    expect(screen.queryByText("Deactivated Account")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /statuses/i }));
+    await user.click(await screen.findByRole("menuitemcheckbox", { name: /re-auth required/i }));
+    await user.click(await screen.findByRole("menuitemcheckbox", { name: /deactivated/i }));
+
+    expect(screen.getByText("Reauth Account")).toBeInTheDocument();
+    expect(screen.getByText("Deactivated Account")).toBeInTheDocument();
+  });
+
+  it("offers a readable filter option for a future account status", async () => {
+    const user = userEvent.setup();
+    render(
+      <AccountCards
+        accounts={[
+          createAccountSummary({
+            accountId: "acc-future",
+            email: "future@example.com",
+            displayName: "Future Account",
+            status: "maintenance_mode",
+          }),
+        ]}
+        onAction={vi.fn()}
+      />,
+    );
+
+    expect(screen.queryByText("Future Account")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /statuses/i }));
+    await user.click(await screen.findByRole("menuitemcheckbox", { name: /maintenance mode/i }));
+
+    expect(screen.getByText("Future Account")).toBeInTheDocument();
   });
 
   it("gives each warm-up toggle a descriptive account-specific name", () => {

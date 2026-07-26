@@ -1,11 +1,19 @@
 import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { describe, expect, it } from "vitest";
 
 import { UsageDonuts } from "@/features/dashboard/components/usage-donuts";
 
 /** Helper to build a minimal RemainingItem for tests. */
-function item(overrides: { accountId: string; label: string; value: number; remainingPercent: number; color: string }) {
-  return { ...overrides, labelSuffix: "", isEmail: true };
+function item(overrides: {
+  accountId: string;
+  label: string;
+  value: number;
+  remainingPercent: number;
+  color: string;
+  status?: string;
+}) {
+  return { status: "active", ...overrides, labelSuffix: "", isEmail: true };
 }
 
 describe("UsageDonuts", () => {
@@ -106,5 +114,57 @@ describe("UsageDonuts", () => {
     const capacity = screen.getAllByTestId("donut-center-capacity").map((node) => node.textContent);
     expect(remaining).toEqual(["120", "7,331"]);
     expect(capacity).toEqual(["225", "7,560"]);
+  });
+
+  it("filters both charts by status and recomputes visible remaining credits and capacity", async () => {
+    const user = userEvent.setup();
+    const items = [
+      item({
+        accountId: "acc-active",
+        label: "active@example.com",
+        value: 120,
+        remainingPercent: 60,
+        color: "#7bb661",
+      }),
+      item({
+        accountId: "acc-paused",
+        label: "paused@example.com",
+        value: 80,
+        remainingPercent: 40,
+        color: "#d9a441",
+        status: "paused",
+      }),
+      item({
+        accountId: "acc-deactivated",
+        label: "deactivated@example.com",
+        value: 30,
+        remainingPercent: 30,
+        color: "#d14c7a",
+        status: "deactivated",
+      }),
+    ];
+    render(
+      <UsageDonuts
+        primaryItems={items}
+        secondaryItems={items}
+        primaryTotal={500}
+        secondaryTotal={500}
+        primaryCenterValue={230}
+        secondaryCenterValue={230}
+      />,
+    );
+
+    expect(screen.getAllByText("active@example.com")).toHaveLength(2);
+    expect(screen.getAllByText("paused@example.com")).toHaveLength(2);
+    expect(screen.queryByText("deactivated@example.com")).not.toBeInTheDocument();
+    expect(screen.getAllByTestId("donut-center-remaining").map((node) => node.textContent)).toEqual(["200", "200"]);
+    expect(screen.getAllByTestId("donut-center-capacity").map((node) => node.textContent)).toEqual(["400", "400"]);
+
+    await user.click(screen.getByRole("button", { name: /statuses/i }));
+    await user.click(await screen.findByRole("menuitemcheckbox", { name: /deactivated/i }));
+
+    expect(screen.getAllByText("deactivated@example.com")).toHaveLength(2);
+    expect(screen.getAllByTestId("donut-center-remaining").map((node) => node.textContent)).toEqual(["230", "230"]);
+    expect(screen.getAllByTestId("donut-center-capacity").map((node) => node.textContent)).toEqual(["500", "500"]);
   });
 });

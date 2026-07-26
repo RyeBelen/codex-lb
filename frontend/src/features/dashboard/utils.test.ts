@@ -18,10 +18,10 @@ import { formatCompactAccountId } from "@/utils/account-identifiers";
 function account(overrides: Partial<AccountSummary> & Pick<AccountSummary, "accountId" | "email">): AccountSummary {
   return {
     accountId: overrides.accountId,
+    status: overrides.status ?? "active",
     email: overrides.email,
     displayName: overrides.displayName ?? overrides.email,
     planType: overrides.planType ?? "plus",
-    status: overrides.status ?? "active",
     limitWarmupEnabled: overrides.limitWarmupEnabled ?? false,
     limitWarmup: overrides.limitWarmup ?? null,
     usage: overrides.usage ?? null,
@@ -108,6 +108,7 @@ describe("buildDepletionView", () => {
 function remainingItem(overrides: Partial<RemainingItem> & Pick<RemainingItem, "accountId">): RemainingItem {
   return {
     accountId: overrides.accountId,
+    status: overrides.status ?? "active",
     label: overrides.label ?? overrides.accountId,
     labelSuffix: overrides.labelSuffix ?? "",
     isEmail: overrides.isEmail ?? false,
