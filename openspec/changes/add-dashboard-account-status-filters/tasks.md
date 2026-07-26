@@ -11,5 +11,5 @@
 
 ## 3. Dokploy Release
 
-- [ ] 3.1 Build and publish a pinned custom image derived from upstream v1.22.0.
-- [ ] 3.2 Update the Dokploy Compose image digest and verify health, dashboard filtering, API-key auth, and rollback metadata.
+- [x] 3.1 Build a custom image from the immutable upstream-v1.22.0-derived Git tag and record the resulting Dokploy image ID.
+- [x] 3.2 Update Dokploy Compose and verify container health, served bundle, dashboard filtering, account/API-key continuity, API-key auth, and rollback metadata.

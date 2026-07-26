@@ -36,7 +36,7 @@ When a filter hides accounts, chart items, total capacity, and center remaining 
 
 ### Use existing i18n status vocabulary
 
-The control label uses `dashboard.filters.statuses`; option labels map raw account statuses through `normalizeStatus` and existing `common.status.*` translations, falling back to formatted slugs for future statuses.
+The control label uses `dashboard.filters.statuses`; known raw account statuses map directly to existing `common.status.*` translations, while future statuses fall back to formatted slugs without losing their raw filter value.
 
 ## Risks / Trade-offs
 

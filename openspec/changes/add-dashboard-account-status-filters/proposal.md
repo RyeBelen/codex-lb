@@ -22,6 +22,6 @@ None.
 
 ## Impact
 
-- Affects dashboard React components, English/Korean/Chinese locale resources, and frontend component tests.
+- Affects dashboard React components and frontend component tests while reusing the existing English/Korean/Chinese locale resources.
 - Does not change backend APIs, database schema, account routing, or API-key behavior.
 - Requires a custom image derived from the pinned upstream v1.22.0 release for the Dokploy deployment.
