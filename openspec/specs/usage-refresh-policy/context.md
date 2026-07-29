@@ -35,6 +35,11 @@ status from `primary_window.used_percent`:
 - `used_percent >= 100` on the primary rate-limit window: `RATE_LIMITED`
 - `used_percent < 100`: `ACTIVE`
 
+Credit metadata is informational and does not override an exhausted weekly
+window. For example, an account reporting `credits_has = true` with a zero
+balance and `secondary_used = 100` is `QUOTA_EXCEEDED`, excluded from proxy
+selection, and not included in the dashboard's active count.
+
 There is no manual reset step inside codex-lb. Recovery is driven by the next
 refresh tick that observes a sub-100 value from `/wham/usage`.
 

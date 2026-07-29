@@ -314,33 +314,39 @@ When an account is `RATE_LIMITED` or `QUOTA_EXCEEDED` and its persisted `reset_a
 - **WHEN** background usage refresh evaluates the account
 - **THEN** codex-lb performs an upstream usage fetch instead of waiting for the normal refresh interval
 
-### Requirement: Credit-backed secondary quota remains usable
+### Requirement: Exhausted weekly quota is unavailable
 
-When account status is derived from persisted usage snapshots, an exhausted secondary-window usage percentage MUST NOT by itself mark an account `quota_exceeded` if the governing usage snapshot reports usable credit-backed capacity. Usable credit-backed capacity is present when `credits_unlimited` is true, `credits_has` is true, or `credits_balance` is positive.
+When an account's authoritative weekly usage window reports `used_percent >= 100`, the system MUST derive the account as `quota_exceeded` regardless of `credits_has`, `credits_unlimited`, or `credits_balance` metadata. Proxy account selection and account/dashboard summary mapping MUST use the same effective status. Explicit `paused`, `deactivated`, and `reauth_required` states MUST remain unchanged.
 
-This credit-aware interpretation MUST be shared by proxy account selection and account/dashboard summary status mapping so an account selected as usable by the proxy is not simultaneously displayed as `quota_exceeded` in the operator summary. Exhausted primary-window usage MUST still take precedence as `rate_limited`, and paused or deactivated accounts MUST NOT be reactivated solely because a usage snapshot reports usable credits.
+#### Scenario: Weekly exhaustion overrides credit metadata
 
-#### Scenario: Secondary quota exhausted with credits remains active
+- **GIVEN** an otherwise routable account whose weekly usage reports `used_percent >= 100`
+- **AND** the latest usage sample reports `credits_has = true`, `credits_unlimited = true`, or a positive `credits_balance`
+- **WHEN** the system derives the account's effective status
+- **THEN** the effective status is `quota_exceeded`
+- **AND** the account is unavailable for proxy selection
 
-- **GIVEN** an account is persisted as `quota_exceeded`
-- **AND** its governing secondary-window usage reports `used_percent >= 100`
-- **AND** the same usage snapshot reports usable credit-backed capacity
-- **WHEN** proxy selection or account-summary mapping derives the effective status
-- **THEN** the effective status is `active`
+#### Scenario: Dashboard count matches routable weekly capacity
 
-#### Scenario: Exhausted primary window keeps rate-limit precedence
+- **GIVEN** an account whose short-window usage is below `100`
+- **AND** its weekly usage reports `used_percent >= 100`
+- **WHEN** the dashboard renders account summaries
+- **THEN** the account is not counted as active
+- **AND** its summary status is `quota_exceeded`
 
-- **GIVEN** an account has usable credit-backed capacity in its usage snapshot
-- **AND** its primary-window usage reports `used_percent >= 100`
-- **WHEN** proxy selection or account-summary mapping derives the effective status
-- **THEN** the effective status is `rate_limited`
+#### Scenario: Weekly capacity restores availability
 
-#### Scenario: Operator-disabled states are preserved
+- **GIVEN** an account previously derived as `quota_exceeded` from weekly exhaustion
+- **AND** its authoritative weekly usage now reports `used_percent < 100`
+- **WHEN** the system derives the account's effective status after the reset
+- **THEN** the weekly exhaustion no longer prevents the account from becoming active
 
-- **GIVEN** an account is `paused` or `deactivated`
-- **AND** its usage snapshot reports usable credit-backed capacity
-- **WHEN** proxy selection or account-summary mapping derives the effective status
-- **THEN** the account remains `paused` or `deactivated`
+#### Scenario: Explicitly unavailable states remain unavailable
+
+- **GIVEN** an account is `paused`, `deactivated`, or `reauth_required`
+- **AND** its weekly usage reports `used_percent < 100`
+- **WHEN** the system derives the account's effective status
+- **THEN** the explicit unavailable state is preserved
 
 ### Requirement: Reset-confirmed limit warm-up
 
@@ -432,48 +438,6 @@ The dashboard MUST expose an admin-only endpoint that sends a single minimal `re
 - **WHEN** an operator POSTs to `/api/accounts/{account_id}/probe`
 - **AND** no account with that id exists
 - **THEN** the endpoint responds `404` with code `account_not_found`
-
-### Requirement: Credit-backed usage remains selectable after quota windows fill
-
-When deriving effective account status from upstream usage samples, the system MUST treat the latest credit metadata as an override for secondary quota-derived blocking state. If the latest usage sample with credit metadata reports `credits_has = true`, `credits_unlimited = true`, or `credits_balance > 0`, then secondary quota windows at `100%` MUST NOT by themselves make the account `quota_exceeded`. Primary-window exhaustion MUST keep `rate_limited` precedence even when credits are available.
-
-This override MUST NOT reactivate accounts that are explicitly `paused` or
-`deactivated`. When multiple usage samples carry credit metadata, the newest
-sample by `recorded_at` MUST be used.
-
-#### Scenario: Credit-backed weekly account remains selectable
-
-- **GIVEN** an account is otherwise routable
-- **AND** its weekly usage window reports `used_percent = 100`
-- **AND** its primary usage window is below `100`
-- **AND** the newest usage sample with credit metadata reports a positive credit balance
-- **WHEN** the load balancer derives account state
-- **THEN** the derived status remains `active`
-- **AND** the account remains eligible for selection
-
-#### Scenario: Credit-backed account remains rate-limited when primary window is exhausted
-
-- **GIVEN** an account is otherwise routable
-- **AND** its primary usage window reports `used_percent = 100`
-- **AND** the newest usage sample with credit metadata reports a positive credit balance
-- **WHEN** the load balancer derives account state
-- **THEN** the derived status is `rate_limited`
-- **AND** the reset guard points at the primary reset time
-
-#### Scenario: Newer zero-credit sample removes the override
-
-- **GIVEN** an older usage sample reports available credits
-- **AND** a newer usage sample reports no credits and zero credit balance
-- **WHEN** quota status is derived from usage
-- **THEN** the newer zero-credit sample is authoritative
-- **AND** a full quota window can still derive `rate_limited` or `quota_exceeded`
-
-#### Scenario: Paused account is not reactivated by credits
-
-- **GIVEN** an account is paused
-- **AND** its newest usage sample reports available credits
-- **WHEN** quota status is derived from usage
-- **THEN** the account remains paused
 
 ### Requirement: Free-account quota normalizes to a monthly window
 

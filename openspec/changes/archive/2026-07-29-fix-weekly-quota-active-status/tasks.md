@@ -14,5 +14,5 @@
 
 - [x] 3.1 Validate the OpenSpec change strictly and run focused Python tests, lint, and type checks.
 - [x] 3.2 Run the broader local CI gate or document any environment-only failure with independent product-path verification.
-- [ ] 3.3 Push an exact fork-only deployment tag and deploy the compose service without changing the persistent volume.
-- [ ] 3.4 Verify readiness, migration integrity, logs, reconnect-loop protections, and that no active dashboard summary has zero weekly remaining.
+- [x] 3.3 Push an exact fork-only deployment tag and deploy the compose service without changing the persistent volume.
+- [x] 3.4 Verify readiness, migration integrity, logs, reconnect-loop protections, and that no active dashboard summary has zero weekly remaining.
