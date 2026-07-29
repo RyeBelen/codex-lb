@@ -36,6 +36,8 @@ def test_main_passes_timestamped_log_config(monkeypatch):
     assert formatters["access"]["fmt"].startswith("%(asctime)s ")
     assert kwargs["timeout_keep_alive"] == 7200
     assert kwargs["ws_max_size"] == 128 * 1024 * 1024
+    assert kwargs["ws_ping_interval"] == 20.0
+    assert kwargs["ws_ping_timeout"] is None
     assert kwargs["proxy_headers"] is False
 
 
@@ -114,6 +116,88 @@ def test_main_reports_non_positive_ws_max_size(monkeypatch):
 
     with pytest.raises(SystemExit, match="--ws-max-size/UVICORN_WS_MAX_SIZE must be positive"):
         cli.main()
+
+
+def test_main_passes_custom_ws_ping_settings(monkeypatch):
+    captured: dict[str, Any] = {}
+
+    def fake_run(*args, **kwargs):
+        captured["kwargs"] = kwargs
+
+    monkeypatch.setattr(cli, "_load_uvicorn", lambda: SimpleNamespace(run=fake_run))
+
+    cli.main(["--ws-ping-interval", "30.5", "--ws-ping-timeout", "90"])
+
+    assert captured["kwargs"]["ws_ping_interval"] == 30.5
+    assert captured["kwargs"]["ws_ping_timeout"] == 90.0
+
+
+def test_main_reads_ws_ping_settings_from_env(monkeypatch):
+    captured: dict[str, Any] = {}
+
+    def fake_run(*args, **kwargs):
+        captured["kwargs"] = kwargs
+
+    monkeypatch.setenv("UVICORN_WS_PING_INTERVAL", "45")
+    monkeypatch.setenv("UVICORN_WS_PING_TIMEOUT", "120.25")
+    monkeypatch.setattr(cli, "_load_uvicorn", lambda: SimpleNamespace(run=fake_run))
+
+    cli.main([])
+
+    assert captured["kwargs"]["ws_ping_interval"] == 45.0
+    assert captured["kwargs"]["ws_ping_timeout"] == 120.25
+
+
+def test_main_ws_ping_flags_override_env(monkeypatch):
+    captured: dict[str, Any] = {}
+
+    def fake_run(*args, **kwargs):
+        captured["kwargs"] = kwargs
+
+    monkeypatch.setenv("UVICORN_WS_PING_INTERVAL", "45")
+    monkeypatch.setenv("UVICORN_WS_PING_TIMEOUT", "120")
+    monkeypatch.setattr(cli, "_load_uvicorn", lambda: SimpleNamespace(run=fake_run))
+
+    cli.main(["--ws-ping-interval", "15", "--ws-ping-timeout", "none"])
+
+    assert captured["kwargs"]["ws_ping_interval"] == 15.0
+    assert captured["kwargs"]["ws_ping_timeout"] is None
+
+
+@pytest.mark.parametrize("flag", ["--ws-ping-interval", "--ws-ping-timeout"])
+@pytest.mark.parametrize("disabled_value", ["none", "NONE"])
+def test_main_accepts_disabled_ws_ping_values(monkeypatch, flag, disabled_value):
+    captured: dict[str, Any] = {}
+
+    def fake_run(*args, **kwargs):
+        captured["kwargs"] = kwargs
+
+    monkeypatch.setattr(cli, "_load_uvicorn", lambda: SimpleNamespace(run=fake_run))
+
+    cli.main([flag, disabled_value])
+
+    forwarded_name = flag.removeprefix("--").replace("-", "_")
+    assert captured["kwargs"][forwarded_name] is None
+
+
+@pytest.mark.parametrize(
+    ("flag", "env_name"),
+    [
+        ("--ws-ping-interval", "UVICORN_WS_PING_INTERVAL"),
+        ("--ws-ping-timeout", "UVICORN_WS_PING_TIMEOUT"),
+    ],
+)
+@pytest.mark.parametrize("raw_value", ["invalid", "0", "-1", "nan", "inf", "-inf"])
+@pytest.mark.parametrize("source", ["flag", "env"])
+def test_main_rejects_invalid_ws_ping_settings(monkeypatch, flag, env_name, raw_value, source):
+    if source == "flag":
+        argv = [f"{flag}={raw_value}"]
+    else:
+        monkeypatch.setenv(env_name, raw_value)
+        argv = []
+
+    with pytest.raises(SystemExit, match="must be a positive finite number or 'none'"):
+        cli.main(argv)
 
 
 @pytest.mark.parametrize("source", ["flag", "env"])
@@ -210,6 +294,8 @@ def test_codex_sessions_retag_ignores_invalid_server_port_env(monkeypatch, capsy
     session_file.write_text(json.dumps({"model_provider": "openai"}) + "\n", encoding="utf-8")
     monkeypatch.setenv("PORT", "not-a-port")
     monkeypatch.setenv("UVICORN_TIMEOUT_KEEP_ALIVE", "not-a-timeout")
+    monkeypatch.setenv("UVICORN_WS_PING_INTERVAL", "not-a-timeout")
+    monkeypatch.setenv("UVICORN_WS_PING_TIMEOUT", "not-a-timeout")
 
     cli.main(
         [

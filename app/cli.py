@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 import os
 import sqlite3
 import sys
@@ -79,6 +80,19 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
             "application-level slimming guard can run."
         ),
     )
+    parser.add_argument(
+        "--ws-ping-interval",
+        default=os.getenv("UVICORN_WS_PING_INTERVAL", "20"),
+        help=("Seconds between client-facing websocket protocol pings, or 'none' to disable protocol pings."),
+    )
+    parser.add_argument(
+        "--ws-ping-timeout",
+        default=os.getenv("UVICORN_WS_PING_TIMEOUT", "none"),
+        help=(
+            "Seconds to wait for a client-facing websocket pong, or 'none' to "
+            "let application request and idle budgets own connection cleanup."
+        ),
+    )
 
     return parser.parse_args(argv)
 
@@ -98,6 +112,16 @@ def main(argv: Sequence[str] | None = None) -> None:
     port = _parse_server_port(args.port)
     timeout_keep_alive = _parse_server_timeout_keep_alive(args.timeout_keep_alive)
     ws_max_size = _parse_server_ws_max_size(args.ws_max_size)
+    ws_ping_interval = _parse_server_ws_ping_seconds(
+        args.ws_ping_interval,
+        option_name="--ws-ping-interval",
+        env_name="UVICORN_WS_PING_INTERVAL",
+    )
+    ws_ping_timeout = _parse_server_ws_ping_seconds(
+        args.ws_ping_timeout,
+        option_name="--ws-ping-timeout",
+        env_name="UVICORN_WS_PING_TIMEOUT",
+    )
     os.environ["PORT"] = str(port)
 
     _load_uvicorn().run(
@@ -108,6 +132,8 @@ def main(argv: Sequence[str] | None = None) -> None:
         ssl_keyfile=args.ssl_keyfile,
         timeout_keep_alive=timeout_keep_alive,
         ws_max_size=ws_max_size,
+        ws_ping_interval=ws_ping_interval,
+        ws_ping_timeout=ws_ping_timeout,
         proxy_headers=False,
         log_config=_build_log_config(),
     )
@@ -152,6 +178,24 @@ def _parse_server_ws_max_size(raw_ws_max_size: str) -> int:
     if ws_max_size <= 0:
         raise SystemExit(f"--ws-max-size/UVICORN_WS_MAX_SIZE must be positive, got {raw_ws_max_size!r}.")
     return ws_max_size
+
+
+def _parse_server_ws_ping_seconds(
+    raw_seconds: str,
+    *,
+    option_name: str,
+    env_name: str,
+) -> float | None:
+    if raw_seconds.strip().casefold() == "none":
+        return None
+    try:
+        seconds = float(raw_seconds)
+    except ValueError as exc:
+        message = f"{option_name}/{env_name} must be a positive finite number or 'none', got {raw_seconds!r}."
+        raise SystemExit(message) from exc
+    if not math.isfinite(seconds) or seconds <= 0:
+        raise SystemExit(f"{option_name}/{env_name} must be a positive finite number or 'none', got {raw_seconds!r}.")
+    return seconds
 
 
 def _run_codex_sessions_retag(args: argparse.Namespace) -> None:
