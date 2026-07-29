@@ -16,3 +16,20 @@ Windows baseline: POSIX path separator, executable, permission, home-expansion,
 and `fork()` assumptions; Windows SQLite file-locking behavior; and host
 proxy-environment precedence. The focused CLI and WebSocket tests that exercise
 this change passed cleanly.
+
+## Production rollout
+
+- Fork commit: `69b610a9`
+- Exact tag: `dokploy-downstream-ws-ping-fix-69b610a9`
+- Dokploy container: `30db844529a8`
+- Pre-deployment backup:
+  `/var/lib/codex-lb/pre-downstream-ws-ping-69b610a9.db`
+- Live and backup database integrity: `ok`; retained account count: 102.
+- Public readiness and liveness endpoints: HTTP 200; readiness database check:
+  `ok`.
+- Running defaults: ping interval `20.0`, pong timeout `None`.
+- Public authenticated WSS test: stayed connected for 46.1 seconds while two
+  server pongs were deliberately suppressed, then completed a client
+  ping/pong round trip.
+- Post-test log search across 5,000 lines: no `keepalive ping timeout`,
+  `sent 1011`, or `ConnectionClosedError` entries.

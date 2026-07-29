@@ -306,3 +306,43 @@ Codex clients send each Responses turn as one websocket text message. After a re
 - Front proxies must size the HTTP path for the client's websocket→HTTP fallback and for remote-compaction POSTs, which carry full history. For nginx: `client_max_body_size 128m;` (matching codex-lb's own cap), plus websocket upgrade passthrough (`proxy_http_version 1.1;`, `proxy_set_header Upgrade $http_upgrade;`, `proxy_set_header Connection "upgrade";`) and a `proxy_read_timeout` comfortably above idle turn gaps (websocket connections live up to 60 minutes).
 
 Diagnostic signature of an undersized websocket ingress budget: uvicorn logs show `WebSocket ... [accepted]` → `connection open` → `connection closed` within seconds, repeated at backoff intervals, with **no** application-level proxy log lines and no `request_logs` row in between — followed by the client's HTTP fallback (visible as `POST /backend-api/codex/responses` hitting the front proxy, often as `413` there).
+
+## Client-Facing WebSocket Ping Liveness
+
+Uvicorn sends protocol pings on the client-facing Responses WebSocket. Keep
+these pings enabled so reverse proxies observe transport activity, but do not
+let a delayed client pong override codex-lb's request state.
+
+The canonical settings are:
+
+- `--ws-ping-interval` / `UVICORN_WS_PING_INTERVAL`: defaults to `20` seconds.
+- `--ws-ping-timeout` / `UVICORN_WS_PING_TIMEOUT`: defaults to `none`.
+
+Each accepts a positive finite number of seconds or case-insensitive `none`.
+The default disabled pong timeout does not make abandoned connections
+unbounded: downstream sockets without a pending request remain governed by the
+application idle timeout, and pending turns remain governed by stream and total
+request budgets.
+
+The server-side signature for the retired failure is:
+
+```text
+websockets.exceptions.ConnectionClosedError:
+sent 1011 (internal error) keepalive ping timeout; no close frame received
+```
+
+This is a downstream Codex-client-to-Uvicorn transport closure. It is distinct
+from an upstream OpenAI WebSocket drop or a missing `response.created` retry.
+
+After changing the setting or deploying a related fix:
+
+1. Confirm readiness and liveness return HTTP 200.
+2. Confirm the running server resolves the interval to `20.0` and the timeout
+   to `None`, unless an operator intentionally supplied an override.
+3. Hold a real authenticated client-facing WSS connection open past 40 seconds
+   while suppressing server-ping pongs, then prove the socket still exchanges
+   frames.
+4. Search the new container's logs for `keepalive ping timeout`, `sent 1011`,
+   and `ConnectionClosedError`.
+5. Confirm application idle-cleanup tests still close truly idle downstream
+   sessions and retain sessions with pending work.

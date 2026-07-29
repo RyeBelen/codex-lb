@@ -13,6 +13,6 @@
 
 - [x] 3.1 Run strict OpenSpec validation, focused tests, lint, formatting, and scoped type checks.
 - [x] 3.2 Run the broader relevant integration/unit gates and document any environment-only failures.
-- [ ] 3.3 Push an exact fork-only deployment tag, create a production database backup, and deploy without changing the named volume.
-- [ ] 3.4 Verify readiness, retained data, long WebSocket behavior, and the absence of new server-side keepalive ping timeouts.
-- [ ] 3.5 Sync and archive the verified OpenSpec change.
+- [x] 3.3 Push an exact fork-only deployment tag, create a production database backup, and deploy without changing the named volume.
+- [x] 3.4 Verify readiness, retained data, long WebSocket behavior, and the absence of new server-side keepalive ping timeouts.
+- [x] 3.5 Sync and archive the verified OpenSpec change.
