@@ -28,7 +28,12 @@ from app.db.models import (
 )
 from app.db.session import sqlite_writer_section
 from app.modules.accounts.usage_rollup import api_key_usage_aggregate_stmt, read_api_key_rollup_state
-from app.modules.accounts.usage_time_rollup import HOURLY_BUCKET_SECONDS, WARMUP_REQUEST_KINDS, to_dimension
+from app.modules.accounts.usage_time_rollup import (
+    HOURLY_BUCKET_SECONDS,
+    WARMUP_REQUEST_KINDS,
+    from_dimension,
+    to_dimension,
+)
 from app.modules.accounts.usage_time_rollup_read import RawWindow, raw_windows_clause, read_hourly_window
 from app.modules.api_keys.limit_windows import advance_limit_reset
 
@@ -966,47 +971,82 @@ class ApiKeysRepository:
         until: datetime,
         bucket_seconds: int = 86400,
     ) -> list[ApiKeyDailyUsageBucket]:
-        history = request_history_selectable(name="api_key_daily_usage_history")
-        bind = self._session.get_bind()
-        dialect = bind.dialect.name if bind else "sqlite"
-        if dialect == "postgresql":
-            bucket_expr = func.floor(func.extract("epoch", history.c.requested_at) / bucket_seconds) * bucket_seconds
-        else:
-            epoch_col = cast(func.strftime("%s", history.c.requested_at), Integer)
-            bucket_expr = cast(epoch_col / bucket_seconds, Integer) * bucket_seconds
-        bucket_col = bucket_expr.label("bucket_epoch")
+        key_rows = (await self._session.execute(select(ApiKey.id, ApiKey.name))).all()
+        key_names = {str(row.id): str(row.name) for row in key_rows}
+        merged: dict[tuple[str, int], list[float]] = {}
 
-        stmt = (
-            select(
-                history.c.api_key_id.label("key_id"),
-                ApiKey.name.label("key_name"),
-                bucket_col,
-                func.coalesce(func.sum(history.c.input_tokens), 0).label("total_input_tokens"),
-                func.coalesce(
-                    func.sum(func.coalesce(history.c.output_tokens, history.c.reasoning_tokens, 0)),
-                    0,
-                ).label("total_output_tokens"),
-                func.coalesce(func.sum(history.c.cost_usd), 0.0).label("total_cost_usd"),
-            )
-            .select_from(history.join(ApiKey, ApiKey.id == history.c.api_key_id))
-            .where(
-                history.c.requested_at >= since,
-                history.c.requested_at < until,
-                self._exclude_warmup_clause(history),
-            )
-            .group_by(history.c.api_key_id, ApiKey.name, bucket_col)
-            .order_by(history.c.api_key_id, bucket_col)
+        def _add(key_id: str, bucket_epoch: int, input_tokens: int, output_tokens: int, cost_usd: float) -> None:
+            if key_id not in key_names:
+                return
+            daily_epoch = bucket_epoch // bucket_seconds * bucket_seconds
+            entry = merged.setdefault((key_id, daily_epoch), [0, 0, 0.0])
+            entry[0] += input_tokens
+            entry[1] += output_tokens
+            entry[2] += cost_usd
+
+        rollup_rows, raw_windows = await read_hourly_window(
+            self._session,
+            since,
+            until,
+            filters=(RequestUsageHourlyRollup.request_kind.not_in(WARMUP_REQUEST_KINDS),),
         )
-        result = await self._session.execute(stmt)
+        for rollup in rollup_rows:
+            key_id = from_dimension(rollup.api_key_id)
+            if key_id is not None:
+                _add(
+                    key_id,
+                    rollup.bucket_epoch,
+                    rollup.input_tokens,
+                    rollup.output_or_reasoning_tokens,
+                    rollup.cost_usd,
+                )
+
+        if raw_windows:
+            bind = self._session.get_bind()
+            dialect = bind.dialect.name if bind else "sqlite"
+            if dialect == "postgresql":
+                bucket_expr = (
+                    func.floor(func.extract("epoch", RequestLog.requested_at) / bucket_seconds) * bucket_seconds
+                )
+            else:
+                epoch_col = cast(func.strftime("%s", RequestLog.requested_at), Integer)
+                bucket_expr = cast(epoch_col / bucket_seconds, Integer) * bucket_seconds
+            bucket_col = bucket_expr.label("bucket_epoch")
+
+            stmt = (
+                select(
+                    RequestLog.api_key_id.label("key_id"),
+                    bucket_col,
+                    func.coalesce(func.sum(RequestLog.input_tokens), 0).label("total_input_tokens"),
+                    func.coalesce(
+                        func.sum(func.coalesce(RequestLog.output_tokens, RequestLog.reasoning_tokens, 0)),
+                        0,
+                    ).label("total_output_tokens"),
+                    func.coalesce(func.sum(RequestLog.cost_usd), 0.0).label("total_cost_usd"),
+                )
+                .select_from(RequestLog)
+                .join(ApiKey, ApiKey.id == RequestLog.api_key_id)
+                .where(raw_windows_clause(raw_windows), self._exclude_warmup_clause())
+                .group_by(RequestLog.api_key_id, bucket_col)
+            )
+            for row in (await self._session.execute(stmt)).all():
+                _add(
+                    str(row.key_id),
+                    int(row.bucket_epoch),
+                    int(row.total_input_tokens or 0),
+                    int(row.total_output_tokens or 0),
+                    float(row.total_cost_usd or 0.0),
+                )
+
         return [
             ApiKeyDailyUsageBucket(
-                key_id=str(row.key_id),
-                key_name=str(row.key_name),
-                bucket_epoch=int(row.bucket_epoch),
-                total_tokens=int((row.total_input_tokens or 0) + (row.total_output_tokens or 0)),
-                total_cost_usd=round(float(row.total_cost_usd or 0.0), 6),
+                key_id=key_id,
+                key_name=key_names[key_id],
+                bucket_epoch=bucket_epoch,
+                total_tokens=int(values[0] + values[1]),
+                total_cost_usd=round(float(values[2]), 6),
             )
-            for row in result.all()
+            for (key_id, bucket_epoch), values in sorted(merged.items())
         ]
 
     async def usage_7d(self, key_id: str, since: datetime, until: datetime) -> ApiKeyUsageTotals:
