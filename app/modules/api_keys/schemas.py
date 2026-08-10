@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 
 from pydantic import Field
 
@@ -111,6 +111,24 @@ class ApiKeyTrendsResponse(DashboardModel):
     key_id: str
     cost: list[ApiKeyTrendPoint] = Field(default_factory=list)
     tokens: list[ApiKeyTrendPoint] = Field(default_factory=list)
+
+
+class ApiKeyDailyUsagePointResponse(DashboardModel):
+    date: date
+    v: float
+
+
+class ApiKeyDailyUsageSeriesResponse(DashboardModel):
+    key_id: str
+    name: str
+    points: list[ApiKeyDailyUsagePointResponse] = Field(default_factory=list)
+
+
+class ApiKeyDailyUsageResponse(DashboardModel):
+    start_date: date
+    end_date: date
+    cost: list[ApiKeyDailyUsageSeriesResponse] = Field(default_factory=list)
+    tokens: list[ApiKeyDailyUsageSeriesResponse] = Field(default_factory=list)
 
 
 class ApiKeyAccountCostResponse(DashboardModel):

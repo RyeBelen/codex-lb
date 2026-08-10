@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
 	createApiKey,
 	createApiKeyCreateResponse,
+	createApiKeyDailyUsage,
 	createApiKeyTrends,
 	createApiKeyUsage7Day,
 } from "@/test/mocks/factories";
@@ -21,6 +22,7 @@ const apiKeysApiMocks = vi.hoisted(() => ({
 }));
 
 const apisApiMocks = vi.hoisted(() => ({
+	getApiKeyDailyUsage: vi.fn(),
 	getApiKeyTrends: vi.fn(),
 	getApiKeyUsage7Day: vi.fn(),
 }));
@@ -32,6 +34,7 @@ const apiMocks = {
 	deleteApiKey: apiKeysApiMocks.deleteApiKey,
 	regenerateApiKey: apiKeysApiMocks.regenerateApiKey,
 	getApiKeyTrends: apisApiMocks.getApiKeyTrends,
+	getApiKeyDailyUsage: apisApiMocks.getApiKeyDailyUsage,
 	getApiKeyUsage7Day: apisApiMocks.getApiKeyUsage7Day,
 };
 
@@ -136,6 +139,21 @@ describe("useApiKeys", () => {
 });
 
 describe("detail queries", () => {
+	it("fetches the shared daily top-key usage independently of selection", async () => {
+		const queryClient = createTestQueryClient();
+		const response = createApiKeyDailyUsage();
+		apiMocks.getApiKeyDailyUsage.mockResolvedValue(response);
+
+		const { useApiKeyDailyUsage } = await import("@/features/apis/hooks/use-apis");
+		const { result } = renderHook(() => useApiKeyDailyUsage(), {
+			wrapper: createWrapper(queryClient),
+		});
+
+		await waitFor(() => expect(result.current.isSuccess).toBe(true));
+		expect(result.current.data).toEqual(response);
+		expect(apiMocks.getApiKeyDailyUsage).toHaveBeenCalledTimes(1);
+	});
+
 	it("fetches trend data only when a key is selected", async () => {
 		const queryClient = createTestQueryClient();
 		const response = createApiKeyTrends({ keyId: "key_1" });

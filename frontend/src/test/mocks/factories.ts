@@ -18,10 +18,12 @@ import {
 	ApiKeySchema,
 } from "@/features/api-keys/schemas";
 import type {
+	ApiKeyDailyUsageResponse,
 	ApiKeyTrendsResponse,
 	ApiKeyUsage7DayResponse,
 } from "@/features/apis/schemas";
 import {
+	ApiKeyDailyUsageResponseSchema,
 	ApiKeyTrendsResponseSchema,
 	ApiKeyUsage7DayResponseSchema,
 } from "@/features/apis/schemas";
@@ -79,6 +81,7 @@ export type {
 	OauthStatusResponse,
 	ApiKey,
 	ApiKeyCreateResponse,
+	ApiKeyDailyUsageResponse,
 	ApiKeyTrendsResponse,
 	ApiKeyUsage7DayResponse,
 	ModelSource,
@@ -775,6 +778,35 @@ export function createApiKeyTrends(
 			v: +(p.v * 0.001).toFixed(4),
 		})),
 		tokens: createApiKeyTrendPoints(),
+		...overrides,
+	});
+}
+
+export function createApiKeyDailyUsage(
+	overrides: Partial<ApiKeyDailyUsageResponse> = {},
+): ApiKeyDailyUsageResponse {
+	const dates = Array.from({ length: 30 }, (_, index) => {
+		const value = new Date("2026-01-01T00:00:00Z");
+		value.setUTCDate(value.getUTCDate() + index);
+		return value.toISOString().slice(0, 10);
+	});
+	return ApiKeyDailyUsageResponseSchema.parse({
+		startDate: dates[0],
+		endDate: dates[dates.length - 1],
+		cost: [
+			{
+				keyId: "key_1",
+				name: "Default key",
+				points: dates.map((date, index) => ({ date, v: index * 0.1 })),
+			},
+		],
+		tokens: [
+			{
+				keyId: "key_1",
+				name: "Default key",
+				points: dates.map((date, index) => ({ date, v: index * 1000 })),
+			},
+		],
 		...overrides,
 	});
 }

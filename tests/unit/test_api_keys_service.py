@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Collection
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, cast
 
 import pytest
@@ -22,6 +22,7 @@ from app.db.models import (
 )
 from app.modules.api_keys.repository import (
     _UNSET,
+    ApiKeyDailyUsageBucket,
     ApiKeyTrendBucket,
     ApiKeyUsageSummary,
     ReservationResult,
@@ -40,6 +41,7 @@ from app.modules.api_keys.service import (
     ApiKeyValidationError,
     LimitRuleInput,
     _build_api_key_trends,
+    _build_top_api_key_daily_usage,
     _is_sqlite_database_locked,
     _normalize_usage_sections,
 )
@@ -58,6 +60,70 @@ pytestmark = pytest.mark.unit
 )
 def test_is_sqlite_database_locked_matches_transient_lock_messages(message: str) -> None:
     assert _is_sqlite_database_locked(OperationalError("sqlite busy", {}, Exception(message))) is True
+
+
+def test_build_top_api_key_daily_usage_ranks_metrics_independently_and_zero_fills() -> None:
+    start_date = date(2026, 8, 1)
+    end_date = date(2026, 8, 3)
+    first_day_epoch = int(datetime(2026, 8, 1, tzinfo=timezone.utc).timestamp())
+    third_day_epoch = int(datetime(2026, 8, 3, tzinfo=timezone.utc).timestamp())
+    buckets = [
+        ApiKeyDailyUsageBucket(
+            key_id="cost-key",
+            key_name="Cost leader",
+            bucket_epoch=first_day_epoch,
+            total_tokens=5,
+            total_cost_usd=9.0,
+        ),
+        ApiKeyDailyUsageBucket(
+            key_id="token-key",
+            key_name="Token leader",
+            bucket_epoch=third_day_epoch,
+            total_tokens=500,
+            total_cost_usd=1.0,
+        ),
+        ApiKeyDailyUsageBucket(
+            key_id="token-only",
+            key_name="Token only",
+            bucket_epoch=first_day_epoch,
+            total_tokens=300,
+            total_cost_usd=0.0,
+        ),
+    ]
+
+    result = _build_top_api_key_daily_usage(buckets, start_date, end_date, limit=2)
+
+    assert [series.key_id for series in result.cost] == ["cost-key", "token-key"]
+    assert [series.key_id for series in result.tokens] == ["token-key", "token-only"]
+    assert [point.date for point in result.cost[0].points] == [
+        date(2026, 8, 1),
+        date(2026, 8, 2),
+        date(2026, 8, 3),
+    ]
+    assert [point.v for point in result.cost[0].points] == [9.0, 0.0, 0.0]
+    assert [point.v for point in result.tokens[0].points] == [0.0, 0.0, 500.0]
+
+
+def test_build_top_api_key_daily_usage_caps_each_metric_at_ten_series() -> None:
+    start_date = date(2026, 8, 1)
+    bucket_epoch = int(datetime(2026, 8, 1, tzinfo=timezone.utc).timestamp())
+    buckets = [
+        ApiKeyDailyUsageBucket(
+            key_id=f"key-{index:02d}",
+            key_name=f"User {index:02d}",
+            bucket_epoch=bucket_epoch,
+            total_tokens=index + 1,
+            total_cost_usd=float(20 - index),
+        )
+        for index in range(12)
+    ]
+
+    result = _build_top_api_key_daily_usage(buckets, start_date, start_date, limit=10)
+
+    assert len(result.cost) == 10
+    assert len(result.tokens) == 10
+    assert result.cost[0].key_id == "key-00"
+    assert result.tokens[0].key_id == "key-11"
 
 
 class _FakeApiKeysRepository(ApiKeysRepositoryProtocol):

@@ -1,7 +1,18 @@
+import { lazy, Suspense } from "react";
 import { useTranslation } from "react-i18next";
 
+import { AlertMessage } from "@/components/alert-message";
+import { Skeleton } from "@/components/ui/skeleton";
 import type { ApiKey } from "@/features/api-keys/schemas";
+import type { ApiDailyUsageChartsProps } from "@/features/apis/components/api-daily-usage-charts";
+import type { ApiKeyDailyUsageResponse } from "@/features/apis/schemas";
 import { formatCompactNumber, formatCurrency } from "@/utils/formatters";
+
+const ApiDailyUsageCharts = lazy(() =>
+  import("@/features/apis/components/api-daily-usage-charts").then((module) => ({
+    default: (props: ApiDailyUsageChartsProps) => <module.ApiDailyUsageCharts {...props} />,
+  })),
+);
 
 type UsageMetric = "requests" | "tokens" | "cost";
 
@@ -147,9 +158,17 @@ function BreakdownPanel({
 
 export type ApiKeysOverviewProps = {
   apiKeys: ApiKey[];
+  dailyUsage?: ApiKeyDailyUsageResponse | null;
+  dailyUsageLoading?: boolean;
+  dailyUsageError?: string | null;
 };
 
-export function ApiKeysOverview({ apiKeys }: ApiKeysOverviewProps) {
+export function ApiKeysOverview({
+  apiKeys,
+  dailyUsage = null,
+  dailyUsageLoading = false,
+  dailyUsageError = null,
+}: ApiKeysOverviewProps) {
   const { t } = useTranslation();
   const totalKeys = apiKeys.length;
   const activeKeys = apiKeys.filter((apiKey) => apiKey.isActive && !isExpired(apiKey)).length;
@@ -194,6 +213,26 @@ export function ApiKeysOverview({ apiKeys }: ApiKeysOverviewProps) {
           apiKeys={apiKeys}
         />
       </div>
+
+      {dailyUsageLoading && !dailyUsage ? (
+        <div className="grid gap-4 xl:grid-cols-2" data-testid="api-daily-usage-loading">
+          <Skeleton className="h-[24rem] rounded-xl" />
+          <Skeleton className="h-[24rem] rounded-xl" />
+        </div>
+      ) : null}
+      {dailyUsageError && !dailyUsage ? <AlertMessage variant="error">{dailyUsageError}</AlertMessage> : null}
+      {dailyUsage ? (
+        <Suspense
+          fallback={
+            <div className="grid gap-4 xl:grid-cols-2">
+              <Skeleton className="h-[24rem] rounded-xl" />
+              <Skeleton className="h-[24rem] rounded-xl" />
+            </div>
+          }
+        >
+          <ApiDailyUsageCharts data={dailyUsage} />
+        </Suspense>
+      ) : null}
     </section>
   );
 }

@@ -13,7 +13,7 @@ import type {
   ApiKeyCreateRequest,
   ApiKeyUpdateRequest,
 } from "@/features/api-keys/schemas";
-import { getApiKeyTrends, getApiKeyUsage7Day } from "@/features/apis/api";
+import { getApiKeyDailyUsage, getApiKeyTrends, getApiKeyUsage7Day } from "@/features/apis/api";
 
 export function useApiKeys() {
   const { t } = useTranslation();
@@ -34,6 +34,7 @@ export function useApiKeys() {
       toast.success(t("apiKeys.toasts.created"));
       void queryClient.invalidateQueries({ queryKey: ["api-keys", "list"] });
       void queryClient.invalidateQueries({ queryKey: ["api-keys", "trends"] });
+      void queryClient.invalidateQueries({ queryKey: ["api-keys", "daily-usage"] });
     },
     onError: (error: Error) => {
       toast.error(error.message || t("apiKeys.toasts.createFailed"));
@@ -47,6 +48,7 @@ export function useApiKeys() {
       toast.success(t("apiKeys.toasts.updated"));
       void queryClient.invalidateQueries({ queryKey: ["api-keys", "list"] });
       void queryClient.invalidateQueries({ queryKey: ["api-keys", "trends"] });
+      void queryClient.invalidateQueries({ queryKey: ["api-keys", "daily-usage"] });
     },
     onError: (error: Error) => {
       toast.error(error.message || t("apiKeys.toasts.updateFailed"));
@@ -59,6 +61,7 @@ export function useApiKeys() {
       toast.success(t("apiKeys.toasts.deleted"));
       void queryClient.invalidateQueries({ queryKey: ["api-keys", "list"] });
       void queryClient.invalidateQueries({ queryKey: ["api-keys", "trends"] });
+      void queryClient.invalidateQueries({ queryKey: ["api-keys", "daily-usage"] });
     },
     onError: (error: Error) => {
       toast.error(error.message || t("apiKeys.toasts.deleteFailed"));
@@ -71,6 +74,7 @@ export function useApiKeys() {
       toast.success(t("apiKeys.toasts.regenerated"));
       void queryClient.invalidateQueries({ queryKey: ["api-keys", "list"] });
       void queryClient.invalidateQueries({ queryKey: ["api-keys", "trends"] });
+      void queryClient.invalidateQueries({ queryKey: ["api-keys", "daily-usage"] });
     },
     onError: (error: Error) => {
       toast.error(error.message || t("apiKeys.toasts.regenerateFailed"));
@@ -84,6 +88,16 @@ export function useApiKeys() {
     deleteMutation,
     regenerateMutation,
   };
+}
+
+export function useApiKeyDailyUsage() {
+  return useQuery({
+    queryKey: ["api-keys", "daily-usage"],
+    queryFn: getApiKeyDailyUsage,
+    staleTime: 5 * 60_000,
+    refetchInterval: 5 * 60_000,
+    refetchIntervalInBackground: false,
+  });
 }
 
 export function useApiKeyTrends(keyId: string | null) {

@@ -76,6 +76,15 @@ class ApiKeyTrendBucket:
 
 
 @dataclass(frozen=True, slots=True)
+class ApiKeyDailyUsageBucket:
+    key_id: str
+    key_name: str
+    bucket_epoch: int
+    total_tokens: int
+    total_cost_usd: float
+
+
+@dataclass(frozen=True, slots=True)
 class ApiKeyUsageTotals:
     total_requests: int
     total_tokens: int
@@ -949,6 +958,55 @@ class ApiKeysRepository:
                 total_cost_usd=round(float(entry[2]), 6),
             )
             for bucket_epoch, entry in sorted(merged.items())
+        ]
+
+    async def daily_usage_by_key(
+        self,
+        since: datetime,
+        until: datetime,
+        bucket_seconds: int = 86400,
+    ) -> list[ApiKeyDailyUsageBucket]:
+        history = request_history_selectable(name="api_key_daily_usage_history")
+        bind = self._session.get_bind()
+        dialect = bind.dialect.name if bind else "sqlite"
+        if dialect == "postgresql":
+            bucket_expr = func.floor(func.extract("epoch", history.c.requested_at) / bucket_seconds) * bucket_seconds
+        else:
+            epoch_col = cast(func.strftime("%s", history.c.requested_at), Integer)
+            bucket_expr = cast(epoch_col / bucket_seconds, Integer) * bucket_seconds
+        bucket_col = bucket_expr.label("bucket_epoch")
+
+        stmt = (
+            select(
+                history.c.api_key_id.label("key_id"),
+                ApiKey.name.label("key_name"),
+                bucket_col,
+                func.coalesce(func.sum(history.c.input_tokens), 0).label("total_input_tokens"),
+                func.coalesce(
+                    func.sum(func.coalesce(history.c.output_tokens, history.c.reasoning_tokens, 0)),
+                    0,
+                ).label("total_output_tokens"),
+                func.coalesce(func.sum(history.c.cost_usd), 0.0).label("total_cost_usd"),
+            )
+            .select_from(history.join(ApiKey, ApiKey.id == history.c.api_key_id))
+            .where(
+                history.c.requested_at >= since,
+                history.c.requested_at < until,
+                self._exclude_warmup_clause(history),
+            )
+            .group_by(history.c.api_key_id, ApiKey.name, bucket_col)
+            .order_by(history.c.api_key_id, bucket_col)
+        )
+        result = await self._session.execute(stmt)
+        return [
+            ApiKeyDailyUsageBucket(
+                key_id=str(row.key_id),
+                key_name=str(row.key_name),
+                bucket_epoch=int(row.bucket_epoch),
+                total_tokens=int((row.total_input_tokens or 0) + (row.total_output_tokens or 0)),
+                total_cost_usd=round(float(row.total_cost_usd or 0.0), 6),
+            )
+            for row in result.all()
         ]
 
     async def usage_7d(self, key_id: str, since: datetime, until: datetime) -> ApiKeyUsageTotals:

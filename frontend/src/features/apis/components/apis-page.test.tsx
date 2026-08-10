@@ -9,6 +9,7 @@ import { ApisPage } from "./apis-page";
 
 const hookMocks = vi.hoisted(() => ({
 	useApiKeys: vi.fn(),
+	useApiKeyDailyUsage: vi.fn(),
 	useApiKeyTrends: vi.fn(),
 	useApiKeyUsage7Day: vi.fn(),
 }));
@@ -73,6 +74,7 @@ function renderApisPage({
 		deleteMutation,
 		regenerateMutation,
 	});
+	hookMocks.useApiKeyDailyUsage.mockReturnValue(createQueryMock(null));
 	hookMocks.useApiKeyTrends.mockReturnValue(trendsQuery);
 	hookMocks.useApiKeyUsage7Day.mockReturnValue(usage7DayQuery);
 

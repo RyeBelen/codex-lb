@@ -6,7 +6,7 @@ import secrets
 import time
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from hashlib import sha256
 from math import ceil
 from typing import Protocol
@@ -27,6 +27,7 @@ from app.db.session import sqlite_writer_section
 from app.modules.api_keys.limit_windows import advance_limit_reset, limit_window_delta, next_limit_reset
 from app.modules.api_keys.repository import (
     _UNSET,
+    ApiKeyDailyUsageBucket,
     ApiKeyTrendBucket,
     ApiKeyUsageSummary,
     ApiKeyUsageTotals,
@@ -41,6 +42,9 @@ _SQLITE_BUSY_RETRY_ATTEMPTS = 4
 _SQLITE_BUSY_RETRY_BASE_SECONDS = 0.1
 _SPARKLINE_DAYS = 7
 _DETAIL_BUCKET_SECONDS = 3600
+_DAILY_USAGE_DAYS = 30
+_DAILY_USAGE_BUCKET_SECONDS = 86400
+_DAILY_USAGE_SERIES_LIMIT = 10
 API_KEY_USAGE_RESERVATION_MAX_TOKEN_BUDGET = 8_192
 API_KEY_USAGE_RESERVATION_DEFAULT_INPUT_TOKENS = API_KEY_USAGE_RESERVATION_MAX_TOKEN_BUDGET
 API_KEY_USAGE_RESERVATION_DEFAULT_OUTPUT_TOKENS = 2_048
@@ -192,6 +196,13 @@ class ApiKeysRepositoryProtocol(Protocol):
         until: datetime,
         bucket_seconds: int = 3600,
     ) -> list[ApiKeyTrendBucket]: ...
+
+    async def daily_usage_by_key(
+        self,
+        since: datetime,
+        until: datetime,
+        bucket_seconds: int = 86400,
+    ) -> list[ApiKeyDailyUsageBucket]: ...
 
     async def usage_7d(
         self,
@@ -1124,6 +1135,23 @@ class ApiKeysService:
         )
         return _build_api_key_trends(key_id, buckets, since, now, _DETAIL_BUCKET_SECONDS)
 
+    async def get_daily_usage(self) -> ApiKeyDailyUsageData:
+        now = utcnow()
+        end_date = now.date()
+        start_date = end_date - timedelta(days=_DAILY_USAGE_DAYS - 1)
+        since = datetime.combine(start_date, datetime.min.time())
+        buckets = await self._repository.daily_usage_by_key(
+            since,
+            now,
+            _DAILY_USAGE_BUCKET_SECONDS,
+        )
+        return _build_top_api_key_daily_usage(
+            buckets,
+            start_date,
+            end_date,
+            limit=_DAILY_USAGE_SERIES_LIMIT,
+        )
+
     async def get_key_usage_summary_for_self(self, key_id: str) -> ApiKeySelfUsageData | None:
         """Return usage summary + current limits for a single key (self-service lookup)."""
         row = await self._repository.get_by_id(key_id)
@@ -1195,6 +1223,27 @@ class ApiKeyTrendsData:
     key_id: str
     cost: list[ApiKeyTrendsPoint] = field(default_factory=list)
     tokens: list[ApiKeyTrendsPoint] = field(default_factory=list)
+
+
+@dataclass(frozen=True, slots=True)
+class ApiKeyDailyUsagePoint:
+    date: date
+    v: float
+
+
+@dataclass(frozen=True, slots=True)
+class ApiKeyDailyUsageSeries:
+    key_id: str
+    name: str
+    points: list[ApiKeyDailyUsagePoint] = field(default_factory=list)
+
+
+@dataclass(frozen=True, slots=True)
+class ApiKeyDailyUsageData:
+    start_date: date
+    end_date: date
+    cost: list[ApiKeyDailyUsageSeries] = field(default_factory=list)
+    tokens: list[ApiKeyDailyUsageSeries] = field(default_factory=list)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1879,3 +1928,59 @@ def _build_api_key_trends(
         tokens_points.append(ApiKeyTrendsPoint(t=dt, v=float(tokens_by_bucket.get(epoch, 0))))
 
     return ApiKeyTrendsData(key_id=key_id, cost=cost_points, tokens=tokens_points)
+
+
+def _build_top_api_key_daily_usage(
+    buckets: list[ApiKeyDailyUsageBucket],
+    start_date: date,
+    end_date: date,
+    *,
+    limit: int,
+) -> ApiKeyDailyUsageData:
+    if end_date < start_date:
+        return ApiKeyDailyUsageData(start_date=start_date, end_date=end_date)
+
+    dates = [start_date + timedelta(days=offset) for offset in range((end_date - start_date).days + 1)]
+    names: dict[str, str] = {}
+    cost_by_key: dict[str, dict[date, float]] = {}
+    tokens_by_key: dict[str, dict[date, float]] = {}
+    for bucket in buckets:
+        bucket_date = datetime.fromtimestamp(bucket.bucket_epoch, tz=timezone.utc).date()
+        if bucket_date < start_date or bucket_date > end_date:
+            continue
+        names[bucket.key_id] = bucket.key_name
+        cost_by_key.setdefault(bucket.key_id, {})[bucket_date] = bucket.total_cost_usd
+        tokens_by_key.setdefault(bucket.key_id, {})[bucket_date] = float(bucket.total_tokens)
+
+    def build_series(
+        values_by_key: dict[str, dict[date, float]],
+        *,
+        round_cost: bool,
+    ) -> list[ApiKeyDailyUsageSeries]:
+        ranked = sorted(
+            ((key_id, sum(values.values())) for key_id, values in values_by_key.items() if sum(values.values()) > 0),
+            key=lambda item: (-item[1], names[item[0]], item[0]),
+        )[:limit]
+        return [
+            ApiKeyDailyUsageSeries(
+                key_id=key_id,
+                name=names[key_id],
+                points=[
+                    ApiKeyDailyUsagePoint(
+                        date=day,
+                        v=round(values_by_key[key_id].get(day, 0.0), 6)
+                        if round_cost
+                        else values_by_key[key_id].get(day, 0.0),
+                    )
+                    for day in dates
+                ],
+            )
+            for key_id, _total in ranked
+        ]
+
+    return ApiKeyDailyUsageData(
+        start_date=start_date,
+        end_date=end_date,
+        cost=build_series(cost_by_key, round_cost=True),
+        tokens=build_series(tokens_by_key, round_cost=False),
+    )

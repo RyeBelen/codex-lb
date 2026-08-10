@@ -17,6 +17,7 @@ import { ApiList } from "@/features/apis/components/api-list";
 import { ApisSkeleton } from "@/features/apis/components/apis-skeleton";
 import {
 	useApiKeys,
+	useApiKeyDailyUsage,
 	useApiKeyTrends,
 	useApiKeyUsage7Day,
 } from "@/features/apis/hooks/use-apis";
@@ -79,6 +80,7 @@ export function ApisPage() {
 
 	const trendsQuery = useApiKeyTrends(selectedApiKey?.id ?? null);
 	const usage7DayQuery = useApiKeyUsage7Day(selectedApiKey?.id ?? null);
+	const dailyUsageQuery = useApiKeyDailyUsage();
 
 	const mutationBusy =
 		createMutation.isPending ||
@@ -93,6 +95,7 @@ export function ApisPage() {
 		getErrorMessageOrNull(regenerateMutation.error);
 	const listError = getErrorMessageOrNull(apiKeysQuery.error);
 	const usage7DayError = getErrorMessageOrNull(usage7DayQuery.error);
+	const dailyUsageError = getErrorMessageOrNull(dailyUsageQuery.error);
 	const pageError = mutationError || (apiKeysQuery.data ? listError : null);
 
 	const handleCreate = async (payload: ApiKeyCreateRequest) => {
@@ -139,7 +142,12 @@ export function ApisPage() {
 				</div>
 			) : (
 				<div className="space-y-6">
-					<ApiKeysOverview apiKeys={apiKeys} />
+					<ApiKeysOverview
+						apiKeys={apiKeys}
+						dailyUsage={dailyUsageQuery.data}
+						dailyUsageLoading={dailyUsageQuery.isPending}
+						dailyUsageError={dailyUsageError}
+					/>
 
 					<div className="grid gap-4 lg:grid-cols-[22rem_minmax(0,1fr)]">
 						<div className="rounded-xl border bg-card p-4">

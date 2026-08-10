@@ -14,6 +14,9 @@ from app.modules.api_keys.schemas import (
     ApiKeyAccountCostResponse,
     ApiKeyCreateRequest,
     ApiKeyCreateResponse,
+    ApiKeyDailyUsagePointResponse,
+    ApiKeyDailyUsageResponse,
+    ApiKeyDailyUsageSeriesResponse,
     ApiKeyResponse,
     ApiKeyTrendsResponse,
     ApiKeyUpdateRequest,
@@ -23,6 +26,7 @@ from app.modules.api_keys.schemas import (
 )
 from app.modules.api_keys.service import (
     ApiKeyCreateData,
+    ApiKeyDailyUsageSeries,
     ApiKeyData,
     ApiKeyNotFoundError,
     ApiKeyUpdateData,
@@ -86,6 +90,17 @@ def _to_response(row: ApiKeyData) -> ApiKeyResponse:
         ),
         pooled_capacity_credits_primary=(row.pooled_credits.capacity_credits_primary if row.pooled_credits else 0.0),
     )
+
+
+def _to_daily_usage_series(series: list[ApiKeyDailyUsageSeries]) -> list[ApiKeyDailyUsageSeriesResponse]:
+    return [
+        ApiKeyDailyUsageSeriesResponse(
+            key_id=item.key_id,
+            name=item.name,
+            points=[ApiKeyDailyUsagePointResponse(date=point.date, v=point.v) for point in item.points],
+        )
+        for item in series
+    ]
 
 
 def _build_limit_inputs(payload: ApiKeyCreateRequest | ApiKeyUpdateRequest) -> list[LimitRuleInput]:
@@ -169,6 +184,20 @@ async def list_api_keys(
 ) -> list[ApiKeyResponse]:
     rows = await context.service.list_keys()
     return [_to_response(row) for row in rows]
+
+
+@router.get("/usage-daily", response_model=ApiKeyDailyUsageResponse)
+async def get_api_key_daily_usage(
+    context: ApiKeysContext = Depends(get_api_keys_context),
+) -> ApiKeyDailyUsageResponse:
+    result = await context.service.get_daily_usage()
+
+    return ApiKeyDailyUsageResponse(
+        start_date=result.start_date,
+        end_date=result.end_date,
+        cost=_to_daily_usage_series(result.cost),
+        tokens=_to_daily_usage_series(result.tokens),
+    )
 
 
 @router.patch("/{key_id}", response_model=ApiKeyResponse)

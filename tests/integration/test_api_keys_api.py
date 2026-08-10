@@ -195,6 +195,78 @@ async def test_api_keys_crud_and_regenerate(async_client):
 
 
 @pytest.mark.asyncio
+async def test_api_key_daily_usage_returns_independent_top_ten_series(async_client, db_setup):
+    created_keys: list[tuple[str, str]] = []
+    for index in range(12):
+        response = await async_client.post("/api/api-keys/", json={"name": f"Daily user {index:02d}"})
+        assert response.status_code == 200
+        created_keys.append((response.json()["id"], response.json()["name"]))
+    deleted_response = await async_client.post("/api/api-keys/", json={"name": "Deleted daily user"})
+    assert deleted_response.status_code == 200
+    deleted_key_id = deleted_response.json()["id"]
+
+    requested_at = utcnow() - timedelta(days=2)
+    async with SessionLocal() as session:
+        session.add_all(
+            [
+                RequestLog(
+                    api_key_id=key_id,
+                    request_id=f"daily-api-key-{index:02d}",
+                    requested_at=requested_at,
+                    model="gpt-5.1",
+                    status="success",
+                    input_tokens=(12 - index) * 100,
+                    output_tokens=0,
+                    cost_usd=float(index + 1),
+                )
+                for index, (key_id, _name) in enumerate(created_keys)
+            ]
+        )
+        session.add(
+            RequestLog(
+                api_key_id=created_keys[0][0],
+                request_id="daily-api-key-warmup-excluded",
+                request_kind="warmup",
+                requested_at=requested_at,
+                model="gpt-5.1",
+                status="success",
+                input_tokens=1_000_000,
+                output_tokens=0,
+                cost_usd=1_000_000.0,
+            )
+        )
+        session.add(
+            RequestLog(
+                api_key_id=deleted_key_id,
+                request_id="daily-api-key-deleted-user",
+                requested_at=requested_at,
+                model="gpt-5.1",
+                status="success",
+                input_tokens=2_000_000,
+                output_tokens=0,
+                cost_usd=2_000_000.0,
+            )
+        )
+        await session.commit()
+
+    deleted = await async_client.delete(f"/api/api-keys/{deleted_key_id}")
+    assert deleted.status_code == 204
+
+    response = await async_client.get("/api/api-keys/usage-daily")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert len(payload["cost"]) == 10
+    assert len(payload["tokens"]) == 10
+    assert payload["cost"][0]["name"] == "Daily user 11"
+    assert payload["tokens"][0]["name"] == "Daily user 00"
+    assert all(series["name"] != "Deleted daily user" for series in payload["cost"] + payload["tokens"])
+    assert all(len(series["points"]) == 30 for series in payload["cost"] + payload["tokens"])
+    assert payload["cost"][0]["points"][0]["date"] == payload["startDate"]
+    assert payload["cost"][0]["points"][-1]["date"] == payload["endDate"]
+
+
+@pytest.mark.asyncio
 async def test_api_key_create_with_transport_policy_override_round_trips(async_client):
     create = await async_client.post(
         "/api/api-keys/",
