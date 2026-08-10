@@ -18,6 +18,20 @@ import { formatCompactNumber, formatCurrency } from "@/utils/formatters";
 type DailyChartMetric = "cost" | "tokens";
 type DailyChartRow = Record<string, string | number> & { date: string };
 
+type DailyTooltipEntry = {
+  color?: string;
+  dataKey?: string | number;
+  name?: string | number;
+  value?: number;
+};
+
+type DailyUsageTooltipProps = {
+  active?: boolean;
+  label?: string;
+  metric: DailyChartMetric;
+  payload?: DailyTooltipEntry[];
+};
+
 function buildChartRows(series: ApiKeyDailyUsageSeries[]): DailyChartRow[] {
   if (series.length === 0) return [];
   return series[0].points.map((point, index) => {
@@ -35,6 +49,36 @@ function formatDateTick(value: string): string {
 
 function formatMetricValue(metric: DailyChartMetric, value: number): string {
   return metric === "cost" ? formatCurrency(value) : formatCompactNumber(value);
+}
+
+export function DailyUsageTooltip({ active, label, metric, payload }: DailyUsageTooltipProps) {
+  const entries = payload
+    ?.filter((entry) => typeof entry.value === "number" && entry.value > 0)
+    .toSorted((a, b) => (b.value ?? 0) - (a.value ?? 0));
+  if (!active || !entries?.length) return null;
+
+  return (
+    <div className="min-w-40 max-w-64 rounded-lg border bg-popover px-3 py-2 text-popover-foreground shadow-md">
+      <p className="mb-1 text-[11px] text-muted-foreground">{label} UTC</p>
+      <div className="space-y-0.5">
+        {entries.map((entry, index) => (
+          <div key={String(entry.dataKey ?? index)} className="flex min-w-0 items-center gap-2 text-xs">
+            <span
+              aria-hidden
+              className="h-2 w-2 shrink-0 rounded-full"
+              style={{ backgroundColor: entry.color }}
+            />
+            <span className="min-w-0 flex-1 truncate text-muted-foreground" title={String(entry.name ?? "")}>
+              {entry.name}
+            </span>
+            <span className="shrink-0 tabular-nums font-medium">
+              {formatMetricValue(metric, entry.value ?? 0)}
+            </span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
 }
 
 type DailyUsagePanelProps = {
@@ -103,15 +147,8 @@ function DailyUsagePanel({ metric, title, subtitle, series }: DailyUsagePanelPro
                   width={52}
                 />
                 <Tooltip
-                  labelFormatter={(label: string) => `${label} UTC`}
-                  formatter={(value: number, name: string) => [formatMetricValue(metric, value), name]}
-                  contentStyle={{
-                    borderRadius: "0.5rem",
-                    borderColor: "hsl(var(--border))",
-                    backgroundColor: "hsl(var(--popover))",
-                    color: "hsl(var(--popover-foreground))",
-                    fontSize: "0.75rem",
-                  }}
+                  content={<DailyUsageTooltip metric={metric} />}
+                  cursor={{ stroke: "hsl(var(--border))", strokeWidth: 1 }}
                 />
                 {visibleSeries.map((item, index) => (
                   <Line
