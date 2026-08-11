@@ -146,6 +146,7 @@ def test_http_bridge_eventless_precreated_deadline_uses_current_send_and_client_
     )
 
     request_state.latency_first_upstream_event_ms = 25
+    request_state.last_upstream_activity_at = 150.0
     assert (
         http_bridge_helpers_module._http_bridge_eventless_precreated_deadline(
             request_state,
@@ -160,7 +161,6 @@ def test_http_bridge_eventless_precreated_deadline_uses_current_send_and_client_
     [
         ("response_id", "resp-created"),
         ("latency_response_created_ms", 12),
-        ("response_event_count", 1),
         ("downstream_visible", True),
         ("last_downstream_sequence_number", 0),
         ("awaiting_response_created", False),
@@ -182,6 +182,59 @@ def test_http_bridge_eventless_precreated_deadline_requires_narrow_owner_evidenc
             stuck_gate_retire_after_seconds=300.0,
         )
         is None
+    )
+
+
+def test_http_bridge_eventless_precreated_deadline_survives_reasoning_prelude_without_created() -> None:
+    request_state = _make_eventless_http_bridge_owner()
+    request_state.last_upstream_activity_at = 150.0
+    request_state.upstream_model_output_seen = True
+    request_state.deferred_reasoning_downstream_texts.append(
+        'data: {"type":"response.output_item.added","item":{"type":"reasoning"}}\n\n'
+    )
+
+    assert (
+        http_bridge_helpers_module._http_bridge_eventless_precreated_deadline(
+            request_state,
+            stuck_gate_retire_after_seconds=300.0,
+        )
+        == 150.0 + http_bridge_helpers_module._HTTP_BRIDGE_EVENTLESS_RESPONSE_CREATED_MAX_SECONDS
+    )
+
+
+@pytest.mark.asyncio
+async def test_process_http_bridge_upstream_text_anchors_deferred_reasoning_prelude_without_created() -> None:
+    service = proxy_service.ProxyService(cast(Any, nullcontext()))
+    request_state = _make_eventless_http_bridge_owner(sent_at=time.monotonic() - 2.0)
+    session = _make_bridge_session(pending_requests=deque([request_state]), queued_request_count=1)
+
+    await service._process_http_bridge_upstream_text(
+        session,
+        json.dumps(
+            {
+                "type": "response.output_item.added",
+                "item": {"type": "reasoning", "id": "rs_1"},
+            },
+            separators=(",", ":"),
+        ),
+    )
+
+    assert request_state.response_event_count == 0
+    assert request_state.response_id is None
+    assert request_state.downstream_visible is False
+    assert request_state.upstream_model_output_seen is True
+    assert request_state.last_upstream_activity_at is not None
+    sent_at = request_state.response_create_sent_at
+    assert sent_at is not None
+    assert request_state.last_upstream_activity_at > sent_at
+    assert len(request_state.deferred_reasoning_downstream_texts) == 1
+    assert (
+        http_bridge_helpers_module._http_bridge_eventless_precreated_deadline(
+            request_state,
+            stuck_gate_retire_after_seconds=300.0,
+        )
+        == request_state.last_upstream_activity_at
+        + http_bridge_helpers_module._HTTP_BRIDGE_EVENTLESS_RESPONSE_CREATED_MAX_SECONDS
     )
 
 
@@ -1594,10 +1647,10 @@ async def test_response_create_gate_timeout_does_not_retire_active_response_prog
     assert session.closed is False
 
 
-def test_http_bridge_pending_state_with_events_but_no_created_is_stale() -> None:
+def test_http_bridge_pending_state_with_recent_events_but_no_created_is_not_stale() -> None:
     # Reattached streams can deliver events whose response.created was lost
-    # (observed events=54, created=None in prod on 2026-07-20); the create
-    # gate only releases on response.created, so this shape must retire.
+    # (observed events=54, created=None in prod on 2026-07-20). Recent upstream
+    # activity must keep the stream alive while the create gate remains held.
     request_state = proxy_service._WebSocketRequestState(
         request_id="req-events-no-created",
         model="gpt-5.2",
@@ -1610,8 +1663,19 @@ def test_http_bridge_pending_state_with_events_but_no_created_is_stale() -> None
         awaiting_response_created=True,
         latency_first_upstream_event_ms=25,
         response_event_count=54,
+        last_upstream_activity_at=time.monotonic(),
     )
 
+    assert (
+        http_bridge_helpers_module._http_bridge_pending_state_is_stale(
+            request_state,
+            now=time.monotonic(),
+            threshold_seconds=300.0,
+        )
+        is False
+    )
+
+    request_state.last_upstream_activity_at = time.monotonic() - 301.0
     assert (
         http_bridge_helpers_module._http_bridge_pending_state_is_stale(
             request_state,
@@ -16103,6 +16167,8 @@ async def test_process_http_bridge_upstream_text_scopes_tool_dedupe_to_request_s
     assert isinstance(item_b, dict)
     assert item_a["call_id"] == "call_a"
     assert item_b["call_id"] == "call_b"
+    assert request_state_a.downstream_visible is True
+    assert request_state_b.downstream_visible is True
 
 
 @pytest.mark.asyncio
@@ -17771,6 +17837,9 @@ async def test_http_bridge_reader_wakes_and_retires_lone_eventless_owner_without
     owner.request_text = '{"type":"response.create","model":"gpt-5.6-sol","input":"hello"}'
     owner.preferred_account_id = "acc-bridge"
     owner.excluded_account_ids.add("acc-excluded")
+    if leading_telemetry:
+        owner.response_event_count = 1
+        owner.upstream_model_output_seen = True
     sibling_queue: asyncio.Queue[str | None] = asyncio.Queue()
     sibling = proxy_service._WebSocketRequestState(
         request_id="req-created-sibling",
@@ -17822,7 +17891,7 @@ async def test_http_bridge_reader_wakes_and_retires_lone_eventless_owner_without
     assert owner.preferred_account_id == "acc-bridge"
     assert owner.excluded_account_ids == {"acc-excluded"}
     assert owner.replay_count == 0
-    assert owner.response_event_count == 0
+    assert owner.response_event_count == (1 if leading_telemetry else 0)
     if leading_telemetry:
         assert owner.latency_first_upstream_event_ms is not None
     retry_precreated.assert_not_awaited()

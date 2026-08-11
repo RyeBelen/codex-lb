@@ -2,9 +2,9 @@
 
 ### Requirement: Stuck HTTP bridge response-create gate sessions are retired
 
-The proxy MUST retain the existing waiter-triggered retirement behavior for stale HTTP bridge response-create gate owners and MUST additionally enforce an owner-side deadline for a visible HTTP request whose current upstream `response.create` send remains completely eventless before `response.created`. The owner-side deadline MUST be measured from a monotonic timestamp recorded immediately before the current upstream send, MUST use the smaller of the configured stuck-gate retirement threshold and 240 seconds, MUST run without a second gate waiter, and MUST remain active when periodic SSE keepalives are disabled.
+The proxy MUST retain the existing waiter-triggered retirement behavior for stale HTTP bridge response-create gate owners. The proxy MUST also enforce an owner-side deadline when the upstream stream does not produce `response.created`. This rule applies to an eventless stream and to a stream with matched `response.*` activity before `response.created`. The owner-side deadline MUST start from a monotonic timestamp recorded immediately before the current upstream send. The deadline MUST use the smaller of the configured stuck-gate retirement threshold and 240 seconds. The deadline MUST run without a second gate waiter. The deadline MUST remain active when periodic SSE keepalives are disabled.
 
-The owner-side watchdog MUST apply only while the request owns the response-create gate, awaits `response.created`, has neither a response id nor recorded `response.created` latency, has received no matched `response.*` lifecycle event, and has produced no downstream-visible output or sequence evidence. Non-response telemetry such as `codex.rate_limits` MUST NOT suppress this watchdog. Any matched `response.*` lifecycle event, response-created milestone, or downstream-visible evidence MUST suppress the owner-side watchdog and leave existing timeout behavior unchanged.
+The owner-side watchdog MUST apply only while the request owns the response-create gate and awaits `response.created`. The request MUST have no response id, recorded `response.created` latency, downstream-visible output, or sequence evidence. Non-response telemetry such as `codex.rate_limits` MUST NOT disable or reset the watchdog. Before matched `response.*` activity, the deadline MUST remain anchored to the current upstream send. Matched `response.*` activity MUST keep the watchdog active and reset its deadline from the latest upstream response activity. A response-created milestone or downstream-visible evidence MUST disable this narrow watchdog. Existing timeout behavior then remains unchanged.
 
 When the owner-side deadline expires, the proxy MUST recheck eligibility, emit a structured low-cardinality log and the existing stuck-retirement Prometheus counter, terminally fail and settle every pending request exactly once, and retire the whole bridge session. It MUST NOT transparently replay the timed-out request, move it to another account, or write an account-health failure for the missing-created timeout.
 
@@ -31,10 +31,18 @@ When the owner-side deadline expires, the proxy MUST recheck eligibility, emit a
 - **THEN** the telemetry does not refresh or suppress the deadline
 - **AND** the proxy fails and retires the session
 
-#### Scenario: Response lifecycle evidence suppresses the narrow watchdog
+#### Scenario: Response lifecycle evidence resets the missing-created watchdog
 
-- **GIVEN** a pre-created request receives any matched `response.*` lifecycle event, a response id, recorded `response.created` latency, or downstream-visible output
-- **WHEN** the eventless owner-side deadline would otherwise elapse
+- **GIVEN** a pre-created request receives matched `response.*` activity
+- **AND** the request has no response id, recorded `response.created` latency, or downstream-visible output
+- **WHEN** a new response-lifecycle event arrives
+- **THEN** the watchdog deadline resets from the latest upstream response activity
+- **AND** the watchdog remains active until response-created or downstream-visible evidence appears
+
+#### Scenario: Response-created or visible evidence disables the narrow watchdog
+
+- **GIVEN** a pre-created request receives a response id, recorded `response.created` latency, or downstream-visible output
+- **WHEN** the missing-created deadline would otherwise elapse
 - **THEN** this watchdog does not retire the session
 - **AND** existing stream, request-budget, and waiter-triggered timeout behavior remains authoritative
 
