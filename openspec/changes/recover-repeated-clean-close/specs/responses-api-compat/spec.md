@@ -1,6 +1,6 @@
 ## MODIFIED Requirements
 
-### Requirement: HTTP bridge clean-close replay remains bounded and pre-visible
+### Requirement: Clean upstream close before any response event fails fast
 
 When the HTTP Responses bridge observes an upstream WebSocket close with
 `close_code = 1000` before any `response.*` event has been surfaced for the
@@ -113,8 +113,7 @@ For a hard-affinity bridge key, the proxy MUST scope retry-circuit state by
 affinity kind, affinity key, and API-key scope (using a stable anonymous scope
 when no API key is present). The proxy MUST record only the documented
 pre-response failure classes (`stream_incomplete`, `clean_close`, and
-`stream_idle_timeout`) plus the client-safe watchdog's
-`missing_response_created_timeout`.
+`stream_idle_timeout`).
 
 The default circuit MUST open after two consecutive recorded failures. Once
 open, it MUST suppress pre-created replay until the persisted cooldown expires,
@@ -124,9 +123,9 @@ failure count, cooldown deadline, last failure detail, and update time in the
 `http_bridge_retry_circuits` table and MUST merge conflict updates so concurrent
 replicas cannot shorten an existing cooldown.
 
-The clean-close retry jitter maximum MUST remain implementation-bounded to two
-seconds and MUST NOT add an operator setting to the runtime configuration
-surface.
+The clean-close retry jitter maximum MUST be read from the
+`http_responses_session_bridge_clean_close_retry_jitter_max_seconds` runtime
+setting and MUST be bounded to the inclusive range 0–30 seconds.
 
 The proxy MUST evict process-local circuit entries and their loaded/persisted
 markers after one hour without use, independently of durable-row cleanup, so
@@ -148,15 +147,6 @@ and durable circuit state.
 - **AND** persists at least two consecutive failures and a cooldown deadline
 - **AND** subsequent pre-created replay is suppressed until that deadline
 
-#### Scenario: missing response-created timeout completes the failure sequence
-
-- **GIVEN** a hard-affinity key has one recorded `stream_incomplete` failure
-- **AND** the native client retries the same continuation
-- **WHEN** that retry reaches `missing_response_created_timeout`
-- **THEN** the proxy records the timeout as the second eligible failure
-- **AND** opens and persists the retry-circuit cooldown for that hard-affinity key
-- **AND** a subsequent pre-created replay is suppressed until the cooldown expires
-
 #### Scenario: retry decisions observe a cooldown opened by another replica
 
 - **GIVEN** this replica previously looked up a hard-affinity key with no row
@@ -177,3 +167,25 @@ and durable circuit state.
 - **WHEN** the proxy evaluates or records a retry-circuit event
 - **THEN** the request continues using any available local circuit state
 - **AND** the failure is logged and exposed through retry-circuit observability
+
+### Requirement: Upstream websocket drops penalize affected accounts
+
+When an upstream websocket closes while one or more streamed response requests
+are pending and have not reached a terminal event, the proxy MUST record a
+transient upstream error for the account before signaling failure for those
+pending requests, except when the close carries a classified process-wide
+network failure, is a clean close (`close_code = 1000`) before any
+`response.*` event, or carries the classified per-socket
+`upstream_keepalive_timeout` transport error. Clean pre-response closes and
+keepalive timeouts MUST remain account-neutral while using the bounded retry
+and retry-circuit handling above. A classified process-wide network failure
+MUST remain account neutral and use its network error code. For other closes,
+the proxy MUST surface
+`stream_incomplete` to affected pending requests.
+
+#### Scenario: clean pre-response close does not penalize the account
+
+- **GIVEN** a hard-affinity HTTP bridge request is pending with no surfaced response event
+- **WHEN** the upstream websocket closes cleanly before response output
+- **THEN** the proxy records the clean-close retry-circuit outcome
+- **AND** the selected account is not penalized

@@ -3,15 +3,17 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from json import JSONDecodeError
-from typing import Any, Final, Literal, cast
+from typing import Any, Final, Literal, Protocol, cast
 from uuid import uuid4
 
+import anyio
 from fastapi import (
     APIRouter,
     Body,
@@ -27,6 +29,8 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from starlette.convertors import Convertor, register_url_convertor
+from starlette.websockets import WebSocketState
 
 from app.core import usage as usage_core
 from app.core.auth.dependencies import (
@@ -34,12 +38,24 @@ from app.core.auth.dependencies import (
     validate_codex_usage_identity,
     validate_proxy_api_key,
     validate_proxy_api_key_authorization,
+    validate_required_proxy_api_key,
+    validate_required_proxy_api_key_authorization,
     validate_usage_api_key,
 )
 from app.core.auth.refresh import RefreshError
 from app.core.cache.invalidation import NAMESPACE_RESET_CREDITS, bump_cache_invalidation_local
 from app.core.clients.files import FileProxyError
-from app.core.clients.proxy import ProxyResponseError, _is_native_codex_request
+from app.core.clients.proxy import (
+    CODEX_LB_REQUIRED_CAPABILITY_HEADER,
+    CodexControlRequestPrivacyPolicy,
+    CodexControlResponse,
+    ProxyResponseError,
+    _is_native_codex_request,
+)
+from app.core.clients.proxy_websocket import (
+    REALTIME_LIVE_CALL_ID_ROUTE_REGEX,
+    RealtimeWebSocketProtocol,
+)
 from app.core.clients.rate_limit_reset_credits import (
     ConsumeResetCreditError,
     ResetCreditFetchError,
@@ -116,6 +132,8 @@ from app.core.openai.requests import (
     ResponsesRequest,
     extract_input_file_ids,
     normalize_tool_type,
+    responses_request_has_explicit_prompt_cache_controls,
+    strip_replayed_tool_call_namespaces_from_payload,
 )
 from app.core.openai.v1_requests import V1ResponsesCompactRequest, V1ResponsesRequest
 from app.core.request_locality import (
@@ -246,6 +264,7 @@ from app.modules.proxy.schemas import (
     WarmupSkippedAccount,
     WarmupSubmittedAccount,
 )
+from app.modules.proxy.selection_errors import USAGE_LIMIT_REACHED
 from app.modules.proxy.types import (
     CreditStatusDetailsData,
     RateLimitResetCreditsData,
@@ -292,6 +311,14 @@ _PUBLIC_RESPONSE_STREAM_TERMINAL_TYPES = frozenset(
 )
 _PUBLIC_RESPONSES_PRE_CREATED_BUFFER_LIMIT = 64
 _SOURCE_LIMITED_STREAM_BUFFER_BYTES = 16 * 1024 * 1024
+_PROMPT_CACHE_MODE_HEADER = "X-Codex-LB-Prompt-Cache-Mode"
+_SUBSCRIPTION_IMPLICIT_PROMPT_CACHE_MODE = "subscription-implicit"
+
+
+def _mark_subscription_prompt_cache_fallback(response: Response, payload: ResponsesRequest) -> Response:
+    if response.status_code < 400 and responses_request_has_explicit_prompt_cache_controls(payload):
+        response.headers[_PROMPT_CACHE_MODE_HEADER] = _SUBSCRIPTION_IMPLICIT_PROMPT_CACHE_MODE
+    return response
 
 
 class _V1ResetCreditFreshCredentials:
@@ -302,10 +329,29 @@ class _V1ResetCreditFreshCredentials:
         self.chatgpt_account_id = chatgpt_account_id
 
 
+class _RealtimeLiveCallIdConvertor(Convertor[str]):
+    """Case-preserving path segment convertor for installed-app live call ids."""
+
+    regex = REALTIME_LIVE_CALL_ID_ROUTE_REGEX
+
+    def convert(self, value: str) -> str:
+        return value
+
+    def to_string(self, value: str) -> str:
+        return value
+
+
+register_url_convertor("realtime_live_call_id", _RealtimeLiveCallIdConvertor())
+
 router = APIRouter(
     prefix="/backend-api/codex",
     tags=["proxy"],
     dependencies=[Security(validate_proxy_api_key), Depends(set_openai_error_format)],
+)
+realtime_call_router = APIRouter(
+    prefix="/backend-api/codex",
+    tags=["proxy"],
+    dependencies=[Depends(set_openai_error_format)],
 )
 ws_router = APIRouter(
     prefix="/backend-api/codex",
@@ -691,9 +737,134 @@ _CODEX_CONTROL_RESPONSE_HEADERS = frozenset(
     }
 )
 
+# A hard HTTP-bridge circuit is opened only after an ambiguous upstream turn
+# failure. The caller must not immediately replay that turn, but it should
+# also not have to guess when a new attempt is safe. Advertise a short,
+# bounded retry interval on the one-shot 503 response.
+
 
 def _codex_control_downstream_headers(headers: Mapping[str, str]) -> dict[str, str]:
     return {key: value for key, value in headers.items() if key.lower() in _CODEX_CONTROL_RESPONSE_HEADERS}
+
+
+def _codex_control_response(response: CodexControlResponse) -> Response:
+    return Response(
+        content=response.body,
+        status_code=response.status_code,
+        headers=_codex_control_downstream_headers(response.headers),
+    )
+
+
+def _realtime_call_error_response(request: Request, *, status_code: int) -> JSONResponse:
+    return _logged_error_json_response(
+        request,
+        status_code,
+        openai_error(
+            "realtime_call_unavailable",
+            "Realtime call could not be created",
+            error_type="server_error",
+        ),
+    )
+
+
+class _CodexControlAdapter(Protocol):
+    @property
+    def privacy_policy(self) -> CodexControlRequestPrivacyPolicy: ...
+
+    @property
+    def success_gate(self) -> Callable[[str, CodexControlResponse], Awaitable[bool]] | None: ...
+
+    async def finalize(
+        self,
+        request: Request,
+        context: ProxyContext,
+        response: CodexControlResponse,
+    ) -> Response: ...
+
+
+class _PassthroughCodexControlAdapter:
+    privacy_policy: Final[CodexControlRequestPrivacyPolicy] = CodexControlRequestPrivacyPolicy.STANDARD
+    success_gate: Final[None] = None
+
+    async def finalize(
+        self,
+        request: Request,
+        context: ProxyContext,
+        response: CodexControlResponse,
+    ) -> Response:
+        del request, context
+        return _codex_control_response(response)
+
+
+@dataclass(slots=True)
+class _RealtimeCallCodexControlAdapter:
+    context: ProxyContext
+    api_key: ApiKeyData
+    _binding_failure_message: str | None = "Realtime call owner could not be determined"
+
+    @property
+    def privacy_policy(self) -> CodexControlRequestPrivacyPolicy:
+        return CodexControlRequestPrivacyPolicy.PRIVATE_REALTIME
+
+    @property
+    def success_gate(self) -> Callable[[str, CodexControlResponse], Awaitable[bool]]:
+        return self._bind_successful_call_owner
+
+    async def _bind_successful_call_owner(
+        self,
+        account_id: str,
+        response: CodexControlResponse,
+    ) -> bool:
+        if not 200 <= response.status_code < 300:
+            self._binding_failure_message = None
+            return True
+        try:
+            bound_call_id = await self.context.service.bind_realtime_call_owner(
+                response_headers=response.headers,
+                account_id=account_id,
+                api_key=self.api_key,
+            )
+        except asyncio.CancelledError:
+            current_task = asyncio.current_task()
+            if current_task is None or current_task.cancelling():
+                raise
+            logger.error("Failed to persist realtime call owner binding")
+            self._binding_failure_message = "Realtime call owner binding could not be persisted"
+            return False
+
+        except Exception:
+            logger.error("Failed to persist realtime call owner binding")
+            self._binding_failure_message = "Realtime call owner binding could not be persisted"
+            return False
+        if bound_call_id is None:
+            self._binding_failure_message = "Realtime call response did not include a bindable Location"
+            return False
+        self._binding_failure_message = None
+        return True
+
+    async def finalize(
+        self,
+        request: Request,
+        context: ProxyContext,
+        response: CodexControlResponse,
+    ) -> Response:
+        del context
+        if not 200 <= response.status_code < 300:
+            return _codex_control_response(response)
+        if self._binding_failure_message is not None:
+            return _logged_error_json_response(
+                request,
+                503,
+                openai_error(
+                    "realtime_call_binding_failed",
+                    self._binding_failure_message,
+                    error_type="server_error",
+                ),
+            )
+        return _codex_control_response(response)
+
+
+_PASSTHROUGH_CODEX_CONTROL_ADAPTER = _PassthroughCodexControlAdapter()
 
 
 async def _codex_control_proxy(
@@ -701,6 +872,8 @@ async def _codex_control_proxy(
     path: str,
     context: ProxyContext,
     api_key: ApiKeyData | None,
+    *,
+    adapter: _CodexControlAdapter = _PASSTHROUGH_CODEX_CONTROL_ADAPTER,
 ) -> Response:
     try:
         response = await context.service.codex_control_request(
@@ -711,14 +884,22 @@ async def _codex_control_proxy(
             headers=request.headers,
             codex_session_affinity=True,
             api_key=api_key,
+            privacy_policy=adapter.privacy_policy,
+            success_gate=adapter.success_gate,
         )
     except ProxyResponseError as exc:
+        if adapter.privacy_policy is CodexControlRequestPrivacyPolicy.PRIVATE_REALTIME:
+            return _realtime_call_error_response(request, status_code=exc.status_code)
         return _logged_error_json_response(request, exc.status_code, exc.payload)
-    return Response(
-        content=response.body,
-        status_code=response.status_code,
-        headers=_codex_control_downstream_headers(response.headers),
-    )
+    except Exception:
+        if adapter.privacy_policy is not CodexControlRequestPrivacyPolicy.PRIVATE_REALTIME:
+            raise
+        logger.warning(
+            "Realtime call creation failed before upstream response request_id=%s",
+            get_request_id(),
+        )
+        return _realtime_call_error_response(request, status_code=503)
+    return await adapter.finalize(request, context, response)
 
 
 @router.get("/thread/goal/get")
@@ -767,13 +948,19 @@ async def codex_memories_trace_summarize(
     return await _codex_control_proxy(request, "memories/trace_summarize", context, api_key)
 
 
-@router.post("/realtime/calls")
+@realtime_call_router.post("/realtime/calls")
 async def codex_realtime_calls(
     request: Request,
     context: ProxyContext = Depends(get_proxy_context),
-    api_key: ApiKeyData | None = Security(validate_proxy_api_key),
+    api_key: ApiKeyData = Security(validate_required_proxy_api_key),
 ) -> Response:
-    return await _codex_control_proxy(request, "realtime/calls", context, api_key)
+    return await _codex_control_proxy(
+        request,
+        "realtime/calls",
+        context,
+        api_key,
+        adapter=_RealtimeCallCodexControlAdapter(context, api_key),
+    )
 
 
 @router.post("/safety/arc")
@@ -889,7 +1076,7 @@ async def responses(
         service_tier_was_enforced=service_tier_was_enforced,
     )
 
-    return await _stream_responses(
+    response = await _stream_responses(
         request,
         responses_payload,
         context,
@@ -904,6 +1091,7 @@ async def responses(
         enforce_openai_sdk_contract=openai_sdk_request,
         native_codex_heartbeat=native_codex_heartbeat,
     )
+    return _mark_subscription_prompt_cache_fallback(response, responses_payload)
 
 
 @router.get("/opportunistic/admission")
@@ -942,6 +1130,7 @@ async def responses_websocket(
         api_key=api_key,
         client_ip=resolve_request_client_host(websocket),
         synthesized_turn_state=turn_state if client_turn_state is None else None,
+        capability_header_values=tuple(websocket.headers.getlist(CODEX_LB_REQUIRED_CAPABILITY_HEADER)),
     )
 
 
@@ -1015,7 +1204,7 @@ async def v1_responses(
         service_tier_was_enforced=service_tier_was_enforced,
     )
     if responses_payload.stream:
-        return await _stream_responses(
+        response = await _stream_responses(
             request,
             responses_payload,
             context,
@@ -1025,16 +1214,18 @@ async def v1_responses(
             prefer_http_bridge=True,
             prohibit_fast_mode=prohibit_fast_mode,
         )
-    return await _collect_responses(
-        request,
-        responses_payload,
-        context,
-        api_key,
-        codex_session_affinity=False,
-        openai_cache_affinity=True,
-        prefer_http_bridge=True,
-        prohibit_fast_mode=prohibit_fast_mode,
-    )
+    else:
+        response = await _collect_responses(
+            request,
+            responses_payload,
+            context,
+            api_key,
+            codex_session_affinity=False,
+            openai_cache_affinity=True,
+            prefer_http_bridge=True,
+            prohibit_fast_mode=prohibit_fast_mode,
+        )
+    return _mark_subscription_prompt_cache_fallback(response, responses_payload)
 
 
 @internal_router.post(
@@ -1118,6 +1309,111 @@ async def internal_bridge_responses(
     )
 
 
+async def _proxy_realtime_live_websocket_route(
+    websocket: WebSocket,
+    call_id: str,
+    context: ProxyContext,
+    *,
+    protocol: RealtimeWebSocketProtocol,
+    query_params: list[tuple[str, str]],
+    redacted_path: str,
+) -> None:
+    _redact_realtime_live_websocket_scope(websocket, path=redacted_path)
+    api_key, denial = await _validate_proxy_websocket_request(websocket, require_api_key=True)
+    if denial is not None:
+        await websocket.send_denial_response(denial)
+        return
+    assert api_key is not None
+    try:
+        if protocol is RealtimeWebSocketProtocol.LIVE_V3 and any(key == "call_id" for key, _value in query_params):
+            raise ProxyResponseError(
+                400,
+                openai_error(
+                    "invalid_realtime_call_id",
+                    "Path-based realtime sidebands must not include a call_id query parameter",
+                ),
+            )
+        await context.service.proxy_realtime_live_websocket(
+            websocket,
+            call_id,
+            dict(websocket.headers),
+            query_params,
+            protocol=protocol,
+            api_key=api_key,
+            client_ip=resolve_request_client_host(websocket),
+        )
+    except ProxyResponseError as exc:
+        if websocket.application_state == WebSocketState.CONNECTING:
+            await websocket.send_denial_response(JSONResponse(status_code=exc.status_code, content=exc.payload))
+        elif websocket.application_state == WebSocketState.CONNECTED:
+            await websocket.close(code=1011)
+    except Exception:
+        logger.error("Realtime live websocket setup failed")
+        if websocket.application_state == WebSocketState.CONNECTING:
+            await websocket.send_denial_response(
+                JSONResponse(
+                    status_code=503,
+                    content=openai_error(
+                        "realtime_live_unavailable",
+                        "Realtime live websocket is unavailable",
+                        error_type="server_error",
+                    ),
+                )
+            )
+        elif websocket.application_state == WebSocketState.CONNECTED:
+            await websocket.close(code=1011)
+
+
+@v1_ws_router.websocket("/live/{call_id:realtime_live_call_id}")
+async def v1_live_websocket(
+    websocket: WebSocket,
+    call_id: str,
+    context: ProxyContext = Depends(get_proxy_websocket_context),
+) -> None:
+    await _proxy_realtime_live_websocket_route(
+        websocket,
+        call_id,
+        context,
+        protocol=RealtimeWebSocketProtocol.LIVE_V3,
+        query_params=list(websocket.query_params.multi_items()),
+        redacted_path="/v1/live/<redacted>",
+    )
+
+
+@ws_router.websocket("/{call_id:realtime_live_call_id}")
+async def backend_codex_realtime_live_websocket(
+    websocket: WebSocket,
+    call_id: str,
+    context: ProxyContext = Depends(get_proxy_websocket_context),
+) -> None:
+    await _proxy_realtime_live_websocket_route(
+        websocket,
+        call_id,
+        context,
+        protocol=RealtimeWebSocketProtocol.LIVE_V3,
+        query_params=list(websocket.query_params.multi_items()),
+        redacted_path="/backend-api/codex/<redacted>",
+    )
+
+
+@v1_ws_router.websocket("/realtime")
+async def v1_realtime_websocket(
+    websocket: WebSocket,
+    context: ProxyContext = Depends(get_proxy_websocket_context),
+) -> None:
+    query_params = list(websocket.query_params.multi_items())
+    call_ids = [value for key, value in query_params if key == "call_id"]
+    call_id = call_ids[0] if len(call_ids) == 1 else ""
+    await _proxy_realtime_live_websocket_route(
+        websocket,
+        call_id,
+        context,
+        protocol=RealtimeWebSocketProtocol.REALTIME_V1_V2,
+        query_params=[item for item in query_params if item[0] != "call_id"],
+        redacted_path="/v1/realtime",
+    )
+
+
 @v1_ws_router.websocket("/responses")
 async def v1_responses_websocket(
     websocket: WebSocket,
@@ -1141,6 +1437,7 @@ async def v1_responses_websocket(
         api_key=api_key,
         client_ip=resolve_request_client_host(websocket),
         synthesized_turn_state=turn_state if client_turn_state is None else None,
+        capability_header_values=tuple(websocket.headers.getlist(CODEX_LB_REQUIRED_CAPABILITY_HEADER)),
     )
 
 
@@ -1687,6 +1984,39 @@ async def _rate_limit_headers_for_request(
     if await _hide_upstream_quota_for_api_key_clients(api_key):
         return {}
     return await context.service.rate_limit_headers()
+
+
+async def _release_reservation_deferring_cancellation(
+    reservation: ApiKeyUsageReservationData,
+) -> None:
+    with anyio.CancelScope(shield=True):
+        task = asyncio.create_task(_release_reservation(reservation))
+        while True:
+            try:
+                await asyncio.shield(task)
+                return
+            except asyncio.CancelledError:
+                if task.cancelled():
+                    raise
+
+
+async def _rate_limit_headers_with_reservation_cleanup(
+    context: ProxyContext,
+    api_key: ApiKeyData | None,
+    owned_reservation: ApiKeyUsageReservationData | None,
+) -> dict[str, str]:
+    try:
+        return await _rate_limit_headers_for_request(context, api_key)
+    except BaseException:
+        if owned_reservation is not None:
+            try:
+                await _release_reservation_deferring_cancellation(owned_reservation)
+            except (Exception, asyncio.CancelledError):
+                logger.warning(
+                    "Failed to release API key reservation after rate-limit header failure",
+                    exc_info=True,
+                )
+        raise
 
 
 def _select_codex_usage_limit(
@@ -2998,6 +3328,16 @@ async def _build_codex_models_response(api_key: ApiKeyData | None) -> Response:
         request_model=None,
         request_service_tier=None,
     )
+    try:
+        return await _build_codex_models_response_body(api_key)
+    finally:
+        if reservation is not None:
+            await _release_reservation_deferring_cancellation(reservation)
+
+
+async def _build_codex_models_response_body(
+    api_key: ApiKeyData | None,
+) -> Response:
 
     allowed_models = _allowed_models_for_api_key(api_key)
     exact_source_allowed_models = _exact_source_allowed_models_for_api_key(api_key)
@@ -3042,7 +3382,6 @@ async def _build_codex_models_response(api_key: ApiKeyData | None) -> Response:
     }
 
     if not models and not metadata_models and not source_models:
-        await _release_reservation(reservation)
         return JSONResponse(content=CodexModelsResponse(models=[], data=[]).model_dump(mode="json"))
 
     entries: list[CodexModelEntry] = []
@@ -3097,7 +3436,6 @@ async def _build_codex_models_response(api_key: ApiKeyData | None) -> Response:
         seen_slugs.add(model.slug)
         if model.supported_in_api and entry.visibility == "list":
             data.append(_to_model_list_item(model.slug, model, created=_model_list_created_at(model)))
-    await _release_reservation(reservation)
     return JSONResponse(content=CodexModelsResponse(models=entries, data=data).model_dump(mode="json"))
 
 
@@ -3107,6 +3445,16 @@ async def _build_models_response(api_key: ApiKeyData | None) -> Response:
         request_model=None,
         request_service_tier=None,
     )
+    try:
+        return await _build_models_response_body(api_key)
+    finally:
+        if reservation is not None:
+            await _release_reservation_deferring_cancellation(reservation)
+
+
+async def _build_models_response_body(
+    api_key: ApiKeyData | None,
+) -> Response:
 
     allowed_models = _allowed_models_for_api_key(api_key)
     exact_source_allowed_models = _exact_source_allowed_models_for_api_key(api_key)
@@ -3117,7 +3465,6 @@ async def _build_models_response(api_key: ApiKeyData | None) -> Response:
     source_models = await _list_enabled_source_catalog_models(api_key)
 
     if not models and not source_models:
-        await _release_reservation(reservation)
         return JSONResponse(content=_dump_v1_models_response(ModelListResponse(data=[])))
 
     items: list[ModelListItem] = []
@@ -3137,7 +3484,6 @@ async def _build_models_response(api_key: ApiKeyData | None) -> Response:
             continue
         items.append(_to_model_list_item(model.slug, model, created=created))
         seen_slugs.add(model.slug)
-    await _release_reservation(reservation)
     return JSONResponse(content=_dump_v1_models_response(ModelListResponse(data=items)))
 
 
@@ -3882,6 +4228,7 @@ async def _source_responses_response(
         request_usage_budget=estimate_api_key_request_usage(payload),
     )
     source_payload = payload.model_dump_for_forwarding()
+    strip_replayed_tool_call_namespaces_from_payload(source_payload)
     source_payload["stream"] = bool(payload.stream)
     _apply_source_response_request_overrides(source_payload, source_model_request_overrides(source, payload.model))
     _drop_unsupported_source_response_tools(
@@ -4607,7 +4954,15 @@ async def _stream_responses(
         )
     )
 
-    rate_limit_headers = await _rate_limit_headers_for_request(context, api_key) if include_rate_limit_headers else {}
+    rate_limit_headers = (
+        await _rate_limit_headers_with_reservation_cleanup(
+            context,
+            api_key,
+            reservation if owns_reservation else None,
+        )
+        if include_rate_limit_headers
+        else {}
+    )
     bridge_active = prefer_http_bridge and proxy_service_module.get_settings().http_responses_session_bridge_enabled
     effective_headers = forwarded_headers or request.headers
     client_ip = forwarded_client_ip if forwarded_request else resolve_request_client_host(request)
@@ -4682,6 +5037,8 @@ async def _stream_responses(
         finally:
             if owns_reservation:
                 await _release_reservation(reservation)
+    capacity_wait_event = asyncio.Event()
+    capacity_ready_event = _CapacityStartupReadyEvent()
     payload.stream = True
     if prefer_http_bridge:
         stream = context.service.stream_http_responses(
@@ -4702,6 +5059,8 @@ async def _stream_responses(
             forwarded_file_owner_account_id=forwarded_file_owner_account_id,
             client_ip=client_ip,
             enforce_openai_sdk_contract=enforce_openai_sdk_contract,
+            capacity_startup_wait_event=capacity_wait_event,
+            capacity_startup_ready_event=capacity_ready_event,
         )
     else:
         stream = context.service.stream_responses(
@@ -4716,8 +5075,6 @@ async def _stream_responses(
             client_ip=client_ip,
             enforce_openai_sdk_contract=enforce_openai_sdk_contract,
         )
-    capacity_wait_event = asyncio.Event()
-    capacity_ready_event = _CapacityStartupReadyEvent()
     capacity_wait_token = _bind_propagated_capacity_startup_wait(capacity_wait_event)
     capacity_ready_token = _bind_propagated_capacity_startup_ready(capacity_ready_event)
     try:
@@ -4811,7 +5168,7 @@ async def _collect_responses(
         request_usage_budget=estimate_api_key_request_usage(payload),
     )
 
-    rate_limit_headers = await _rate_limit_headers_for_request(context, api_key)
+    rate_limit_headers = await _rate_limit_headers_with_reservation_cleanup(context, api_key, reservation)
     bridge_active = prefer_http_bridge and proxy_service_module.get_settings().http_responses_session_bridge_enabled
     downstream_turn_state = (
         proxy_affinity_module.ensure_http_downstream_turn_state(request.headers) if bridge_active else None
@@ -4971,7 +5328,7 @@ async def _compact_responses(
         request_usage_budget=request_usage_budget,
     )
 
-    rate_limit_headers = await _rate_limit_headers_for_request(context, api_key)
+    rate_limit_headers = await _rate_limit_headers_with_reservation_cleanup(context, api_key, reservation)
     try:
         result = await context.service.compact_responses(
             payload,
@@ -5064,6 +5421,9 @@ def _normalize_compaction_output_item(item: Mapping[str, JsonValue]) -> dict[str
     item_id = item.get("id")
     if isinstance(item_id, str) and item_id.strip():
         normalized["id"] = item_id
+    status = item.get("status")
+    if isinstance(status, str) and status.strip():
+        normalized["status"] = status
     return normalized
 
 
@@ -5092,25 +5452,52 @@ async def _synthetic_compaction_response_stream(
     response_id: str,
     usage: object | None,
 ) -> AsyncIterator[str]:
+    item = dict(compact_item)
+    item.setdefault("status", "completed")
     completed_response: dict[str, JsonValue] = {
         "id": response_id,
         "object": "response",
         "status": "completed",
-        "output": [dict(compact_item)],
+        "output": [item],
     }
     usage_mapping = _json_mapping_from_model_or_mapping(usage)
     if usage_mapping is not None:
         completed_response["usage"] = dict(usage_mapping)
     yield format_sse_event(
         {
-            "type": "response.output_item.done",
+            "type": "response.created",
+            "sequence_number": 0,
+            "response": {
+                "id": response_id,
+                "object": "response",
+                "status": "in_progress",
+                "output": [],
+            },
+        }
+    )
+    yield format_sse_event(
+        {
+            "type": "response.output_item.added",
+            "sequence_number": 1,
             "output_index": 0,
-            "item": dict(compact_item),
+            "item": {
+                **item,
+                "status": "in_progress",
+            },
+        }
+    )
+    yield format_sse_event(
+        {
+            "type": "response.output_item.done",
+            "sequence_number": 2,
+            "output_index": 0,
+            "item": item,
         }
     )
     yield format_sse_event(
         {
             "type": "response.completed",
+            "sequence_number": 3,
             "response": completed_response,
         }
     )
@@ -5130,7 +5517,7 @@ async def _transcribe_request(
         request_model=_TRANSCRIPTION_MODEL,
         request_service_tier=None,
     )
-    rate_limit_headers = await _rate_limit_headers_for_request(context, api_key)
+    rate_limit_headers = await _rate_limit_headers_with_reservation_cleanup(context, api_key, reservation)
     try:
         result = await context.service.transcribe(
             audio_bytes=multipart.audio_bytes,
@@ -5845,7 +6232,15 @@ async def _stream_response_error_events(
         envelope = _parse_error_envelope(exc.payload)
         _, envelope = _mask_previous_response_not_found_error(envelope, default_status=exc.status_code)
         error = envelope.error
-        yield format_sse_event(
+        retry_hint = ""
+        if exc.retry_after_seconds is not None and exc.retry_after_seconds > 0:
+            # Preserve the HTTP Retry-After signal when a streaming response
+            # has already started and the exception must be represented as an
+            # SSE event.  The SSE retry field is milliseconds, while the
+            # exception stores seconds.  Clients that do not implement the
+            # directive safely ignore the extra comment line.
+            retry_hint = f"retry: {max(1, math.ceil(exc.retry_after_seconds * 1000))}\n"
+        yield retry_hint + format_sse_event(
             response_failed_event(
                 error.code if error and error.code else "upstream_error",
                 error.message if error and error.message else "Upstream error",
@@ -5864,11 +6259,14 @@ def _stream_startup_error_response(
     if isinstance(error, ProxyResponseError):
         envelope = _parse_error_envelope(error.payload)
         status_code, envelope = _mask_previous_response_not_found_error(envelope, default_status=error.status_code)
+        startup_headers = dict(headers)
+        if error.retry_after_seconds is not None and error.retry_after_seconds > 0:
+            startup_headers.setdefault("Retry-After", str(error.retry_after_seconds))
         return _logged_error_json_response(
             request,
             status_code,
             envelope.model_dump(mode="json", exclude_none=True),
-            headers=headers,
+            headers=startup_headers,
         )
     status_code, envelope = _mask_previous_response_not_found_error(error)
     return _logged_error_json_response(
@@ -5981,21 +6379,34 @@ def _is_legacy_proxy_auth_override_type_error(exc: TypeError) -> bool:
 
 async def _validate_proxy_websocket_request(
     websocket: WebSocket,
+    *,
+    require_api_key: bool = False,
 ) -> tuple[ApiKeyData | None, JSONResponse | None]:
     denial = await _websocket_firewall_denial_response(websocket)
     if denial is not None:
         return None, denial
     try:
-        api_key = await _validate_proxy_api_key_authorization_for_connection(
-            websocket.headers.get("authorization"),
-            websocket,
-        )
+        if require_api_key:
+            api_key = await validate_required_proxy_api_key_authorization(websocket.headers.get("authorization"))
+        else:
+            api_key = await _validate_proxy_api_key_authorization_for_connection(
+                websocket.headers.get("authorization"),
+                websocket,
+            )
     except ProxyAuthError as exc:
         return None, JSONResponse(
             status_code=exc.status_code,
             content=openai_error(exc.code, exc.message, error_type=exc.error_type),
         )
     return api_key, None
+
+
+def _redact_realtime_live_websocket_scope(websocket: WebSocket, *, path: str) -> None:
+    """Remove opaque live identifiers before Uvicorn emits handshake logs."""
+
+    websocket.scope["path"] = path
+    websocket.scope["raw_path"] = path.replace("<", "%3C").replace(">", "%3E").encode("ascii")
+    websocket.scope["query_string"] = b""
 
 
 async def _validate_internal_bridge_api_key(
@@ -6080,6 +6491,17 @@ async def _opportunistic_admission_denial(
     )
     if selection.account is not None:
         return None
+    if selection.error_code == USAGE_LIMIT_REACHED:
+        return _logged_error_json_response(
+            request,
+            429,
+            openai_error(
+                USAGE_LIMIT_REACHED,
+                selection.error_message or "Usage limit reached",
+                error_type=USAGE_LIMIT_REACHED,
+                resets_at=selection.resets_at,
+            ),
+        )
     message = selection.error_message or "opportunistic burn window closed"
     if not message.startswith("opportunistic burn window closed"):
         message = f"opportunistic burn window closed: {message}"
@@ -6455,6 +6877,7 @@ async def _normalize_public_responses_stream(
     terminal_seen = False
     done_seen = False
     contract_violation_kind: str | None = None
+    next_sequence_number = 0
     seen_text_delta_keys: set[tuple[str | None, int | None]] = set()
     # Collect output items from streamed ``response.output_item.added`` /
     # ``response.output_item.done`` events so the terminal
@@ -6508,6 +6931,29 @@ async def _normalize_public_responses_stream(
         finally:
             pre_created_buffer.clear()
 
+    def normalize_public_failure_sequence(
+        payload: dict[str, JsonValue],
+        *,
+        reserve_created_sequence: bool,
+    ) -> tuple[dict[str, JsonValue], int | None]:
+        nonlocal next_sequence_number
+        sequence_number = payload.get("sequence_number")
+        if isinstance(sequence_number, int) and not isinstance(sequence_number, bool):
+            next_sequence_number = max(next_sequence_number, sequence_number + 1)
+            if enforce_openai_sdk_contract and reserve_created_sequence and payload.get("type") == "response.failed":
+                return payload, sequence_number - 1
+            return payload, None
+        if enforce_openai_sdk_contract and payload.get("type") == "response.failed":
+            created_sequence_number: int | None = None
+            if reserve_created_sequence:
+                created_sequence_number = next_sequence_number
+                next_sequence_number += 1
+            normalized_payload = dict(payload)
+            normalized_payload["sequence_number"] = next_sequence_number
+            next_sequence_number += 1
+            return normalized_payload, created_sequence_number
+        return payload, None
+
     async for event_block in stream:
         if event_block.strip() == "data: [DONE]":
             done_seen = True
@@ -6550,6 +6996,20 @@ async def _normalize_public_responses_stream(
         if normalized_payload is None:
             continue
         event_type = normalized_payload.get("type")
+        synthetic_created = None
+        if (
+            enforce_openai_sdk_contract
+            and not created_emitted
+            and isinstance(event_type, str)
+            and event_type != "response.created"
+        ):
+            synthetic_created = _synthetic_response_created_envelope(normalized_payload)
+        normalized_payload, synthetic_created_sequence = normalize_public_failure_sequence(
+            normalized_payload,
+            reserve_created_sequence=synthetic_created is not None,
+        )
+        if synthetic_created is not None and synthetic_created_sequence is not None:
+            synthetic_created["sequence_number"] = synthetic_created_sequence
         if not enforce_openai_sdk_contract and (
             event_type == "error" or is_json_mapping(normalized_payload.get("error"))
         ):
@@ -6566,7 +7026,6 @@ async def _normalize_public_responses_stream(
                     yield formatted_payload
                 continue
 
-            synthetic_created = _synthetic_response_created_envelope(normalized_payload)
             if synthetic_created is not None:
                 yield format_sse_event(synthetic_created)
                 created_emitted = True
@@ -6576,7 +7035,11 @@ async def _normalize_public_responses_stream(
             elif _should_buffer_public_pre_created_event(event_type):
                 if len(pre_created_buffer) >= _PUBLIC_RESPONSES_PRE_CREATED_BUFFER_LIMIT:
                     error_kind = contract_violation_kind or "upstream_stream_truncated"
-                    for formatted_payload in _public_response_failed_event_blocks(error_kind, include_created=True):
+                    for formatted_payload in _public_response_failed_event_blocks(
+                        error_kind,
+                        include_created=True,
+                        sequence_number=next_sequence_number,
+                    ):
                         yield formatted_payload
                     return
                 pre_created_buffer.append(normalized_payload)
@@ -6586,11 +7049,16 @@ async def _normalize_public_responses_stream(
                     for formatted_payload in _public_response_failed_event_blocks_from_error(
                         normalized_payload,
                         include_created=True,
+                        sequence_number=next_sequence_number,
                     ):
                         yield formatted_payload
                     return
                 error_kind = contract_violation_kind or "upstream_stream_truncated"
-                for formatted_payload in _public_response_failed_event_blocks(error_kind, include_created=True):
+                for formatted_payload in _public_response_failed_event_blocks(
+                    error_kind,
+                    include_created=True,
+                    sequence_number=next_sequence_number,
+                ):
                     yield formatted_payload
                 return
 
@@ -6598,6 +7066,7 @@ async def _normalize_public_responses_stream(
             for formatted_payload in _public_response_failed_event_blocks_from_error(
                 normalized_payload,
                 include_created=not created_emitted,
+                sequence_number=next_sequence_number,
             ):
                 yield formatted_payload
             return
@@ -6629,7 +7098,11 @@ async def _normalize_public_responses_stream(
         "upstream_stream_truncated" if enforce_openai_sdk_contract else "stream_incomplete"
     )
     include_created = enforce_openai_sdk_contract and not created_emitted
-    for formatted_payload in _public_response_failed_event_blocks(error_kind, include_created=include_created):
+    for formatted_payload in _public_response_failed_event_blocks(
+        error_kind,
+        include_created=include_created,
+        sequence_number=next_sequence_number if enforce_openai_sdk_contract else None,
+    ):
         yield formatted_payload
 
 
@@ -6641,7 +7114,12 @@ def _should_buffer_public_pre_created_event(event_type: str) -> bool:
     )
 
 
-def _public_response_failed_event_blocks(error_kind: str, *, include_created: bool) -> list[str]:
+def _public_response_failed_event_blocks(
+    error_kind: str,
+    *,
+    include_created: bool,
+    sequence_number: int | None,
+) -> list[str]:
     failed_payload = cast(
         dict[str, JsonValue],
         response_failed_event(
@@ -6650,10 +7128,14 @@ def _public_response_failed_event_blocks(error_kind: str, *, include_created: bo
             response_id=f"resp_{error_kind}",
         ),
     )
+    if sequence_number is not None:
+        failed_payload["sequence_number"] = sequence_number + int(include_created)
     blocks: list[str] = []
     if include_created:
         synthetic_created = _synthetic_response_created_envelope(failed_payload)
         if synthetic_created is not None:
+            if sequence_number is not None:
+                synthetic_created["sequence_number"] = sequence_number
             blocks.append(format_sse_event(synthetic_created))
     blocks.append(format_sse_event(failed_payload))
     return blocks
@@ -6663,6 +7145,7 @@ def _public_response_failed_event_blocks_from_error(
     payload: dict[str, JsonValue],
     *,
     include_created: bool,
+    sequence_number: int,
 ) -> list[str]:
     envelope = _parse_event_error_envelope(payload)
     error = envelope.error
@@ -6689,10 +7172,12 @@ def _public_response_failed_event_blocks_from_error(
             error_param=error.param,
         ),
     )
+    failed_payload["sequence_number"] = sequence_number + int(include_created)
     blocks: list[str] = []
     if include_created:
         synthetic_created = _synthetic_response_created_envelope(failed_payload)
         if synthetic_created is not None:
+            synthetic_created["sequence_number"] = sequence_number
             blocks.append(format_sse_event(synthetic_created))
     blocks.append(format_sse_event(failed_payload))
     return blocks

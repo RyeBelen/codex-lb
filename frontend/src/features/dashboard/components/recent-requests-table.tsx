@@ -27,15 +27,17 @@ import {
 import { PaginationControls } from "@/features/dashboard/components/filters/pagination-controls";
 import { RequestArchivePanel } from "@/features/conversation-archive/components/request-archive-panel";
 import type { AccountSummary, RequestLog } from "@/features/dashboard/schemas";
+import { useAuthStore } from "@/features/auth/hooks/use-auth";
+import { useDateDisplayFormatStore } from "@/hooks/use-date-format";
 import { REQUEST_STATUS_LABELS } from "@/utils/constants";
 import {
   formatDateTimeInline,
+  formatDateTimeLines,
   formatCompactNumber,
   formatCurrency,
   formatModelLabel,
   formatElapsed,
   formatSlug,
-  formatTimeLong,
 } from "@/utils/formatters";
 
 const STATUS_CLASS_MAP: Record<string, string> = {
@@ -175,6 +177,8 @@ export function RecentRequestsTable({
   const { t } = useTranslation();
   const [selectedRequest, setSelectedRequest] = useState<RequestLog | null>(null);
   const blurred = usePrivacyStore((s) => s.blurred);
+  const isAdmin = useAuthStore((state) => state.role === "admin");
+  const dateDisplayFormat = useDateDisplayFormatStore((state) => state.dateDisplayFormat);
   const selectedRequestCostSummary = formatRequestCostSummary(selectedRequest, t);
 
   const accountLabelMap = useMemo(() => {
@@ -230,7 +234,7 @@ export function RecentRequestsTable({
           </TableHeader>
           <TableBody>
             {requests.map((request) => {
-              const time = formatTimeLong(request.requestedAt);
+              const time = formatDateTimeLines(request.requestedAt, dateDisplayFormat);
               const accountLabel = request.accountId ? (accountLabelMap.get(request.accountId) ?? request.accountId) : t("dashboard.requests.unassigned");
               const isEmailLabel = !!(request.accountId && emailLabelIds.has(request.accountId));
               const errorPreview = request.errorMessage || request.errorCode || "-";
@@ -247,8 +251,8 @@ export function RecentRequestsTable({
                 <TableRow key={request.requestId}>
                   <TableCell className="pl-4 align-top">
                     <div className="leading-tight">
-                      <div className="text-sm font-medium">{time.time}</div>
-                      <div className="text-xs text-muted-foreground">{time.date}</div>
+                      <div className="text-sm font-medium">{time.primary}</div>
+                      <div className="text-xs text-muted-foreground">{time.secondary}</div>
                     </div>
                   </TableCell>
                   <TableCell className="truncate align-top text-sm">
@@ -419,65 +423,71 @@ export function RecentRequestsTable({
               </div>
               <div className="grid gap-3 sm:grid-cols-3">
                 <RequestDetailField label={t("dashboard.requests.columns.transport")} value={selectedRequest?.transport ? (TRANSPORT_LABELS[selectedRequest.transport] ?? selectedRequest.transport) : "—"} />
-                <RequestDetailField label={t("dashboard.requests.columns.time")} value={selectedRequest ? formatDateTimeInline(selectedRequest.requestedAt) : "—"} />
+                <RequestDetailField label={t("dashboard.requests.columns.time")} value={selectedRequest ? formatDateTimeInline(selectedRequest.requestedAt, dateDisplayFormat) : "—"} />
                 <RequestDetailField label={t("dashboard.requestDetails.errorCode")} value={selectedRequest?.errorCode ?? "—"} mono />
               </div>
-              <RequestDetailField
-                label={t("dashboard.requestDetails.userAgent")}
-                value={selectedRequest?.useragent ?? "—"}
-                copyValue={selectedRequest?.useragent ?? undefined}
-                copyLabel={t("dashboard.requestDetails.copyUserAgent")}
-                compactCopy
-              />
-              <div className="grid gap-3 sm:grid-cols-2">
+              {isAdmin ? (
                 <RequestDetailField
-                  label={t("dashboard.requestDetails.clientIp")}
-                  value={selectedRequest?.clientIp ?? "—"}
-                  copyValue={selectedRequest?.clientIp ?? undefined}
-                  copyLabel={t("dashboard.requestDetails.copyClientIp")}
+                  label={t("dashboard.requestDetails.userAgent")}
+                  value={selectedRequest?.useragent ?? "—"}
+                  copyValue={selectedRequest?.useragent ?? undefined}
+                  copyLabel={t("dashboard.requestDetails.copyUserAgent")}
                   compactCopy
                 />
-                <div className="space-y-1">
-                  <div className="flex items-center gap-2">
-                    <div className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">
-                      {t("dashboard.requestDetails.conversationId")}
+              ) : null}
+              {isAdmin ? (
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <RequestDetailField
+                    label={t("dashboard.requestDetails.clientIp")}
+                    value={selectedRequest?.clientIp ?? "—"}
+                    copyValue={selectedRequest?.clientIp ?? undefined}
+                    copyLabel={t("dashboard.requestDetails.copyClientIp")}
+                    compactCopy
+                  />
+                  <div className="space-y-1">
+                    <div className="flex items-center gap-2">
+                      <div className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground/80">
+                        {t("dashboard.requestDetails.conversationId")}
+                      </div>
+                      {selectedRequest?.conversationId ? (
+                        <CopyButton value={selectedRequest.conversationId} label={t("dashboard.requestDetails.copyConversationId")} iconOnly />
+                      ) : null}
                     </div>
-                    {selectedRequest?.conversationId ? (
-                      <CopyButton value={selectedRequest.conversationId} label={t("dashboard.requestDetails.copyConversationId")} iconOnly />
-                    ) : null}
-                  </div>
-                  <div className="flex flex-col items-start gap-2">
-                    {selectedRequest?.conversationId ? (
-                      onConversationClick ? (
-                        <button
-                          type="button"
-                          className="max-w-[200px] truncate text-left text-sm leading-relaxed text-primary hover:text-primary/80 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring rounded-sm"
-                          title={selectedRequest.conversationId}
-                          onClick={() => {
-                            setSelectedRequest(null);
-                            onConversationClick(selectedRequest?.conversationId ?? "");
-                          }}
-                          aria-label={t("dashboard.filters.conversationFilterAria", { id: selectedRequest.conversationId })}
-                        >
-                          {selectedRequest.conversationId}
-                        </button>
+                    <div className="flex flex-col items-start gap-2">
+                      {selectedRequest?.conversationId ? (
+                        onConversationClick ? (
+                          <button
+                            type="button"
+                            className="max-w-[200px] truncate text-left text-sm leading-relaxed text-primary hover:text-primary/80 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring rounded-sm"
+                            title={selectedRequest.conversationId}
+                            onClick={() => {
+                              setSelectedRequest(null);
+                              onConversationClick(selectedRequest?.conversationId ?? "");
+                            }}
+                            aria-label={t("dashboard.filters.conversationFilterAria", { id: selectedRequest.conversationId })}
+                          >
+                            {selectedRequest.conversationId}
+                          </button>
+                        ) : (
+                          <p className="max-w-[200px] truncate text-sm leading-relaxed" title={selectedRequest.conversationId ?? undefined}>
+                            {selectedRequest.conversationId}
+                          </p>
+                        )
                       ) : (
-                        <p className="max-w-[200px] truncate text-sm leading-relaxed" title={selectedRequest.conversationId ?? undefined}>
-                          {selectedRequest.conversationId}
-                        </p>
-                      )
-                    ) : (
-                      <p className="min-w-0 flex-1 break-all text-sm leading-relaxed">—</p>
-                    )}
+                        <p className="min-w-0 flex-1 break-all text-sm leading-relaxed">—</p>
+                      )}
+                    </div>
                   </div>
                 </div>
-              </div>
+              ) : null}
             </div>
 
-            <RequestArchivePanel
-              requestId={selectedRequest?.archiveRequestId ?? selectedRequest?.requestId}
-              requestedAt={selectedRequest?.requestedAt}
-            />
+            {isAdmin ? (
+              <RequestArchivePanel
+                requestId={selectedRequest?.archiveRequestId ?? selectedRequest?.requestId}
+                requestedAt={selectedRequest?.requestedAt}
+              />
+            ) : null}
 
             {selectedRequestCostSummary ? (
               <div className="space-y-2">

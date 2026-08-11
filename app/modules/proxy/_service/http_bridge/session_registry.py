@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Mapping
 
 from app.core.clients.proxy import ProxyResponseError
 from app.core.config.settings import Settings
@@ -46,6 +47,7 @@ from app.modules.proxy.durable_bridge_repository import (
     DurableBridgeAliasRegistration,
     DurableBridgeAliasRegistrationReceipt,
 )
+from app.modules.proxy.durable_bridge_runtime import http_bridge_owner_process_epoch
 
 logger = logging.getLogger("app.modules.proxy.service")
 
@@ -212,6 +214,7 @@ class _HTTPBridgeSessionRegistryMixin:
         *,
         input_item_count: int | None = None,
         input_full_fingerprint: str | None = None,
+        pending_tool_calls: Mapping[str, str] | None = None,
     ) -> bool:
         if _requires_durable_recovery_alias_serialization(session):
             async with session.recovery_alias_lock:
@@ -220,12 +223,14 @@ class _HTTPBridgeSessionRegistryMixin:
                     response_id,
                     input_item_count=input_item_count,
                     input_full_fingerprint=input_full_fingerprint,
+                    pending_tool_calls=pending_tool_calls,
                 )
         return await self._register_http_bridge_previous_response_id_impl(
             session,
             response_id,
             input_item_count=input_item_count,
             input_full_fingerprint=input_full_fingerprint,
+            pending_tool_calls=pending_tool_calls,
         )
 
     async def _register_http_bridge_previous_response_id_impl(
@@ -235,6 +240,7 @@ class _HTTPBridgeSessionRegistryMixin:
         *,
         input_item_count: int | None = None,
         input_full_fingerprint: str | None = None,
+        pending_tool_calls: Mapping[str, str] | None = None,
     ) -> bool:
         stripped_response_id = response_id.strip()
         if not stripped_response_id:
@@ -290,6 +296,7 @@ class _HTTPBridgeSessionRegistryMixin:
             registration_generation=registration_generation,
             input_item_count=input_item_count,
             input_full_fingerprint=input_full_fingerprint,
+            pending_tool_calls=pending_tool_calls,
             instance_id=_service_get_settings().http_responses_session_bridge_instance_id,
             lease_ttl_seconds=_http_bridge_durable_lease_ttl_seconds(),
             local_alias_was_published=not defer_durable_publication,
@@ -427,6 +434,7 @@ class _HTTPBridgeSessionRegistryMixin:
         clear_latest_turn_state: bool = False,
     ) -> None:
         current_instance = _service_get_settings().http_responses_session_bridge_instance_id
+        current_process_epoch = http_bridge_owner_process_epoch()
         try:
             lookup: DurableBridgeLookup | None = None
             for claim_attempt in range(2):
@@ -435,6 +443,7 @@ class _HTTPBridgeSessionRegistryMixin:
                     session_key_value=session.key.affinity_key,
                     api_key_id=session.key.api_key_id,
                     instance_id=current_instance,
+                    owner_process_epoch=current_process_epoch,
                     lease_ttl_seconds=_http_bridge_durable_lease_ttl_seconds(),
                     account_id=claim_account_id or session.account.id,
                     model=session.request_model,

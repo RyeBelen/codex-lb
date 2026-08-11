@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Callable, Sequence
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime
@@ -9,12 +9,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.clients.proxy import ProxyResponseError
 from app.core.errors import openai_error
+from app.core.utils.time import to_utc_naive
 from app.db.models import HttpBridgeSessionState
 from app.db.session import close_session
 from app.modules.proxy.continuity import is_http_bridge_account_neutral_replay
 from app.modules.proxy.durable_bridge_repository import (
     DurableBridgeAliasRegistration,
     DurableBridgeAliasRegistrationReceipt,
+    DurableBridgeRecoveryAttemptSnapshot,
     DurableBridgeRepository,
     DurableBridgeRetryCircuitSnapshot,
     DurableBridgeSessionSnapshot,
@@ -42,13 +44,19 @@ class DurableBridgeLookup:
     latest_input_item_count: int | None = None
     latest_input_full_fingerprint: str | None = None
     model: str | None = None
+    latest_pending_tool_calls: dict[str, str] | None = None
+    owner_process_epoch: str | None = None
 
     def lease_is_active(self, *, now: datetime) -> bool:
         if self.owner_instance_id is None:
             return False
         if self.lease_expires_at is None:
             return False
-        return self.lease_expires_at > now
+        # lease_expires_at is a timestamptz column: PostgreSQL yields it
+        # offset-aware while the app clock (utcnow) and SQLite yield naive
+        # UTC. Normalize both sides — comparing them raw raises TypeError
+        # on the anchored-lookup hot path.
+        return to_utc_naive(self.lease_expires_at) > to_utc_naive(now)
 
 
 class DurableBridgeSessionCoordinator:
@@ -218,8 +226,12 @@ class DurableBridgeSessionCoordinator:
         cooldown_until_epoch: float,
         last_detail: str | None,
         updated_at_epoch: float,
+        base_updated_at_epoch: float = 0.0,
         failure_threshold: int = 1,
         conflict_cooldown_until_epoch: float | None = None,
+        base_backoff_seconds: float = 60.0,
+        max_backoff_seconds: float = 600.0,
+        clean_close_max_backoff_seconds: float = 30.0,
     ) -> DurableBridgeRetryCircuitSnapshot | None:
         async with self._session() as session:
             repository = DurableBridgeRepository(session)
@@ -231,8 +243,12 @@ class DurableBridgeSessionCoordinator:
                 cooldown_until_epoch=cooldown_until_epoch,
                 last_detail=last_detail,
                 updated_at_epoch=updated_at_epoch,
+                base_updated_at_epoch=base_updated_at_epoch,
                 failure_threshold=failure_threshold,
                 conflict_cooldown_until_epoch=conflict_cooldown_until_epoch,
+                base_backoff_seconds=base_backoff_seconds,
+                max_backoff_seconds=max_backoff_seconds,
+                clean_close_max_backoff_seconds=clean_close_max_backoff_seconds,
             )
             return await repository.get_retry_circuit(
                 session_key_kind=session_key_kind,
@@ -246,12 +262,30 @@ class DurableBridgeSessionCoordinator:
         session_key_kind: str,
         session_key_value: str,
         api_key_id: str | None,
+        expected_updated_at_epoch: float | None = None,
     ) -> None:
         async with self._session() as session:
             await DurableBridgeRepository(session).delete_retry_circuit(
                 session_key_kind=session_key_kind,
                 session_key_value=session_key_value,
                 api_key_scope=durable_bridge_api_key_scope(api_key_id),
+                expected_updated_at_epoch=expected_updated_at_epoch,
+            )
+
+    async def purge_retry_circuit(
+        self,
+        *,
+        session_key_kind: str,
+        session_key_value: str,
+        api_key_id: str | None,
+        expected_updated_at_epoch: float | None = None,
+    ) -> None:
+        async with self._session() as session:
+            await DurableBridgeRepository(session).purge_retry_circuit(
+                session_key_kind=session_key_kind,
+                session_key_value=session_key_value,
+                api_key_scope=durable_bridge_api_key_scope(api_key_id),
+                expected_updated_at_epoch=expected_updated_at_epoch,
             )
 
     async def claim_live_session(
@@ -268,6 +302,7 @@ class DurableBridgeSessionCoordinator:
         latest_turn_state: str | None,
         latest_response_id: str | None,
         allow_takeover: bool,
+        owner_process_epoch: str,
         force_owner_epoch_advance: bool = False,
     ) -> DurableBridgeLookup:
         api_key_scope = durable_bridge_api_key_scope(api_key_id)
@@ -284,6 +319,7 @@ class DurableBridgeSessionCoordinator:
                 latest_turn_state=latest_turn_state,
                 latest_response_id=latest_response_id,
                 allow_takeover=allow_takeover,
+                owner_process_epoch=owner_process_epoch,
                 force_owner_epoch_advance=force_owner_epoch_advance,
             )
         return _to_lookup(snapshot)
@@ -300,6 +336,7 @@ class DurableBridgeSessionCoordinator:
         latest_response_id: str | None = None,
         latest_input_item_count: int | None = None,
         latest_input_full_fingerprint: str | None = None,
+        latest_pending_tool_calls: Mapping[str, str] | None = None,
         state: HttpBridgeSessionState | None = None,
     ) -> DurableBridgeLookup | None:
         del api_key_id
@@ -313,11 +350,32 @@ class DurableBridgeSessionCoordinator:
                 latest_response_id=latest_response_id,
                 latest_input_item_count=latest_input_item_count,
                 latest_input_full_fingerprint=latest_input_full_fingerprint,
+                latest_pending_tool_calls=latest_pending_tool_calls,
                 state=state,
             )
         if snapshot is None:
             return None
         return _to_lookup(snapshot)
+
+    async def rebind_session_account(
+        self,
+        *,
+        session_id: str,
+        api_key_id: str | None,
+        instance_id: str,
+        owner_epoch: int,
+        account_id: str,
+        clear_continuity: bool = False,
+    ) -> bool:
+        del api_key_id
+        async with self._session() as session:
+            return await DurableBridgeRepository(session).rebind_session_account(
+                session_id=session_id,
+                instance_id=instance_id,
+                owner_epoch=owner_epoch,
+                account_id=account_id,
+                clear_continuity=clear_continuity,
+            )
 
     async def release_live_session(
         self,
@@ -338,6 +396,99 @@ class DurableBridgeSessionCoordinator:
             return None
         return _to_lookup(snapshot)
 
+    async def clear_live_session_response_anchor(
+        self,
+        *,
+        session_id: str,
+        instance_id: str,
+        owner_epoch: int,
+    ) -> DurableBridgeLookup | None:
+        async with self._session() as session:
+            snapshot = await DurableBridgeRepository(session).clear_latest_response_anchor(
+                session_id=session_id,
+                instance_id=instance_id,
+                owner_epoch=owner_epoch,
+            )
+        if snapshot is None:
+            return None
+        return _to_lookup(snapshot)
+
+    async def record_recovery_attempt(
+        self,
+        *,
+        session_id: str,
+        api_key_id: str | None,
+        instance_id: str,
+        owner_epoch: int,
+        request_fingerprint: str,
+        request_id: str,
+        account_id: str | None,
+        model: str | None,
+        replay_safe: bool,
+    ) -> DurableBridgeRecoveryAttemptSnapshot | None:
+        del api_key_id
+        async with self._session() as session:
+            return await DurableBridgeRepository(session).record_recovery_attempt(
+                session_id=session_id,
+                instance_id=instance_id,
+                owner_epoch=owner_epoch,
+                request_fingerprint=request_fingerprint,
+                request_id=request_id,
+                account_id=account_id,
+                model=model,
+                replay_safe=replay_safe,
+            )
+
+    async def lookup_recovery_attempt(
+        self,
+        *,
+        session_id: str,
+        request_fingerprint: str,
+    ) -> DurableBridgeRecoveryAttemptSnapshot | None:
+        async with self._session() as session:
+            return await DurableBridgeRepository(session).lookup_recovery_attempt(
+                session_id=session_id,
+                request_fingerprint=request_fingerprint,
+            )
+
+    async def mark_recovery_attempt_replayed(
+        self,
+        *,
+        session_id: str,
+        api_key_id: str | None,
+        instance_id: str,
+        owner_epoch: int,
+        request_fingerprint: str,
+        response_id: str | None = None,
+    ) -> bool:
+        del api_key_id
+        async with self._session() as session:
+            return await DurableBridgeRepository(session).mark_recovery_attempt_replayed(
+                session_id=session_id,
+                instance_id=instance_id,
+                owner_epoch=owner_epoch,
+                request_fingerprint=request_fingerprint,
+                response_id=response_id,
+            )
+
+    async def rollback_recovery_attempt_replayed(
+        self,
+        *,
+        session_id: str,
+        api_key_id: str | None,
+        instance_id: str,
+        owner_epoch: int,
+        request_fingerprint: str,
+    ) -> bool:
+        del api_key_id
+        async with self._session() as session:
+            return await DurableBridgeRepository(session).rollback_recovery_attempt_replayed(
+                session_id=session_id,
+                instance_id=instance_id,
+                owner_epoch=owner_epoch,
+                request_fingerprint=request_fingerprint,
+            )
+
     async def mark_instance_draining(self, *, instance_id: str) -> int:
         async with self._session() as session:
             return await DurableBridgeRepository(session).mark_owner_draining(instance_id=instance_id)
@@ -346,11 +497,13 @@ class DurableBridgeSessionCoordinator:
         self,
         *,
         instance_id: str,
+        owner_process_epoch: str | None = None,
         ownerless_cutoff: datetime | None = None,
     ) -> int:
         async with self._session() as session:
             return await DurableBridgeRepository(session).purge_owned_sessions_on_startup(
                 instance_id=instance_id,
+                owner_process_epoch=owner_process_epoch,
                 ownerless_cutoff=ownerless_cutoff,
             )
 
@@ -419,6 +572,7 @@ class DurableBridgeSessionCoordinator:
         lease_ttl_seconds: float,
         input_item_count: int | None = None,
         input_full_fingerprint: str | None = None,
+        pending_tool_calls: Mapping[str, str] | None = None,
     ) -> DurableBridgeAliasRegistration:
         api_key_scope = durable_bridge_api_key_scope(api_key_id)
         async with self._session() as session:
@@ -433,6 +587,7 @@ class DurableBridgeSessionCoordinator:
                 latest_response_id=response_id,
                 latest_input_item_count=input_item_count,
                 latest_input_full_fingerprint=input_full_fingerprint,
+                latest_pending_tool_calls=pending_tool_calls,
             )
 
     async def register_session_header(
@@ -468,6 +623,7 @@ def _to_lookup(snapshot: DurableBridgeSessionSnapshot) -> DurableBridgeLookup:
         api_key_scope=snapshot.api_key_scope,
         account_id=snapshot.account_id,
         owner_instance_id=snapshot.owner_instance_id,
+        owner_process_epoch=snapshot.owner_process_epoch,
         owner_epoch=snapshot.owner_epoch,
         lease_expires_at=snapshot.lease_expires_at,
         state=snapshot.state,
@@ -476,4 +632,5 @@ def _to_lookup(snapshot: DurableBridgeSessionSnapshot) -> DurableBridgeLookup:
         latest_input_item_count=snapshot.latest_input_item_count,
         latest_input_full_fingerprint=snapshot.latest_input_full_fingerprint,
         model=snapshot.model,
+        latest_pending_tool_calls=snapshot.latest_pending_tool_calls,
     )

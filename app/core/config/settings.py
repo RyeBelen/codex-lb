@@ -279,7 +279,7 @@ class Settings(BaseSettings):
     # refresh-admission wait AND the OAuth exchange, and a healthy claimant
     # must not lose its claim mid-work.
     token_refresh_claim_ttl_seconds: float = Field(default=30.0, gt=0)
-    auth_guardian_enabled: bool = False
+    auth_guardian_enabled: bool = True
     transcription_request_budget_seconds: float = Field(default=120.0, gt=0)
     token_refresh_interval_days: int = 8
     usage_fetch_timeout_seconds: float = 10.0
@@ -297,8 +297,14 @@ class Settings(BaseSettings):
     http_responses_session_bridge_codex_idle_ttl_seconds: float = Field(default=900.0, gt=0)
     http_responses_session_bridge_codex_prewarm_enabled: bool = False
     http_responses_session_bridge_stuck_gate_retire_after_seconds: float = Field(default=300.0, gt=0)
+    http_responses_session_bridge_anchor_poison_failure_threshold: int = Field(default=7, ge=1, le=100)
     http_responses_session_bridge_max_sessions: int = Field(default=256, gt=0)
     http_responses_session_bridge_queue_limit: int = Field(default=8, gt=0)
+    http_responses_session_bridge_clean_close_retry_jitter_max_seconds: float = Field(
+        default=2.0,
+        ge=0,
+        le=30.0,
+    )
     http_responses_session_bridge_gateway_safe_mode: bool = False
     http_responses_session_bridge_instance_id: str = Field(default_factory=_default_http_bridge_instance_id)
     http_responses_session_bridge_instance_ring: Annotated[list[str], NoDecode] = Field(default_factory=list)
@@ -412,6 +418,9 @@ class Settings(BaseSettings):
     proxy_account_response_create_limit: int = Field(default=4, ge=0)
     proxy_account_stream_limit: int = Field(default=8, ge=0)
     proxy_account_stream_recovery_reserve: int = Field(default=1, ge=0)
+    # Pool-congestion utilization percentage at which per-API-key stream
+    # fair-share throttling engages; 0 disables the gate entirely.
+    proxy_api_key_fair_share_congestion_threshold_pct: int = Field(default=0, ge=0, le=100)
     proxy_account_inflight_penalty_pct: float = Field(default=2.5, ge=0)
     proxy_account_lease_token_weight: float = Field(default=1.0, ge=0)
     proxy_account_lease_ttl_seconds: float = Field(default=900.0, gt=0)

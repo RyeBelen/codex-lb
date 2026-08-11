@@ -13,7 +13,7 @@ loop and require the Codex client to be restarted.
 
 - Permit one additional pre-visible replay when the replacement upstream
   WebSocket closes cleanly before any response event.
-- Add bounded jitter before that additional replay to avoid
+- Add bounded, configurable jitter before that additional replay to avoid
   synchronized reconnects.
 - Emit a dedicated diagnostic event for the additional clean-close replay.
 - Keep the allowance hard-capped at one and preserve all existing no-replay
@@ -31,9 +31,6 @@ loop and require the Codex client to be restarted.
   response creation, rather than admission flags alone. Give requests with a
   prior continuity anchor a bounded two-threshold grace period, and emit
   diagnostic state when the watchdog skips a candidate.
-- Count `missing_response_created_timeout` as a hard-affinity retry-circuit
-  failure so the client-safe watchdog cannot reset the circuit between
-  identical native-client retries.
 
 ## Impact
 
@@ -48,6 +45,3 @@ loop and require the Codex client to be restarted.
 - Adds a forward-only request-usage rollup repair migration for deployments
   already stamped at the previous merge head, so changing migration ancestry
   cannot leave startup schema-drift checks failing.
-- Repeated missing-`response.created` watchdog expirations participate in the
-  same durable, API-key-scoped cooldown as incomplete streams and idle
-  timeouts, without adding account penalties or replay authority.
