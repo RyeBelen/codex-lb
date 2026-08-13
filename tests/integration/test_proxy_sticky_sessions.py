@@ -295,9 +295,11 @@ async def test_proxy_sticky_switches_when_pinned_rate_limited(async_client, monk
         )
 
     seen: list[str] = []
+    seen_payloads: list[dict[str, object]] = []
 
     async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **_kwargs):
         seen.append(account_id)
+        seen_payloads.append(cast(dict[str, object], payload.to_payload()))
         if account_id == acc_a.id:
             yield (
                 'data: {"type":"response.failed","response":{"error":{"code":"rate_limit_exceeded",'
@@ -311,7 +313,15 @@ async def test_proxy_sticky_switches_when_pinned_rate_limited(async_client, monk
     payload = {
         "model": "gpt-5.1",
         "instructions": "hi",
-        "input": [],
+        "input": [
+            {
+                "type": "compaction",
+                "id": "cmp_server_state",
+                "encrypted_content": "encrypted-server-compaction",
+            },
+            {"role": "user", "content": "continue"},
+        ],
+        "context_management": [{"type": "compaction", "compact_threshold": 200_000}],
         "stream": True,
         "prompt_cache_key": "thread_rl",
     }
@@ -320,6 +330,14 @@ async def test_proxy_sticky_switches_when_pinned_rate_limited(async_client, monk
 
     # First attempt is pinned acc_a, which rate limits; retry should switch to acc_b and update stickiness.
     assert seen[:2] == [acc_a.id, acc_b.id]
+    assert [wire_payload["input"] for wire_payload in seen_payloads[:2]] == [
+        payload["input"],
+        payload["input"],
+    ]
+    assert [wire_payload["context_management"] for wire_payload in seen_payloads[:2]] == [
+        payload["context_management"],
+        payload["context_management"],
+    ]
 
 
 @pytest.mark.asyncio
