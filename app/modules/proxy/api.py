@@ -11,7 +11,6 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from json import JSONDecodeError
 from typing import Any, Final, Literal, Protocol, cast
-from uuid import uuid4
 
 import anyio
 from fastapi import (
@@ -231,13 +230,13 @@ from app.modules.proxy.request_policy import (
     apply_enforced_service_tier_model_fallback,
     enforce_strict_function_tools_format,
     enforce_strict_text_format,
+    has_terminal_compaction_trigger,
     model_alias_requests_fast_mode,
     normalize_responses_request_payload,
     openai_client_payload_error,
     openai_validation_error,
     resolve_model_alias,
     sanitize_source_chat_payload,
-    strip_terminal_compaction_trigger_input,
     validate_model_access,
 )
 from app.modules.proxy.schemas import (
@@ -1042,12 +1041,12 @@ async def responses(
         raw_source_model = responses_payload.model
     validate_model_access(api_key, responses_payload.model)
     try:
-        compact_trigger_input = strip_terminal_compaction_trigger_input(responses_payload)
+        has_compaction_trigger = has_terminal_compaction_trigger(responses_payload)
     except ClientPayloadError as exc:
         error = openai_client_payload_error(exc)
         return _logged_error_json_response(request, 400, error)
     source = None
-    if compact_trigger_input is None and not extract_input_file_ids(responses_payload.input):
+    if not has_compaction_trigger and not extract_input_file_ids(responses_payload.input):
         source_selection = await _select_responses_model_source(
             responses_payload.model,
             api_key,
@@ -4905,40 +4904,6 @@ async def _stream_responses(
             service_tier_was_enforced=service_tier_was_enforced,
         )
     validate_model_access(api_key, payload.model)
-    compact_payload: ResponsesCompactRequest | None = None
-    if codex_session_affinity:
-        try:
-            compact_trigger_input = strip_terminal_compaction_trigger_input(payload)
-            if compact_trigger_input is not None:
-                compact_payload_data = payload.model_dump(
-                    mode="json",
-                    include={
-                        "model",
-                        "instructions",
-                        "reasoning",
-                        "store",
-                        "service_tier",
-                        "prompt_cache_key",
-                    },
-                    exclude_none=True,
-                )
-                if isinstance(payload.model_extra, dict):
-                    prompt_cache_key_alias = payload.model_extra.get("promptCacheKey")
-                    if isinstance(prompt_cache_key_alias, str) and "prompt_cache_key" not in compact_payload_data:
-                        compact_payload_data["prompt_cache_key"] = prompt_cache_key_alias
-                compact_payload_data["input"] = compact_trigger_input
-                if payload.previous_response_id is not None:
-                    compact_payload_data["previous_response_id"] = payload.previous_response_id
-                if payload.conversation is not None:
-                    compact_payload_data["conversation"] = payload.conversation
-                compact_payload = ResponsesCompactRequest.model_validate(compact_payload_data)
-                # Validate the exact compact wire payload before admission or
-                # reservation work so an untrimmable trigger is a client 400,
-                # not a late service exception that reaches the global 500.
-                compact_payload.to_payload()
-        except ClientPayloadError as exc:
-            error = openai_client_payload_error(exc)
-            return _logged_error_json_response(request, 400, error)
     admission_denial = await _opportunistic_admission_denial(request, context, api_key, model=payload.model)
     if admission_denial is not None:
         return admission_denial
@@ -4978,65 +4943,6 @@ async def _stream_responses(
         if downstream_turn_state is not None
         else {}
     )
-    if compact_payload is not None:
-        try:
-            try:
-                compact_result = await context.service.compact_responses(
-                    compact_payload,
-                    effective_headers,
-                    codex_session_affinity=codex_session_affinity,
-                    openai_cache_affinity=openai_cache_affinity,
-                    api_key=api_key,
-                    api_key_reservation=reservation,
-                    client_ip=client_ip,
-                )
-            except NotImplementedError:
-                error = OpenAIErrorEnvelopeModel(
-                    error=OpenAIError(
-                        message="responses/compact is not implemented",
-                        type="server_error",
-                        code="not_implemented",
-                    )
-                )
-                return _logged_error_json_response(
-                    request,
-                    501,
-                    error.model_dump(mode="json", exclude_none=True),
-                    headers=rate_limit_headers,
-                )
-            except ProxyResponseError as exc:
-                return _stream_startup_error_response(
-                    request,
-                    exc,
-                    headers=rate_limit_headers,
-                )
-            compact_item = _compact_response_output_item(compact_result)
-            if compact_item is None:
-                error = openai_error(
-                    "upstream_error",
-                    "Compact response did not include a compaction output item",
-                    error_type="server_error",
-                )
-                return _logged_error_json_response(request, 502, error, headers=rate_limit_headers)
-            response_id = _compact_response_id(compact_result)
-            stream = _synthetic_compaction_response_stream(
-                compact_item,
-                response_id=response_id,
-                usage=compact_result.usage,
-            )
-            return StreamingResponse(
-                stream,
-                media_type="text/event-stream",
-                headers={
-                    "Cache-Control": "no-cache, no-transform",
-                    "X-Accel-Buffering": "no",
-                    **turn_state_headers,
-                    **rate_limit_headers,
-                },
-            )
-        finally:
-            if owns_reservation:
-                await _release_reservation(reservation)
     capacity_wait_event = asyncio.Event()
     capacity_ready_event = _CapacityStartupReadyEvent()
     payload.stream = True
@@ -5435,73 +5341,6 @@ def _json_mapping_from_model_or_mapping(value: object) -> Mapping[str, JsonValue
         if is_json_mapping(dumped):
             return dumped
     return None
-
-
-def _compact_response_id(payload: CompactResponsePayload) -> str:
-    if payload.id:
-        return payload.id
-    request_id = get_request_id()
-    if request_id:
-        return f"resp_{request_id}"
-    return f"resp_{uuid4().hex}"
-
-
-async def _synthetic_compaction_response_stream(
-    compact_item: Mapping[str, JsonValue],
-    *,
-    response_id: str,
-    usage: object | None,
-) -> AsyncIterator[str]:
-    item = dict(compact_item)
-    item.setdefault("status", "completed")
-    completed_response: dict[str, JsonValue] = {
-        "id": response_id,
-        "object": "response",
-        "status": "completed",
-        "output": [item],
-    }
-    usage_mapping = _json_mapping_from_model_or_mapping(usage)
-    if usage_mapping is not None:
-        completed_response["usage"] = dict(usage_mapping)
-    yield format_sse_event(
-        {
-            "type": "response.created",
-            "sequence_number": 0,
-            "response": {
-                "id": response_id,
-                "object": "response",
-                "status": "in_progress",
-                "output": [],
-            },
-        }
-    )
-    yield format_sse_event(
-        {
-            "type": "response.output_item.added",
-            "sequence_number": 1,
-            "output_index": 0,
-            "item": {
-                **item,
-                "status": "in_progress",
-            },
-        }
-    )
-    yield format_sse_event(
-        {
-            "type": "response.output_item.done",
-            "sequence_number": 2,
-            "output_index": 0,
-            "item": item,
-        }
-    )
-    yield format_sse_event(
-        {
-            "type": "response.completed",
-            "sequence_number": 3,
-            "response": completed_response,
-        }
-    )
-    yield "data: [DONE]\n\n"
 
 
 async def _transcribe_request(

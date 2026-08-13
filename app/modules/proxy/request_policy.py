@@ -570,18 +570,16 @@ def normalize_responses_request_payload(
     return responses
 
 
-def strip_terminal_compaction_trigger_input(payload: ResponsesRequest) -> list[JsonValue] | None:
+def has_terminal_compaction_trigger(payload: ResponsesRequest) -> bool:
     input_value = payload.input
     if not is_json_list(input_value):
-        return None
+        return False
 
-    stripped_input: list[JsonValue] = []
     trigger_seen = False
     last_index = len(input_value) - 1
 
     for index, item in enumerate(input_value):
         if not (is_json_mapping(item) and item.get("type") == "compaction_trigger"):
-            stripped_input.append(item)
             continue
 
         if trigger_seen or index != last_index:
@@ -593,9 +591,7 @@ def strip_terminal_compaction_trigger_input(payload: ResponsesRequest) -> list[J
             )
         trigger_seen = True
 
-    if not trigger_seen:
-        return None
-    return stripped_input
+    return trigger_seen
 
 
 def enforce_strict_text_format(request: ResponsesRequest) -> None:
