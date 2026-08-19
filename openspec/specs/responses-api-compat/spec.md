@@ -1202,6 +1202,22 @@ When a direct Responses WebSocket request depends on `previous_response_id`, the
 - **AND** it does not continue on an unpinned account
 - **AND** it does not expose raw `previous_response_not_found`
 
+### Requirement: Invalid previous-response shorthand uses stale-anchor recovery
+
+Responses WebSocket handling MUST classify an upstream `invalid_request_error` whose message is exactly `Invalid \`previous_response_id\`.` as previous-response continuity loss when the envelope omits both `code` and `param`. It MUST apply the same replay or sanitized continuity-failure behavior used for canonical `previous_response_not_found` errors instead of forwarding the raw 400 error.
+
+#### Scenario: Codex-native stale anchor uses shorthand error envelope
+
+- **WHEN** a Codex-native Responses WebSocket follow-up carries `previous_response_id`
+- **AND** upstream returns `type=invalid_request_error` with message `Invalid \`previous_response_id\`.` and no `code` or `param`
+- **THEN** codex-lb applies its existing stale-anchor recovery behavior
+- **AND** the client does not receive the raw upstream 400 error
+
+#### Scenario: Unrelated invalid requests remain unchanged
+
+- **WHEN** upstream returns an `invalid_request_error` whose message does not exactly identify an invalid `previous_response_id`
+- **THEN** codex-lb does not classify it as previous-response continuity loss solely because `code` and `param` are absent
+
 ### Requirement: Failed precreated HTTP bridge replay retires stale sessions
 
 When an HTTP bridge request is still pending before upstream `response.completed` and the upstream websocket closes or times out before the pending request can be completed, the service MUST fail the pending request terminally and retire the affected bridge session if precreated replay does not reconnect and resend successfully.

@@ -102,9 +102,17 @@ def is_previous_response_not_found_error(
 ) -> bool:
     if code == PREVIOUS_RESPONSE_NOT_FOUND_CODE:
         return True
-    if code != "invalid_request_error" or param != "previous_response_id":
-        return False
-    return is_previous_response_not_found_message(message)
+    if param is None:
+        return (
+            code in {None, "invalid_request_error"}
+            and message is not None
+            and " ".join(message.lower().split()) == "invalid `previous_response_id`."
+        )
+    return (
+        code == "invalid_request_error"
+        and param == "previous_response_id"
+        and is_previous_response_not_found_message(message)
+    )
 
 
 def response_failed_event(

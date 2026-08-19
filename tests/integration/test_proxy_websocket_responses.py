@@ -6477,7 +6477,7 @@ def test_backend_responses_websocket_masks_pretty_previous_response_not_found_fr
     assert "resp_chatgpt_pretty_prev_anchor" not in serialized
 
 
-def test_backend_responses_websocket_masks_previous_response_not_found_when_message_omits_response_id(
+def test_backend_responses_websocket_recovers_invalid_previous_response_shorthand(
     app_instance,
     monkeypatch,
 ):
@@ -6515,9 +6515,7 @@ def test_backend_responses_websocket_masks_previous_response_not_found_when_mess
                             "status": 400,
                             "error": {
                                 "type": "invalid_request_error",
-                                "code": "previous_response_not_found",
-                                "message": "Previous response not found.",
-                                "param": "previous_response_id",
+                                "message": "Invalid `previous_response_id`.",
                             },
                         },
                         separators=(",", ":"),
