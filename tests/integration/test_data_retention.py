@@ -16,6 +16,8 @@ from app.db.models import (
     Account,
     AccountStatus,
     AdditionalUsageHistory,
+    ApiKey,
+    ApiKeyVerboseCapture,
     RequestLog,
     RequestLogHistoricalFact,
     UsageHistory,
@@ -100,6 +102,37 @@ async def test_request_log_pruning_respects_watermark_and_preserves_totals(async
         await _add_log(logs_repo, account_id="acc_ret", request_id="req_60d", requested_at=now - timedelta(days=60))
         await _add_log(logs_repo, account_id="acc_ret", request_id="req_40d", requested_at=now - timedelta(days=40))
         await _add_log(logs_repo, account_id="acc_ret", request_id="req_1d", requested_at=now - timedelta(days=1))
+        session.add(
+            ApiKey(
+                id="key_retention_capture",
+                name="Retention capture",
+                key_hash="hash_retention_capture",
+                key_prefix="sk-retention",
+            )
+        )
+        session.add_all(
+            [
+                ApiKeyVerboseCapture(
+                    api_key_id="key_retention_capture",
+                    request_id="req_capture_60d",
+                    method="POST",
+                    path="/v1/responses",
+                    content_type="application/json",
+                    payload="{}",
+                    captured_at=now - timedelta(days=60),
+                ),
+                ApiKeyVerboseCapture(
+                    api_key_id="key_retention_capture",
+                    request_id="req_capture_1d",
+                    method="POST",
+                    path="/v1/responses",
+                    content_type="application/json",
+                    payload="{}",
+                    captured_at=now - timedelta(days=1),
+                ),
+            ]
+        )
+        await session.commit()
 
     await run_fold_pass(now=now)
 
@@ -129,8 +162,12 @@ async def test_request_log_pruning_respects_watermark_and_preserves_totals(async
     async with SessionLocal() as session:
         remaining = (await session.execute(select(RequestLog.request_id))).scalars().all()
         projected = (await session.execute(select(RequestLogHistoricalFact.request_id))).scalars().all()
+        remaining_captures = (
+            await session.execute(select(ApiKeyVerboseCapture.request_id))
+        ).scalars().all()
     assert sorted(remaining) == ["req_1d"]
     assert sorted(projected) == ["req_40d", "req_60d"]
+    assert remaining_captures == ["req_capture_1d"]
 
     assert await _request_usage() == before
     async with SessionLocal() as session:

@@ -15,6 +15,7 @@ class RequestLogCostBreakdown(DashboardModel):
 
 
 class RequestLogEntry(DashboardModel):
+    request_log_id: int | None = None
     requested_at: datetime
     account_id: str | None = None
     plan_type: str | None = None
@@ -54,6 +55,18 @@ class RequestLogEntry(DashboardModel):
     cost_breakdown: RequestLogCostBreakdown = Field(default_factory=RequestLogCostBreakdown)
     latency_ms: int | None = None
     latency_first_token_ms: int | None = None
+    has_captured_input: bool = False
+
+
+class RequestLogVerboseCaptureResponse(DashboardModel):
+    request_log_id: int
+    request_id: str
+    method: str
+    path: str
+    content_type: str
+    payload: str
+    truncated: bool
+    captured_at: datetime
 
 
 class RequestLogsResponse(DashboardModel):

@@ -29,6 +29,7 @@ const EXPECTED_ENDPOINTS = [
 	"GET /api/dashboard/projections",
 	"GET /api/request-logs",
 	"GET /api/request-logs/options",
+	"GET /api/request-logs/:requestLogId/captured-input",
 	// accounts
 	"GET /api/accounts",
 	"POST /api/accounts/import",
@@ -99,6 +100,8 @@ const EXPECTED_ENDPOINTS = [
 	"PATCH /api/api-keys/:keyId",
 	"DELETE /api/api-keys/:keyId",
 	"POST /api/api-keys/:keyId/regenerate",
+	"POST /api/api-keys/:keyId/verbose-capture",
+	"DELETE /api/api-keys/:keyId/verbose-capture",
 	"GET /api/api-keys/:keyId/trends",
 	"GET /api/api-keys/:keyId/usage-7d",
 	// automations

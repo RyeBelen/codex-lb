@@ -56,6 +56,8 @@ function renderApisPage({
 	updateMutation = createMutationMock(),
 	deleteMutation = createMutationMock(),
 	regenerateMutation = createMutationMock(),
+	armVerboseCaptureMutation = createMutationMock(),
+	disableVerboseCaptureMutation = createMutationMock(),
 }: {
 	apiKeys?: ReturnType<typeof createApiKey>[];
 	apiKeysQuery?: QueryMock<ReturnType<typeof createApiKey>[]>;
@@ -65,6 +67,8 @@ function renderApisPage({
 	updateMutation?: MutationMock;
 	deleteMutation?: MutationMock;
 	regenerateMutation?: MutationMock;
+	armVerboseCaptureMutation?: MutationMock;
+	disableVerboseCaptureMutation?: MutationMock;
 } = {}) {
 	hookMocks.useApiKeys.mockReturnValue({
 		apiKeysQuery,
@@ -72,6 +76,8 @@ function renderApisPage({
 		updateMutation,
 		deleteMutation,
 		regenerateMutation,
+		armVerboseCaptureMutation,
+		disableVerboseCaptureMutation,
 	});
 	hookMocks.useApiKeyTrends.mockReturnValue(trendsQuery);
 	hookMocks.useApiKeyUsage7Day.mockReturnValue(usage7DayQuery);

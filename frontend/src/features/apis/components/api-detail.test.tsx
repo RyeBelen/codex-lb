@@ -17,6 +17,8 @@ const callbacks = {
 	onDelete: vi.fn(),
 	onRegenerate: vi.fn(),
 	onToggleActive: vi.fn(),
+	onArmVerboseCapture: vi.fn(),
+	onDisableVerboseCapture: vi.fn(),
 };
 
 function renderApiDetail(overrides: Partial<ComponentProps<typeof ApiDetail>> = {}) {
@@ -36,6 +38,33 @@ function renderApiDetail(overrides: Partial<ComponentProps<typeof ApiDetail>> = 
 }
 
 describe("ApiDetail", () => {
+	it("arms bounded verbose capture with the configured request count", async () => {
+		const user = userEvent.setup();
+		const onArmVerboseCapture = vi.fn();
+		const apiKey = createApiKey({ name: "Verbose Key", verboseCaptureRemaining: 0 });
+		renderApiDetail({ apiKey, onArmVerboseCapture });
+
+		const countInput = screen.getByRole("spinbutton", { name: "Requests to capture" });
+		expect(countInput).toHaveValue(10);
+		await user.clear(countInput);
+		await user.type(countInput, "4");
+		await user.click(screen.getByRole("button", { name: "Arm capture" }));
+
+		expect(onArmVerboseCapture).toHaveBeenCalledWith(apiKey, 4);
+	});
+
+	it("shows the remaining verbose capture budget and allows disabling it", async () => {
+		const user = userEvent.setup();
+		const onDisableVerboseCapture = vi.fn();
+		const apiKey = createApiKey({ verboseCaptureRemaining: 3 });
+		renderApiDetail({ apiKey, onDisableVerboseCapture });
+
+		expect(screen.getByText("3 requests remaining")).toBeInTheDocument();
+		await user.click(screen.getByRole("button", { name: "Disable capture" }));
+
+		expect(onDisableVerboseCapture).toHaveBeenCalledWith(apiKey);
+	});
+
 	it("renders the empty state when no key is selected", () => {
 		renderWithProviders(
 			<ApiDetail

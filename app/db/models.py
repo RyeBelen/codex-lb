@@ -890,6 +890,12 @@ class ApiKey(Base):
     )
     expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    verbose_capture_remaining: Mapped[int] = mapped_column(
+        Integer,
+        default=0,
+        server_default=text("0"),
+        nullable=False,
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
     last_used_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
@@ -911,6 +917,35 @@ class ApiKey(Base):
         cascade="all, delete-orphan",
         lazy="selectin",
     )
+    verbose_captures: Mapped[list["ApiKeyVerboseCapture"]] = relationship(
+        "ApiKeyVerboseCapture",
+        back_populates="api_key",
+        cascade="all, delete-orphan",
+    )
+
+
+class ApiKeyVerboseCapture(Base):
+    __tablename__ = "api_key_verbose_captures"
+    __table_args__ = (
+        UniqueConstraint("api_key_id", "request_id", name="uq_api_key_verbose_capture_request"),
+        Index("idx_api_key_verbose_captures_captured_at", "captured_at"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    api_key_id: Mapped[str] = mapped_column(
+        String,
+        ForeignKey("api_keys.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    request_id: Mapped[str] = mapped_column(String, nullable=False)
+    method: Mapped[str] = mapped_column(String, nullable=False)
+    path: Mapped[str] = mapped_column(Text, nullable=False)
+    content_type: Mapped[str] = mapped_column(String, nullable=False)
+    payload: Mapped[str] = mapped_column(Text, nullable=False)
+    truncated: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false(), nullable=False)
+    captured_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+
+    api_key: Mapped["ApiKey"] = relationship("ApiKey", back_populates="verbose_captures")
 
 
 class ApiKeyAccountAssignment(Base):

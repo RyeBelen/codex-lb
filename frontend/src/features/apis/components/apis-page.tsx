@@ -41,6 +41,8 @@ export function ApisPage() {
 		updateMutation,
 		deleteMutation,
 		regenerateMutation,
+		armVerboseCaptureMutation,
+		disableVerboseCaptureMutation,
 	} = useApiKeys();
 
 	const createDialog = useDialogState();
@@ -82,13 +84,17 @@ export function ApisPage() {
 		createMutation.isPending ||
 		updateMutation.isPending ||
 		deleteMutation.isPending ||
-		regenerateMutation.isPending;
+		regenerateMutation.isPending ||
+		armVerboseCaptureMutation.isPending ||
+		disableVerboseCaptureMutation.isPending;
 
 	const mutationError =
 		getErrorMessageOrNull(createMutation.error) ||
 		getErrorMessageOrNull(updateMutation.error) ||
 		getErrorMessageOrNull(deleteMutation.error) ||
-		getErrorMessageOrNull(regenerateMutation.error);
+		getErrorMessageOrNull(regenerateMutation.error) ||
+		getErrorMessageOrNull(armVerboseCaptureMutation.error) ||
+		getErrorMessageOrNull(disableVerboseCaptureMutation.error);
 	const listError = getErrorMessageOrNull(apiKeysQuery.error);
 	const usage7DayError = getErrorMessageOrNull(usage7DayQuery.error);
 	const pageError = mutationError || (apiKeysQuery.data ? listError : null);
@@ -173,6 +179,14 @@ export function ApisPage() {
 										createdDialog.show(result.key);
 									})
 									.catch(() => null);
+							}}
+							onArmVerboseCapture={(apiKey, requestCount) => {
+								void armVerboseCaptureMutation
+									.mutateAsync({ keyId: apiKey.id, requestCount })
+									.catch(() => null);
+							}}
+							onDisableVerboseCapture={(apiKey) => {
+								void disableVerboseCaptureMutation.mutateAsync(apiKey.id).catch(() => null);
 							}}
 						/>
 					</div>

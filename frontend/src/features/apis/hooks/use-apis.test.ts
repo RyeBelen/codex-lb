@@ -16,6 +16,8 @@ const apiKeysApiMocks = vi.hoisted(() => ({
 	updateApiKey: vi.fn(),
 	deleteApiKey: vi.fn(),
 	regenerateApiKey: vi.fn(),
+	armApiKeyVerboseCapture: vi.fn(),
+	disableApiKeyVerboseCapture: vi.fn(),
 	listModels: vi.fn(),
 	API_KEYS_BASE_PATH: "/api/api-keys",
 }));
@@ -31,6 +33,8 @@ const apiMocks = {
 	updateApiKey: apiKeysApiMocks.updateApiKey,
 	deleteApiKey: apiKeysApiMocks.deleteApiKey,
 	regenerateApiKey: apiKeysApiMocks.regenerateApiKey,
+	armApiKeyVerboseCapture: apiKeysApiMocks.armApiKeyVerboseCapture,
+	disableApiKeyVerboseCapture: apiKeysApiMocks.disableApiKeyVerboseCapture,
 	getApiKeyTrends: apisApiMocks.getApiKeyTrends,
 	getApiKeyUsage7Day: apisApiMocks.getApiKeyUsage7Day,
 };
@@ -77,6 +81,8 @@ describe("useApiKeys", () => {
 		apiMocks.updateApiKey.mockResolvedValue(updated);
 		apiMocks.deleteApiKey.mockResolvedValue(undefined);
 		apiMocks.regenerateApiKey.mockResolvedValue(regenerated);
+		apiMocks.armApiKeyVerboseCapture.mockResolvedValue(updated);
+		apiMocks.disableApiKeyVerboseCapture.mockResolvedValue(updated);
 
 		const { useApiKeys } = await import("@/features/apis/hooks/use-apis");
 		const { result } = renderHook(() => useApiKeys(), {
@@ -93,11 +99,15 @@ describe("useApiKeys", () => {
 		});
 		await result.current.deleteMutation.mutateAsync("key_2");
 		await result.current.regenerateMutation.mutateAsync("key_1");
+		await result.current.armVerboseCaptureMutation.mutateAsync({ keyId: "key_1", requestCount: 10 });
+		await result.current.disableVerboseCaptureMutation.mutateAsync("key_1");
 
 		expect(apiMocks.createApiKey).toHaveBeenCalledWith({ name: "Created key" });
 		expect(apiMocks.updateApiKey).toHaveBeenCalledWith("key_1", { name: "Updated key" });
 		expect(apiMocks.deleteApiKey).toHaveBeenCalledWith("key_2");
 		expect(apiMocks.regenerateApiKey).toHaveBeenCalledWith("key_1");
+		expect(apiMocks.armApiKeyVerboseCapture).toHaveBeenCalledWith("key_1", { requestCount: 10 });
+		expect(apiMocks.disableApiKeyVerboseCapture).toHaveBeenCalledWith("key_1");
 		expect(toastMocks.success).toHaveBeenCalledWith("API key created");
 		expect(toastMocks.success).toHaveBeenCalledWith("API key updated");
 		expect(toastMocks.success).toHaveBeenCalledWith("API key deleted");
@@ -113,6 +123,8 @@ describe("useApiKeys", () => {
 		apiMocks.updateApiKey.mockRejectedValue(new Error("boom update"));
 		apiMocks.deleteApiKey.mockRejectedValue(new Error("boom delete"));
 		apiMocks.regenerateApiKey.mockRejectedValue(new Error("boom regenerate"));
+		apiMocks.armApiKeyVerboseCapture.mockRejectedValue(new Error("boom arm"));
+		apiMocks.disableApiKeyVerboseCapture.mockRejectedValue(new Error("boom disable"));
 
 		const { useApiKeys } = await import("@/features/apis/hooks/use-apis");
 		const { result } = renderHook(() => useApiKeys(), {

@@ -6,6 +6,7 @@ import {
   ApiKeyListSchema,
   ApiKeySchema,
   ApiKeyUpdateRequestSchema,
+  ApiKeyVerboseCaptureRequestSchema,
   ModelsResponseSchema,
 } from "@/features/api-keys/schemas";
 
@@ -38,6 +39,22 @@ export function regenerateApiKey(keyId: string) {
   return post(
     `${API_KEYS_BASE_PATH}/${encodeURIComponent(keyId)}/regenerate`,
     ApiKeyCreateResponseSchema,
+  );
+}
+
+export function armApiKeyVerboseCapture(keyId: string, payload: unknown) {
+  const validated = ApiKeyVerboseCaptureRequestSchema.parse(payload);
+  return post(
+    `${API_KEYS_BASE_PATH}/${encodeURIComponent(keyId)}/verbose-capture`,
+    ApiKeySchema,
+    { body: validated },
+  );
+}
+
+export function disableApiKeyVerboseCapture(keyId: string) {
+  return del(
+    `${API_KEYS_BASE_PATH}/${encodeURIComponent(keyId)}/verbose-capture`,
+    ApiKeySchema,
   );
 }
 

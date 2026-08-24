@@ -86,6 +86,10 @@ const ApiKeyUpdatePayloadSchema = z.looseObject({
     .optional(),
 });
 
+const ApiKeyVerboseCapturePayloadSchema = z.object({
+  requestCount: z.number().int().min(1).max(100),
+});
+
 const AccountAliasPayloadSchema = z.object({
   alias: z.string().max(255).nullable(),
 });
@@ -762,6 +766,27 @@ export const handlers = [
     return HttpResponse.json(
       requestLogOptionsFromEntries(filtered, apiKeyFiltered),
     );
+  }),
+
+  http.get("/api/request-logs/:requestLogId/captured-input", ({ params }) => {
+    const requestLogId = Number(params.requestLogId);
+    const entry = state.requestLogs.find((requestLog) => requestLog.requestLogId === requestLogId);
+    if (!entry?.hasCapturedInput) {
+      return HttpResponse.json(
+        { error: { code: "not_found", message: "Captured input not found" } },
+        { status: 404 },
+      );
+    }
+    return HttpResponse.json({
+      requestLogId,
+      requestId: entry.requestId,
+      method: "POST",
+      path: "/v1/responses",
+      contentType: "application/json",
+      payload: JSON.stringify({ model: entry.model, input: "Captured test input" }),
+      truncated: false,
+      capturedAt: entry.requestedAt,
+    });
   }),
 
   http.get("/api/accounts", () => {
@@ -2176,6 +2201,38 @@ export const handlers = [
     state.apiKeys = state.apiKeys.map((item) =>
       item.id === keyId ? updated : item,
     );
+    return HttpResponse.json(updated);
+  }),
+
+  http.post("/api/api-keys/:keyId/verbose-capture", async ({ params, request }) => {
+    const keyId = String(params.keyId);
+    const existing = findApiKey(keyId);
+    if (!existing) {
+      return HttpResponse.json(
+        { error: { code: "not_found", message: "API key not found" } },
+        { status: 404 },
+      );
+    }
+    const payload = await parseJsonBody(request, ApiKeyVerboseCapturePayloadSchema);
+    const updated = createApiKey({
+      ...existing,
+      verboseCaptureRemaining: payload?.requestCount ?? existing.verboseCaptureRemaining,
+    });
+    state.apiKeys = state.apiKeys.map((item) => item.id === keyId ? updated : item);
+    return HttpResponse.json(updated);
+  }),
+
+  http.delete("/api/api-keys/:keyId/verbose-capture", ({ params }) => {
+    const keyId = String(params.keyId);
+    const existing = findApiKey(keyId);
+    if (!existing) {
+      return HttpResponse.json(
+        { error: { code: "not_found", message: "API key not found" } },
+        { status: 404 },
+      );
+    }
+    const updated = createApiKey({ ...existing, verboseCaptureRemaining: 0 });
+    state.apiKeys = state.apiKeys.map((item) => item.id === keyId ? updated : item);
     return HttpResponse.json(updated);
   }),
 

@@ -124,6 +124,10 @@ async def _assert_guest_write_denied(client: AsyncClient) -> None:
     assert blocked_opencode_export.status_code == 403
     assert blocked_opencode_export.json()["error"]["code"] == "read_only_access"
 
+    blocked_captured_input = await client.get("/api/request-logs/1/captured-input")
+    assert blocked_captured_input.status_code == 403
+    assert blocked_captured_input.json()["error"]["code"] == "read_only_access"
+
     blocked_alias = await client.put("/api/accounts/missing/alias", json={"alias": "Guest Alias"})
     assert blocked_alias.status_code == 403
     assert blocked_alias.json()["error"]["code"] == "read_only_access"

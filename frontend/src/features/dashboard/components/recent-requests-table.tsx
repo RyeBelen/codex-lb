@@ -1,5 +1,6 @@
 import { Inbox } from "lucide-react";
 import { useMemo, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
 
 import { isEmailLabel } from "@/components/blur-email";
 import { CopyButton } from "@/components/copy-button";
@@ -25,7 +26,9 @@ import {
 } from "@/components/ui/table";
 import { PaginationControls } from "@/features/dashboard/components/filters/pagination-controls";
 import { RequestArchivePanel } from "@/features/conversation-archive/components/request-archive-panel";
+import { getRequestLogCapturedInput } from "@/features/dashboard/api";
 import type { AccountSummary, RequestLog } from "@/features/dashboard/schemas";
+import { useAuthStore } from "@/features/auth/hooks/use-auth";
 import { REQUEST_STATUS_LABELS } from "@/utils/constants";
 import {
   formatDateTimeInline,
@@ -73,6 +76,55 @@ const REQUEST_KIND_LABELS: Record<string, string> = {
   prewarm: "Prewarm",
   compaction: "Compaction",
 };
+
+function formatCapturedPayload(payload: string): string {
+  try {
+    return JSON.stringify(JSON.parse(payload), null, 2);
+  } catch {
+    return payload;
+  }
+}
+
+function CapturedInputPanel({ request }: { request: RequestLog }) {
+  const canWrite = useAuthStore((state) => state.canWrite);
+  const capturedInputQuery = useQuery({
+    queryKey: ["request-logs", "captured-input", request.requestLogId],
+    queryFn: () => getRequestLogCapturedInput(request.requestLogId!),
+    enabled: Boolean(canWrite && request.requestLogId),
+  });
+
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center justify-between gap-2">
+        <h3 className="text-sm font-medium">Captured Input</h3>
+        {capturedInputQuery.data ? (
+          <CopyButton value={capturedInputQuery.data.payload} label="Copy Captured Input" iconOnly />
+        ) : null}
+      </div>
+      {!canWrite ? (
+        <p className="rounded-md bg-muted/50 p-3 text-xs text-muted-foreground">
+          Administrator access is required to view captured input.
+        </p>
+      ) : capturedInputQuery.isPending ? (
+        <p className="rounded-md bg-muted/50 p-3 text-xs text-muted-foreground">Loading captured input...</p>
+      ) : capturedInputQuery.error ? (
+        <p className="rounded-md bg-destructive/10 p-3 text-xs text-destructive">
+          Captured input could not be loaded.
+        </p>
+      ) : capturedInputQuery.data ? (
+        <div className="space-y-2 rounded-md bg-muted/50 p-3">
+          <p className="text-[11px] text-muted-foreground">
+            {capturedInputQuery.data.method} {capturedInputQuery.data.path}
+            {capturedInputQuery.data.truncated ? " · truncated to 256 KiB" : ""}
+          </p>
+          <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-words font-mono text-xs leading-relaxed">
+            {formatCapturedPayload(capturedInputQuery.data.payload)}
+          </pre>
+        </div>
+      ) : null}
+    </div>
+  );
+}
 
 export type RecentRequestsTableProps = {
   requests: RequestLog[];
@@ -422,6 +474,10 @@ export function RecentRequestsTable({
                 compactCopy
               />
             </div>
+
+            {selectedRequest?.hasCapturedInput ? (
+              <CapturedInputPanel request={selectedRequest} />
+            ) : null}
 
             <RequestArchivePanel
               requestId={selectedRequest?.archiveRequestId ?? selectedRequest?.requestId}

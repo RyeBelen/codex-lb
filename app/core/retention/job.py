@@ -10,6 +10,7 @@ from app.core.utils.time import utcnow
 from app.db.models import (
     AccountUsageRollupState,
     AdditionalUsageHistory,
+    ApiKeyVerboseCapture,
     RequestLog,
     RequestLogHistoricalFact,
     UsageHistory,
@@ -94,6 +95,15 @@ async def _prune_request_logs(cutoff: datetime, *, now: datetime) -> int:
                         )
                     return total
                 effective_cutoff = min(cutoff, watermark - FOLD_LAG)
+                capture_ids = select(ApiKeyVerboseCapture.id).where(
+                    ApiKeyVerboseCapture.captured_at < effective_cutoff
+                ).limit(BATCH_SIZE)
+                capture_result = await session.execute(
+                    delete(ApiKeyVerboseCapture)
+                    .where(ApiKeyVerboseCapture.id.in_(capture_ids))
+                    .returning(ApiKeyVerboseCapture.id)
+                )
+                captures_deleted = len(capture_result.scalars().all())
                 selected_ids = tuple(
                     (
                         await session.execute(
@@ -106,6 +116,9 @@ async def _prune_request_logs(cutoff: datetime, *, now: datetime) -> int:
                     ).scalars()
                 )
                 if not selected_ids:
+                    await session.commit()
+                    if captures_deleted == BATCH_SIZE:
+                        continue
                     return total
                 await session.execute(
                     insert(RequestLogHistoricalFact).from_select(
@@ -140,7 +153,7 @@ async def _prune_request_logs(cutoff: datetime, *, now: datetime) -> int:
                 await session.commit()
         deleted = len(deleted_ids)
         total += deleted
-        if deleted < BATCH_SIZE:
+        if deleted < BATCH_SIZE and captures_deleted < BATCH_SIZE:
             return total
 
 

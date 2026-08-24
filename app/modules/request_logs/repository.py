@@ -17,7 +17,7 @@ from app.core.usage.logs import RequestLogLike, calculated_cost_from_log
 from app.core.usage.types import BucketModelAggregate, RequestActivityAggregate, UsageSummaryLogsAggregate
 from app.core.utils.request_id import ensure_request_id
 from app.core.utils.time import utcnow
-from app.db.models import Account, ApiKey, RequestKind, RequestLog
+from app.db.models import Account, ApiKey, ApiKeyVerboseCapture, RequestKind, RequestLog
 from app.db.session import sqlite_writer_section
 from app.modules.request_logs.history import request_history_selectable
 
@@ -76,6 +76,37 @@ class RequestLogsRepository:
             )
         )
         return list(result.scalars().all())
+
+    async def get_by_id(self, request_log_id: int) -> RequestLog | None:
+        return await self._session.get(RequestLog, request_log_id)
+
+    async def get_verbose_capture_pairs(self, logs: list[RequestLog]) -> set[tuple[str, str]]:
+        pairs = {(log.api_key_id, log.request_id) for log in logs if log.api_key_id}
+        if not pairs:
+            return set()
+        api_key_ids = {api_key_id for api_key_id, _request_id in pairs}
+        request_ids = {request_id for _api_key_id, request_id in pairs}
+        result = await self._session.execute(
+            select(ApiKeyVerboseCapture.api_key_id, ApiKeyVerboseCapture.request_id).where(
+                ApiKeyVerboseCapture.api_key_id.in_(api_key_ids),
+                ApiKeyVerboseCapture.request_id.in_(request_ids),
+            )
+        )
+        return {(row.api_key_id, row.request_id) for row in result.all()} & pairs
+
+    async def get_verbose_capture_for_log(self, request_log_id: int) -> ApiKeyVerboseCapture | None:
+        result = await self._session.execute(
+            select(ApiKeyVerboseCapture)
+            .join(
+                RequestLog,
+                (RequestLog.api_key_id == ApiKeyVerboseCapture.api_key_id)
+                & (RequestLog.request_id == ApiKeyVerboseCapture.request_id),
+            )
+            .where(RequestLog.id == request_log_id)
+            .order_by(ApiKeyVerboseCapture.id.desc())
+            .limit(1)
+        )
+        return result.scalar_one_or_none()
 
     async def find_latest_account_id_for_response_id(
         self,

@@ -4,13 +4,19 @@ from datetime import datetime
 
 from fastapi import APIRouter, Depends, Query
 
-from app.core.auth.dependencies import set_dashboard_error_format, validate_dashboard_session
+from app.core.auth.dependencies import (
+    require_dashboard_write_access,
+    set_dashboard_error_format,
+    validate_dashboard_session,
+)
+from app.core.exceptions import DashboardNotFoundError
 from app.dependencies import RequestLogsContext, get_request_logs_context
 from app.modules.request_logs.schemas import (
     RequestLogApiKeyOption,
     RequestLogFilterOptionsResponse,
     RequestLogModelOption,
     RequestLogsResponse,
+    RequestLogVerboseCaptureResponse,
 )
 from app.modules.request_logs.service import RequestLogModelOption as ServiceRequestLogModelOption
 
@@ -21,6 +27,27 @@ router = APIRouter(
 )
 
 _MODEL_OPTION_DELIMITER = ":::"
+
+
+@router.get("/{request_log_id}/captured-input", response_model=RequestLogVerboseCaptureResponse)
+async def get_request_log_captured_input(
+    request_log_id: int,
+    _admin_access=Depends(require_dashboard_write_access),
+    context: RequestLogsContext = Depends(get_request_logs_context),
+) -> RequestLogVerboseCaptureResponse:
+    capture = await context.service.get_verbose_capture(request_log_id)
+    if capture is None:
+        raise DashboardNotFoundError(f"Captured input not found for request log: {request_log_id}")
+    return RequestLogVerboseCaptureResponse(
+        request_log_id=capture.request_log_id,
+        request_id=capture.request_id,
+        method=capture.method,
+        path=capture.path,
+        content_type=capture.content_type,
+        payload=capture.payload,
+        truncated=capture.truncated,
+        captured_at=capture.captured_at,
+    )
 
 
 def _parse_model_option(value: str) -> ServiceRequestLogModelOption | None:

@@ -1,5 +1,6 @@
 import {
 	Ellipsis,
+	Bug,
 	KeyRound,
 	Pencil,
 	Play,
@@ -9,6 +10,7 @@ import {
 import { lazy, Suspense, useMemo, useState } from "react";
 import { AlertMessage } from "@/components/alert-message";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import {
 	DropdownMenu,
 	DropdownMenuContent,
@@ -47,6 +49,8 @@ export type ApiDetailProps = {
 	onDelete: (apiKey: ApiKey) => void;
 	onRegenerate: (apiKey: ApiKey) => void;
 	onToggleActive: (apiKey: ApiKey) => void;
+	onArmVerboseCapture: (apiKey: ApiKey, requestCount: number) => void;
+	onDisableVerboseCapture: (apiKey: ApiKey) => void;
 };
 
 function accumulateData(
@@ -70,8 +74,11 @@ export function ApiDetail({
 	onDelete,
 	onRegenerate,
 	onToggleActive,
+	onArmVerboseCapture,
+	onDisableVerboseCapture,
 }: ApiDetailProps) {
 	const [showAccumulated, setShowAccumulated] = useState(false);
+	const [verboseRequestCount, setVerboseRequestCount] = useState(10);
 
 	const chartData = useMemo(() => {
 		if (!trends) return null;
@@ -221,6 +228,57 @@ export function ApiDetail({
 				usageMessage={usageMessage}
 				allowUsageSummaryFallback={false}
 			/>
+
+			<div className="space-y-3 rounded-lg border bg-muted/30 p-4">
+				<div>
+					<h3 className="flex items-center gap-2 text-sm font-semibold">
+						<Bug className="size-4" />
+						Verbose input capture
+					</h3>
+					<p className="mt-1 text-xs text-muted-foreground">
+						Capture a bounded set of JSON request inputs, then disable automatically.
+					</p>
+				</div>
+				{apiKey.verboseCaptureRemaining > 0 ? (
+					<div className="flex flex-wrap items-center justify-between gap-3">
+						<p className="text-xs font-medium tabular-nums">
+							{apiKey.verboseCaptureRemaining} request{apiKey.verboseCaptureRemaining === 1 ? "" : "s"} remaining
+						</p>
+						<Button
+							type="button"
+							size="sm"
+							variant="outline"
+							onClick={() => onDisableVerboseCapture(apiKey)}
+							disabled={busy}
+						>
+							Disable capture
+						</Button>
+					</div>
+				) : (
+					<div className="flex flex-wrap items-end gap-2">
+						<label className="grid gap-1 text-xs font-medium" htmlFor={`verbose-count-${apiKey.id}`}>
+							Requests to capture
+							<Input
+								id={`verbose-count-${apiKey.id}`}
+								type="number"
+								min={1}
+								max={100}
+								value={verboseRequestCount}
+								onChange={(event) => setVerboseRequestCount(Number(event.target.value))}
+								className="h-8 w-28"
+							/>
+						</label>
+						<Button
+							type="button"
+							size="sm"
+							onClick={() => onArmVerboseCapture(apiKey, verboseRequestCount)}
+							disabled={busy || !Number.isInteger(verboseRequestCount) || verboseRequestCount < 1 || verboseRequestCount > 100}
+						>
+							Arm capture
+						</Button>
+					</div>
+				)}
+			</div>
 
 			<div className="flex flex-wrap gap-2 border-t pt-4">
 				{apiKey.isActive ? (

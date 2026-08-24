@@ -26,6 +26,7 @@ from app.core.crypto import TokenEncryptor
 from app.core.exceptions import DashboardAuthError, DashboardPermissionError, ProxyAuthError, ProxyUpstreamError
 from app.core.request_locality import is_local_request
 from app.core.upstream_proxy import UpstreamProxyRouteError, resolve_upstream_route
+from app.core.utils.request_id import ensure_request_id
 from app.core.utils.time import utcnow
 from app.db.models import AccountStatus
 from app.db.session import get_background_session
@@ -82,7 +83,38 @@ async def validate_proxy_api_key_authorization(
     if not token:
         raise ProxyAuthError("Missing API key in Authorization header")
 
-    return await _validate_api_key_token(token)
+    api_key = await _validate_api_key_token(token)
+    if isinstance(request, Request):
+        await _capture_verbose_request_if_eligible(request, api_key)
+    return api_key
+
+
+async def _capture_verbose_request_if_eligible(request: Request, api_key: ApiKeyData) -> None:
+    content_type = request.headers.get("content-type", "")
+    media_type = content_type.split(";", 1)[0].strip().lower()
+    if media_type != "application/json" and not media_type.endswith("+json"):
+        return
+    try:
+        body = await request.body()
+        if not body:
+            return
+        async with get_background_session() as session:
+            service = ApiKeysService(ApiKeysRepository(session))
+            await service.capture_verbose_request(
+                api_key=api_key,
+                request_id=ensure_request_id(),
+                method=request.method,
+                path=request.url.path,
+                content_type=content_type,
+                body=body,
+            )
+    except Exception:
+        logger.warning(
+            "Failed to capture verbose API-key request key_id=%s request_id=%s",
+            api_key.id,
+            ensure_request_id(),
+            exc_info=True,
+        )
 
 
 async def _validate_api_key_token(token: str) -> ApiKeyData:

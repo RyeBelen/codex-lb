@@ -49,6 +49,18 @@ class RequestLogsPage:
     has_more: bool
 
 
+@dataclass(frozen=True, slots=True)
+class RequestLogVerboseCapture:
+    request_log_id: int
+    request_id: str
+    method: str
+    path: str
+    content_type: str
+    payload: str
+    truncated: bool
+    captured_at: datetime
+
+
 class RequestLogsService:
     def __init__(self, repo: RequestLogsRepository) -> None:
         self._repo = repo
@@ -89,10 +101,12 @@ class RequestLogsService:
         )
         api_key_ids = [log.api_key_id for log in logs if log.api_key_id]
         api_key_name_by_id = await self._repo.get_api_key_names_by_ids(api_key_ids)
+        verbose_capture_pairs = await self._repo.get_verbose_capture_pairs(logs)
         requests = [
             to_request_log_entry(
                 log,
                 api_key_name=api_key_name_by_id.get(log.api_key_id or ""),
+                has_captured_input=(log.api_key_id, log.request_id) in verbose_capture_pairs,
             )
             for log in logs
         ]
@@ -100,6 +114,24 @@ class RequestLogsService:
             requests=requests,
             total=total,
             has_more=offset + limit < total,
+        )
+
+    async def get_verbose_capture(self, request_log_id: int) -> RequestLogVerboseCapture | None:
+        log = await self._repo.get_by_id(request_log_id)
+        if log is None:
+            return None
+        capture = await self._repo.get_verbose_capture_for_log(request_log_id)
+        if capture is None:
+            return None
+        return RequestLogVerboseCapture(
+            request_log_id=request_log_id,
+            request_id=log.request_id,
+            method=capture.method,
+            path=capture.path,
+            content_type=capture.content_type,
+            payload=capture.payload,
+            truncated=capture.truncated,
+            captured_at=capture.captured_at,
         )
 
     async def list_filter_options(

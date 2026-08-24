@@ -355,6 +355,7 @@ export function createRequestLogEntry(
 	overrides: Partial<RequestLogEntry> = {},
 ): RequestLogEntry {
 	return RequestLogSchema.parse({
+		requestLogId: 1,
 		requestedAt: offsetIso(-1),
 		accountId: "acc_primary",
 		apiKeyId: "key_1",
@@ -386,6 +387,7 @@ export function createRequestLogEntry(
 			totalUsd: 0.0132,
 		},
 		latencyMs: 920,
+		hasCapturedInput: false,
 		...overrides,
 	});
 }
@@ -671,6 +673,7 @@ export function createApiKey(overrides: Partial<ApiKey> = {}): ApiKey {
 		transportPolicyOverride: null,
 		expiresAt: null,
 		isActive: true,
+		verboseCaptureRemaining: 0,
 		accountAssignmentScopeEnabled: false,
 		sourceAssignmentScopeEnabled: false,
 		assignedAccountIds: [],

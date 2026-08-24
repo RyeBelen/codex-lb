@@ -2,8 +2,10 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 
 import {
+  armApiKeyVerboseCapture,
   createApiKey,
   deleteApiKey,
+  disableApiKeyVerboseCapture,
   listApiKeys,
   regenerateApiKey,
   updateApiKey,
@@ -75,12 +77,37 @@ export function useApiKeys() {
     },
   });
 
+  const armVerboseCaptureMutation = useMutation({
+    mutationFn: ({ keyId, requestCount }: { keyId: string; requestCount: number }) =>
+      armApiKeyVerboseCapture(keyId, { requestCount }),
+    onSuccess: () => {
+      toast.success("Verbose capture armed");
+      void queryClient.invalidateQueries({ queryKey: ["api-keys", "list"] });
+    },
+    onError: (error: Error) => {
+      toast.error(error.message || "Failed to arm verbose capture");
+    },
+  });
+
+  const disableVerboseCaptureMutation = useMutation({
+    mutationFn: (keyId: string) => disableApiKeyVerboseCapture(keyId),
+    onSuccess: () => {
+      toast.success("Verbose capture disabled");
+      void queryClient.invalidateQueries({ queryKey: ["api-keys", "list"] });
+    },
+    onError: (error: Error) => {
+      toast.error(error.message || "Failed to disable verbose capture");
+    },
+  });
+
   return {
     apiKeysQuery,
     createMutation,
     updateMutation,
     deleteMutation,
     regenerateMutation,
+    armVerboseCaptureMutation,
+    disableVerboseCaptureMutation,
   };
 }
 

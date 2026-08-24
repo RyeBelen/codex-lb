@@ -64,6 +64,10 @@ class ApiKeyUpdateRequest(DashboardModel):
     reset_usage: bool | None = None
 
 
+class ApiKeyVerboseCaptureRequest(DashboardModel):
+    request_count: int = Field(ge=1, le=100)
+
+
 class ApiKeyUsageSummaryResponse(DashboardModel):
     request_count: int
     total_tokens: int
@@ -85,6 +89,7 @@ class ApiKeyResponse(DashboardModel):
     usage_sections: str = "upstream_limits,account_pool_usage"
     expires_at: datetime | None
     is_active: bool
+    verbose_capture_remaining: int = Field(default=0, ge=0)
     account_assignment_scope_enabled: bool = False
     source_assignment_scope_enabled: bool = False
     assigned_account_ids: list[str] = Field(default_factory=list)

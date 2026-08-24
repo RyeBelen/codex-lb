@@ -19,6 +19,7 @@ from app.modules.api_keys.schemas import (
     ApiKeyUpdateRequest,
     ApiKeyUsage7DayResponse,
     ApiKeyUsageSummaryResponse,
+    ApiKeyVerboseCaptureRequest,
     LimitRuleResponse,
 )
 from app.modules.api_keys.service import (
@@ -52,6 +53,7 @@ def _to_response(row: ApiKeyData) -> ApiKeyResponse:
         usage_sections=row.usage_sections,
         expires_at=row.expires_at,
         is_active=row.is_active,
+        verbose_capture_remaining=row.verbose_capture_remaining,
         account_assignment_scope_enabled=row.account_assignment_scope_enabled,
         source_assignment_scope_enabled=row.source_assignment_scope_enabled,
         assigned_account_ids=row.assigned_account_ids,
@@ -247,6 +249,47 @@ async def delete_api_key(
         details={"key_id": key_id},
     )
     return Response(status_code=204)
+
+
+@router.post("/{key_id}/verbose-capture", response_model=ApiKeyResponse)
+async def arm_verbose_capture(
+    request: Request,
+    key_id: str,
+    payload: ApiKeyVerboseCaptureRequest = Body(...),
+    _write_access=Depends(require_dashboard_write_access),
+    context: ApiKeysContext = Depends(get_api_keys_context),
+) -> ApiKeyResponse:
+    try:
+        row = await context.service.set_verbose_capture_budget(key_id, payload.request_count)
+    except ApiKeyNotFoundError as exc:
+        raise DashboardNotFoundError(str(exc)) from exc
+    except ApiKeyValidationError as exc:
+        raise DashboardBadRequestError(str(exc), code="invalid_verbose_capture_count") from exc
+    AuditService.log_async(
+        "api_key_verbose_capture_enabled",
+        actor_ip=request.client.host if request.client else None,
+        details={"key_id": key_id, "request_count": payload.request_count},
+    )
+    return _to_response(row)
+
+
+@router.delete("/{key_id}/verbose-capture", response_model=ApiKeyResponse)
+async def disable_verbose_capture(
+    request: Request,
+    key_id: str,
+    _write_access=Depends(require_dashboard_write_access),
+    context: ApiKeysContext = Depends(get_api_keys_context),
+) -> ApiKeyResponse:
+    try:
+        row = await context.service.set_verbose_capture_budget(key_id, 0)
+    except ApiKeyNotFoundError as exc:
+        raise DashboardNotFoundError(str(exc)) from exc
+    AuditService.log_async(
+        "api_key_verbose_capture_disabled",
+        actor_ip=request.client.host if request.client else None,
+        details={"key_id": key_id, "request_count": 0},
+    )
+    return _to_response(row)
 
 
 @router.post("/{key_id}/regenerate", response_model=ApiKeyCreateResponse)

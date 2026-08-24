@@ -156,6 +156,7 @@ const RequestLogCostBreakdownSchema = z.object({
 });
 
 export const RequestLogSchema = z.object({
+  requestLogId: z.number().int().positive().nullable().optional(),
   requestedAt: z.iso.datetime({ offset: true }),
   accountId: z.string().nullable(),
   planType: z.string().nullable().optional().default(null),
@@ -195,6 +196,18 @@ export const RequestLogSchema = z.object({
   costBreakdown: RequestLogCostBreakdownSchema.nullable().optional().default(null),
   latencyMs: z.number().nullable(),
   latencyFirstTokenMs: z.number().nullable().optional().default(null),
+  hasCapturedInput: z.boolean().optional(),
+});
+
+export const RequestLogVerboseCaptureSchema = z.object({
+  requestLogId: z.number().int().positive(),
+  requestId: z.string(),
+  method: z.string(),
+  path: z.string(),
+  contentType: z.string(),
+  payload: z.string(),
+  truncated: z.boolean(),
+  capturedAt: z.iso.datetime({ offset: true }),
 });
 
 export const RequestLogsResponseSchema = z.object({
@@ -241,6 +254,7 @@ export type TrendPoint = z.infer<typeof TrendPointSchema>;
 export type MetricsTrends = z.infer<typeof MetricsTrendsSchema>;
 export type UsageWindow = z.infer<typeof UsageWindowSchema>;
 export type RequestLog = z.infer<typeof RequestLogSchema>;
+export type RequestLogVerboseCapture = z.infer<typeof RequestLogVerboseCaptureSchema>;
 export type RequestLogsResponse = z.infer<typeof RequestLogsResponseSchema>;
 export type RequestLogFilterOptions = z.infer<typeof RequestLogFilterOptionsSchema>;
 export type FilterState = z.infer<typeof FilterStateSchema>;

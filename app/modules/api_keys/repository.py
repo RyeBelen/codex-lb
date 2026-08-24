@@ -6,6 +6,7 @@ from datetime import datetime
 from enum import Enum
 
 from sqlalchemy import BigInteger, Integer, cast, delete, func, select, true, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import load_only, selectinload
 from sqlalchemy.sql.elements import ColumnElement
@@ -22,6 +23,7 @@ from app.db.models import (
     ApiKeyUsageReservation,
     ApiKeyUsageReservationItem,
     ApiKeyUsageRollup,
+    ApiKeyVerboseCapture,
     LimitType,
     LimitWindow,
     ModelSource,
@@ -313,6 +315,7 @@ class ApiKeysRepository:
         is_active: bool | _Unset = _UNSET,
         key_hash: str | _Unset = _UNSET,
         key_prefix: str | _Unset = _UNSET,
+        verbose_capture_remaining: int | _Unset = _UNSET,
         commit: bool = True,
     ) -> ApiKey | None:
         row = await self.get_by_id(key_id)
@@ -363,6 +366,9 @@ class ApiKeysRepository:
         if key_prefix is not _UNSET:
             assert isinstance(key_prefix, str)
             row.key_prefix = key_prefix
+        if verbose_capture_remaining is not _UNSET:
+            assert isinstance(verbose_capture_remaining, int)
+            row.verbose_capture_remaining = verbose_capture_remaining
         if commit:
             await self._session.commit()
         return await self.get_by_id(key_id)
@@ -386,6 +392,48 @@ class ApiKeysRepository:
 
     async def rollback(self) -> None:
         await self._session.rollback()
+
+    async def try_capture_verbose_request(
+        self,
+        *,
+        key_id: str,
+        request_id: str,
+        method: str,
+        path: str,
+        content_type: str,
+        payload: str,
+        truncated: bool,
+        captured_at: datetime,
+    ) -> int | None:
+        async with sqlite_writer_section():
+            claimed = await self._session.execute(
+                update(ApiKey)
+                .where(ApiKey.id == key_id, ApiKey.verbose_capture_remaining > 0)
+                .values(verbose_capture_remaining=ApiKey.verbose_capture_remaining - 1)
+                .returning(ApiKey.verbose_capture_remaining)
+            )
+            remaining = claimed.scalar_one_or_none()
+            if remaining is None:
+                await self._session.rollback()
+                return None
+            self._session.add(
+                ApiKeyVerboseCapture(
+                    api_key_id=key_id,
+                    request_id=request_id,
+                    method=method,
+                    path=path,
+                    content_type=content_type,
+                    payload=payload,
+                    truncated=truncated,
+                    captured_at=captured_at,
+                )
+            )
+            try:
+                await self._session.commit()
+            except IntegrityError:
+                await self._session.rollback()
+                return None
+            return int(remaining)
 
     # ── Limit operations ──
 

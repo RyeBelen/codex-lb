@@ -5,6 +5,7 @@ import {
   DashboardOverviewSchema,
   DashboardProjectionsSchema,
   RequestLogFilterOptionsSchema,
+  RequestLogVerboseCaptureSchema,
   RequestLogsResponseSchema,
   type OverviewTimeframe,
 } from "@/features/dashboard/schemas";
@@ -80,6 +81,13 @@ export function getRequestLogs(params: RequestLogsListFilters = {}) {
   }
   const suffix = query.size > 0 ? `?${query.toString()}` : "";
   return get(`${REQUEST_LOGS_PATH}${suffix}`, RequestLogsResponseSchema);
+}
+
+export function getRequestLogCapturedInput(requestLogId: number) {
+  return get(
+    `${REQUEST_LOGS_PATH}/${encodeURIComponent(String(requestLogId))}/captured-input`,
+    RequestLogVerboseCaptureSchema,
+  );
 }
 
 export function getRequestLogOptions(params: RequestLogFacetFilters = {}) {

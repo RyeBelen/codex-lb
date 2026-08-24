@@ -60,6 +60,7 @@ export const ApiKeySchema = z.object({
   usageSections: z.string().default("upstream_limits,account_pool_usage"),
   expiresAt: z.iso.datetime({ offset: true }).nullable(),
   isActive: z.boolean(),
+  verboseCaptureRemaining: z.number().int().nonnegative().default(0),
   accountAssignmentScopeEnabled: z.boolean().default(false),
   sourceAssignmentScopeEnabled: z.boolean().default(false),
   assignedAccountIds: z.array(z.string()).default([]),
@@ -127,6 +128,10 @@ export const ApiKeyUpdateRequestSchema = z.object({
   resetUsage: z.boolean().optional(),
 });
 
+export const ApiKeyVerboseCaptureRequestSchema = z.object({
+  requestCount: z.number().int().min(1).max(100),
+});
+
 export const ApiKeyListSchema = z.array(ApiKeySchema);
 
 export type LimitRule = z.infer<typeof LimitRuleSchema>;
@@ -135,6 +140,7 @@ export type ApiKey = z.infer<typeof ApiKeySchema>;
 export type ApiKeyCreateRequest = z.infer<typeof ApiKeyCreateRequestSchema>;
 export type ApiKeyCreateResponse = z.infer<typeof ApiKeyCreateResponseSchema>;
 export type ApiKeyUpdateRequest = z.infer<typeof ApiKeyUpdateRequestSchema>;
+export type ApiKeyVerboseCaptureRequest = z.infer<typeof ApiKeyVerboseCaptureRequestSchema>;
 
 export const ModelItemSchema = z.object({
   id: z.string(),

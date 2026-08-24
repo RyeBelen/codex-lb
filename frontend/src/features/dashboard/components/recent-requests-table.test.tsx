@@ -1,7 +1,12 @@
 import { act, fireEvent, render, screen, within } from "@testing-library/react";
+import { HttpResponse, http } from "msw";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { useAuthStore } from "@/features/auth/hooks/use-auth";
 import { RecentRequestsTable } from "@/features/dashboard/components/recent-requests-table";
+import { createRequestLogEntry } from "@/test/mocks/factories";
+import { server } from "@/test/mocks/server";
+import { renderWithProviders } from "@/test/utils";
 
 const ISO = "2026-01-01T12:00:00+00:00";
 const NULL_FAILURE_METADATA = {
@@ -59,6 +64,7 @@ describe("RecentRequestsTable", () => {
   });
 
   afterEach(() => {
+    useAuthStore.setState({ canWrite: true });
     if (originalClipboard) {
       Object.defineProperty(navigator, "clipboard", originalClipboard);
     }
@@ -66,6 +72,75 @@ describe("RecentRequestsTable", () => {
     if (originalIsSecureContext) {
       Object.defineProperty(window, "isSecureContext", originalIsSecureContext);
     }
+  });
+
+  it("loads captured input only after an administrator opens request details", async () => {
+    const capturedInputRequest = vi.fn();
+    server.use(
+      http.get("/api/request-logs/42/captured-input", () => {
+        capturedInputRequest();
+        return HttpResponse.json({
+          requestLogId: 42,
+          requestId: "req-captured",
+          method: "POST",
+          path: "/v1/responses",
+          contentType: "application/json",
+          payload: JSON.stringify({ input: "Captured test input" }),
+          truncated: true,
+          capturedAt: ISO,
+        });
+      }),
+    );
+    renderWithProviders(
+      <RecentRequestsTable
+        {...PAGINATION_PROPS}
+        accounts={[]}
+        requests={[
+          createRequestLogEntry({
+            requestLogId: 42,
+            requestId: "req-captured",
+            hasCapturedInput: true,
+          }),
+        ]}
+      />,
+    );
+
+    expect(capturedInputRequest).not.toHaveBeenCalled();
+    const dialog = openRequestDetails();
+    expect(await within(dialog).findByText(/Captured test input/)).toBeInTheDocument();
+    expect(within(dialog).getByText(/truncated to 256 KiB/)).toBeInTheDocument();
+    expect(capturedInputRequest).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not fetch captured input for a read-only guest", async () => {
+    const capturedInputRequest = vi.fn();
+    useAuthStore.setState({ canWrite: false });
+    server.use(
+      http.get("/api/request-logs/43/captured-input", () => {
+        capturedInputRequest();
+        return HttpResponse.json({});
+      }),
+    );
+    renderWithProviders(
+      <RecentRequestsTable
+        {...PAGINATION_PROPS}
+        accounts={[]}
+        requests={[
+          createRequestLogEntry({
+            requestLogId: 43,
+            requestId: "req-guest-captured",
+            hasCapturedInput: true,
+          }),
+        ]}
+      />,
+    );
+
+    const dialog = openRequestDetails();
+    expect(
+      within(dialog).getByText("Administrator access is required to view captured input."),
+    ).toBeInTheDocument();
+    await act(async () => Promise.resolve());
+    expect(capturedInputRequest).not.toHaveBeenCalled();
   });
 
   it("renders rows with status badges and supports request details and copy actions", async () => {

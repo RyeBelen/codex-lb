@@ -50,6 +50,8 @@ TRAFFIC_CLASS_FOREGROUND = "foreground"
 TRAFFIC_CLASS_OPPORTUNISTIC = "opportunistic"
 _SUPPORTED_TRAFFIC_CLASSES = frozenset({TRAFFIC_CLASS_FOREGROUND, TRAFFIC_CLASS_OPPORTUNISTIC})
 _SUPPORTED_TRANSPORT_POLICY_OVERRIDES = frozenset({"smart", "always_http", "always_websocket"})
+VERBOSE_CAPTURE_MAX_REQUESTS = 100
+VERBOSE_CAPTURE_MAX_PAYLOAD_BYTES = 262_144
 
 
 class ApiKeysRepositoryProtocol(Protocol):
@@ -94,6 +96,7 @@ class ApiKeysRepositoryProtocol(Protocol):
         is_active: bool | _Unset = ...,
         key_hash: str | _Unset = ...,
         key_prefix: str | _Unset = ...,
+        verbose_capture_remaining: int | _Unset = ...,
         commit: bool = True,
     ) -> ApiKey | None: ...
 
@@ -104,6 +107,19 @@ class ApiKeysRepositoryProtocol(Protocol):
     async def commit(self) -> None: ...
 
     async def rollback(self) -> None: ...
+
+    async def try_capture_verbose_request(
+        self,
+        *,
+        key_id: str,
+        request_id: str,
+        method: str,
+        path: str,
+        content_type: str,
+        payload: str,
+        truncated: bool,
+        captured_at: datetime,
+    ) -> int | None: ...
 
     async def get_limits_by_key(self, key_id: str) -> list[ApiKeyLimit]: ...
 
@@ -327,6 +343,7 @@ class ApiKeyData:
     is_active: bool
     created_at: datetime
     last_used_at: datetime | None
+    verbose_capture_remaining: int = 0
     apply_to_codex_model: bool = False
     traffic_class: str = TRAFFIC_CLASS_FOREGROUND
     transport_policy_override: str | None = None
@@ -744,6 +761,60 @@ class ApiKeysService:
         poller = get_cache_invalidation_poller()
         if poller is not None:
             await poller.bump(NAMESPACE_API_KEY)
+
+    async def set_verbose_capture_budget(self, key_id: str, request_count: int) -> ApiKeyData:
+        if isinstance(request_count, bool) or not isinstance(request_count, int):
+            raise ApiKeyValidationError("Verbose capture request count must be an integer")
+        if request_count < 0 or request_count > VERBOSE_CAPTURE_MAX_REQUESTS:
+            raise ApiKeyValidationError(
+                f"Verbose capture request count must be between 0 and {VERBOSE_CAPTURE_MAX_REQUESTS}"
+            )
+        existing = await self._repository.get_by_id(key_id)
+        if existing is None:
+            raise ApiKeyNotFoundError(f"API key not found: {key_id}")
+        row = await self._repository.update(
+            key_id,
+            verbose_capture_remaining=request_count,
+        )
+        if row is None:
+            raise ApiKeyNotFoundError(f"API key not found: {key_id}")
+        await get_api_key_cache().invalidate(existing.key_hash)
+        poller = get_cache_invalidation_poller()
+        if poller is not None:
+            await poller.bump(NAMESPACE_API_KEY)
+        return _to_api_key_data(row)
+
+    async def capture_verbose_request(
+        self,
+        *,
+        api_key: ApiKeyData,
+        request_id: str,
+        method: str,
+        path: str,
+        content_type: str,
+        body: bytes,
+    ) -> bool:
+        if not body:
+            return False
+        truncated = len(body) > VERBOSE_CAPTURE_MAX_PAYLOAD_BYTES
+        bounded = body[:VERBOSE_CAPTURE_MAX_PAYLOAD_BYTES]
+        payload = bounded.decode("utf-8", errors="ignore")
+        remaining = await self._repository.try_capture_verbose_request(
+            key_id=api_key.id,
+            request_id=request_id,
+            method=method,
+            path=path,
+            content_type=content_type,
+            payload=payload,
+            truncated=truncated,
+            captured_at=utcnow(),
+        )
+        if remaining == 0:
+            get_api_key_cache().clear()
+            poller = get_cache_invalidation_poller()
+            if poller is not None:
+                await poller.bump(NAMESPACE_API_KEY)
+        return remaining is not None
 
     async def regenerate_key(self, key_id: str) -> ApiKeyCreatedData:
         row = await self._repository.get_by_id(key_id)
@@ -1634,6 +1705,7 @@ def _to_created_data(data: ApiKeyData, key: str) -> ApiKeyCreatedData:
         is_active=data.is_active,
         created_at=data.created_at,
         last_used_at=data.last_used_at,
+        verbose_capture_remaining=data.verbose_capture_remaining,
         limits=data.limits,
         usage_summary=data.usage_summary,
         account_assignment_scope_enabled=data.account_assignment_scope_enabled,
@@ -1671,6 +1743,7 @@ def _to_api_key_data(
         is_active=row.is_active,
         created_at=row.created_at,
         last_used_at=row.last_used_at,
+        verbose_capture_remaining=getattr(row, "verbose_capture_remaining", 0),
         limits=limits,
         usage_summary=usage_summary,
         account_assignment_scope_enabled=getattr(row, "account_assignment_scope_enabled", False),
