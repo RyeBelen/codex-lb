@@ -1,0 +1,26 @@
+services:
+  codex-lb:
+    image: codex-lb-api-daily-graphs:production
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    expose:
+      - "2455"
+    volumes:
+      - codex-lb-data:/var/lib/codex-lb
+    mem_limit: 3g
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:2455/health/ready', timeout=5).read()"
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+volumes:
+  codex-lb-data:
+    name: codex-lb-data
