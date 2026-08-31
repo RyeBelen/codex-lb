@@ -220,6 +220,123 @@ class AccountUsageRollupState(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False)
     folded_through: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    # Hour-aligned watermark for the time-axis rollups below. Kept as a
+    # SEPARATE column (not shared with `folded_through`) so the hourly
+    # backfill never resets or rewrites the lifetime rollups, which cannot
+    # be recomputed once retention has pruned raw request logs. Invariant:
+    # always a whole UTC hour (epoch % 3600 == 0); rows with
+    # `requested_at < hourly_folded_through` are fully folded, newer rows
+    # are the live tail.
+    hourly_folded_through: Mapped[datetime] = mapped_column(
+        DateTime,
+        nullable=False,
+        server_default=text("'1970-01-01 00:00:00'"),
+    )
+
+
+class RequestUsageHourlyRollup(Base):
+    """Hour-bucketed request-usage sums (time-axis rollup).
+
+    One row per UTC hour x dimension combination, folded from raw
+    ``request_logs`` below the ``hourly_folded_through`` watermark. Rows are
+    written by the hourly fold pass (DELETE-then-INSERT per slice, so
+    re-folds always converge) and mutated afterwards only by the account
+    lifecycle mirrors (soft/hard delete, consolidation) — never recomputed
+    from raw, so buckets survive request-log retention pruning.
+
+    Nullable raw dimensions (``account_id``/``api_key_id``/``service_tier``)
+    are stored via the collision-free NULL-sentinel encoding
+    (``usage_time_rollup.to_dimension``) so they can participate in the
+    primary key on both dialects (UNIQUE treats NULLs as distinct) without
+    conflating NULL with a legitimate empty string. ``request_kind`` is
+    NOT NULL at the source and stored verbatim (warmup kinds included; reads
+    filter by dimension). No FKs: rollup rows must outlive account deletion.
+    """
+
+    __tablename__ = "request_usage_hourly_rollups"
+
+    bucket_epoch: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    account_id: Mapped[str] = mapped_column(String, primary_key=True)
+    api_key_id: Mapped[str] = mapped_column(String, primary_key=True)
+    model: Mapped[str] = mapped_column(String, primary_key=True)
+    service_tier: Mapped[str] = mapped_column(String, primary_key=True)
+    request_kind: Mapped[str] = mapped_column(String, primary_key=True)
+    is_deleted: Mapped[bool] = mapped_column(Boolean, primary_key=True, default=False, server_default=false())
+    request_count: Mapped[int] = mapped_column(BigInteger, default=0, server_default=text("0"), nullable=False)
+    # sum(status != 'success') — status is folded as a measure, not a dimension.
+    error_count: Mapped[int] = mapped_column(BigInteger, default=0, server_default=text("0"), nullable=False)
+    input_tokens: Mapped[int] = mapped_column(BigInteger, default=0, server_default=text("0"), nullable=False)
+    output_tokens: Mapped[int] = mapped_column(BigInteger, default=0, server_default=text("0"), nullable=False)
+    reasoning_tokens: Mapped[int] = mapped_column(BigInteger, default=0, server_default=text("0"), nullable=False)
+    # sum(coalesce(output_tokens, reasoning_tokens, 0)) — not derivable from
+    # the two sums above (planner / trends / usage-summary semantics).
+    output_or_reasoning_tokens: Mapped[int] = mapped_column(
+        BigInteger, default=0, server_default=text("0"), nullable=False
+    )
+    cached_input_tokens: Mapped[int] = mapped_column(BigInteger, default=0, server_default=text("0"), nullable=False)
+    # sum(max(0, min(coalesce(cached, 0), coalesce(input, 0)))) — pre-folded
+    # for the future usage-summary switch (one-way door once raw is pruned).
+    cached_input_tokens_clamped: Mapped[int] = mapped_column(
+        BigInteger, default=0, server_default=text("0"), nullable=False
+    )
+    cost_usd: Mapped[float] = mapped_column(Float, default=0.0, server_default=text("0"), nullable=False)
+    # count(cost_usd IS NOT NULL) — preserves the "all-NULL model excluded"
+    # rule of cost-by-model aggregations.
+    cost_count: Mapped[int] = mapped_column(BigInteger, default=0, server_default=text("0"), nullable=False)
+
+
+class RequestUsageHourlyErrorRollup(Base):
+    """Hour-bucketed error-code counts (top-error satellite).
+
+    ``error_code`` has unbounded cardinality, so it is isolated from the main
+    hourly rollup. Fold filter reproduces the top-error read exactly:
+    non-warmup kinds, ``status != 'success'``, ``error_code IS NOT NULL``
+    (soft-deleted rows included). ``account_id`` is carried only so account
+    hard-deletion can mirror raw row removal.
+    """
+
+    __tablename__ = "request_usage_hourly_error_rollups"
+
+    bucket_epoch: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    account_id: Mapped[str] = mapped_column(String, primary_key=True)
+    error_code: Mapped[str] = mapped_column(String, primary_key=True)
+    error_count: Mapped[int] = mapped_column(BigInteger, default=0, server_default=text("0"), nullable=False)
+
+
+class RequestDemandQuarterRollup(Base):
+    """Quarter-hour demand sums for the quota planner (the only sub-hour
+    consumer, ``DEFAULT_SLOT_SECONDS = 900``).
+
+    The FULL legacy demand grain (account, api_key, model, reasoning_effort,
+    request_kind, status) is preserved as dimensions: the planner's
+    ``_bin_demand_units`` applies ``max(token, cost, request units)`` per bin
+    BEFORE summing (nonlinear), so a coarser fold would change forecasts
+    wherever a slot mixes groups with different dominant components. The row
+    count equals what the legacy runtime ``GROUP BY`` returned per query.
+
+    ``is_deleted`` is a dimension (not a fold-time filter) and ``account_id``
+    a carried key so account soft/hard deletion — which retroactively detaches
+    or removes the account's entire raw history — can be mirrored here instead
+    of permanently diverging from the planner's ``deleted_at IS NULL`` view.
+    """
+
+    __tablename__ = "request_demand_quarter_rollups"
+
+    slot_epoch: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    account_id: Mapped[str] = mapped_column(String, primary_key=True)
+    api_key_id: Mapped[str] = mapped_column(String, primary_key=True)
+    model: Mapped[str] = mapped_column(String, primary_key=True)
+    reasoning_effort: Mapped[str] = mapped_column(String, primary_key=True)
+    request_kind: Mapped[str] = mapped_column(String, primary_key=True)
+    status: Mapped[str] = mapped_column(String, primary_key=True)
+    is_deleted: Mapped[bool] = mapped_column(Boolean, primary_key=True, default=False, server_default=false())
+    request_count: Mapped[int] = mapped_column(BigInteger, default=0, server_default=text("0"), nullable=False)
+    input_tokens: Mapped[int] = mapped_column(BigInteger, default=0, server_default=text("0"), nullable=False)
+    output_or_reasoning_tokens: Mapped[int] = mapped_column(
+        BigInteger, default=0, server_default=text("0"), nullable=False
+    )
+    cached_input_tokens: Mapped[int] = mapped_column(BigInteger, default=0, server_default=text("0"), nullable=False)
+    cost_usd: Mapped[float] = mapped_column(Float, default=0.0, server_default=text("0"), nullable=False)
 
 
 class AdditionalUsageHistory(Base):
@@ -241,6 +358,7 @@ class RequestLog(Base):
     __tablename__ = "request_logs"
     __table_args__ = (
         Index("idx_logs_useragent_group", "useragent_group"),
+        Index("idx_logs_conversation_id", "conversation_id"),
         Index("idx_logs_client_ip", "client_ip"),
     )
 
@@ -272,6 +390,7 @@ class RequestLog(Base):
     source: Mapped[str | None] = mapped_column(String, nullable=True)
     useragent: Mapped[str | None] = mapped_column(Text, nullable=True)
     useragent_group: Mapped[str | None] = mapped_column(String, nullable=True)
+    conversation_id: Mapped[str | None] = mapped_column(String, nullable=True)
     client_ip: Mapped[str | None] = mapped_column(String, nullable=True)
     transport: Mapped[str | None] = mapped_column(String, nullable=True)
     service_tier: Mapped[str | None] = mapped_column(String, nullable=True)
@@ -285,12 +404,20 @@ class RequestLog(Base):
     reasoning_effort: Mapped[str | None] = mapped_column(String, nullable=True)
     latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     latency_first_token_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Pre-attempt wait (account selection, admission waits, failed failover
+    # attempts) — kept out of latency_ms/latency_first_token_ms so those two
+    # always share the successful attempt's anchor.
+    latency_queue_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     latency_response_created_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     latency_first_upstream_event_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     latency_response_create_gate_wait_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     latency_bridge_queue_wait_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     prewarm_status: Mapped[str | None] = mapped_column(String, nullable=True)
     prewarm_latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Deprecated: no longer written since the prewarm canary retirement
+    # (reduce-settings-surface-phase-4). Kept one release so old replicas can
+    # keep inserting during rolling upgrades; the column drop ships in the
+    # next release.
     prewarm_canary_bucket: Mapped[str | None] = mapped_column(String, nullable=True)
     prewarm_eligible_reason: Mapped[str | None] = mapped_column(String, nullable=True)
     session_previous_gap_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -546,6 +673,59 @@ class ResetCreditRedeemClaim(Base):
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
+class OAuthFlowState(Base):
+    """Durable dashboard OAuth add-account / reauth flow state.
+
+    The dashboard OAuth flow (PKCE `code_verifier`, `state` token, device-code
+    poll metadata, and status) is persisted here keyed by `flow_id` so that any
+    replica behind a load balancer can complete a flow it did not start: the
+    browser callback, a manually pasted callback URL, or a device-code status
+    poll can land on a different replica than the one that ran `start`. The
+    `code_verifier` is stored encrypted with the same key material as account
+    tokens. Abandoned pending flows expire via `expires_at` and are purged
+    opportunistically on write.
+    """
+
+    __tablename__ = "oauth_flow_states"
+
+    flow_id: Mapped[str] = mapped_column(String, primary_key=True)
+    state_token: Mapped[str | None] = mapped_column(String, nullable=True, unique=True, index=True)
+    method: Mapped[str] = mapped_column(String, nullable=False)
+    status: Mapped[str] = mapped_column(String, nullable=False)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    intended_account_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    code_verifier_encrypted: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    device_auth_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    user_code: Mapped[str | None] = mapped_column(String, nullable=True)
+    interval_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class OAuthDeviceFlowSlot(Base):
+    """Single-active-device-flow coordination slot (cross-replica).
+
+    At most one dashboard device-code OAuth flow is "current" at a time. A
+    device ``start`` atomically REPLACES the slot via a single conditional
+    UPSERT on the fixed ``slot_key``, so two replicas starting device OAuth
+    simultaneously leave exactly one current ``flow_id`` instead of two orphaned
+    pending rows that both believe they are current. A poller atomically
+    CONSUMES the slot (delete-if-mine) as its point of no return immediately
+    before persisting tokens: a poller whose flow was superseded (the slot now
+    names a different ``flow_id``) loses the consume and MUST abort without
+    adding or re-authenticating an account. ``generation`` is a monotonic claim
+    token bumped on every replacement, retained for observability.
+    """
+
+    __tablename__ = "oauth_device_flow_slots"
+
+    slot_key: Mapped[str] = mapped_column(String, primary_key=True)
+    flow_id: Mapped[str] = mapped_column(String, nullable=False)
+    generation: Mapped[int] = mapped_column(Integer, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
 class StickySession(Base):
     __tablename__ = "sticky_sessions"
 
@@ -614,6 +794,24 @@ class DashboardSettings(Base):
         String,
         default="secondary",
         server_default=text("'secondary'"),
+        nullable=False,
+    )
+    show_reset_credit_badges: Mapped[bool] = mapped_column(
+        Boolean,
+        default=True,
+        server_default=true(),
+        nullable=False,
+    )
+    auto_redeem_reset_credits_before_expiry: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        server_default=false(),
+        nullable=False,
+    )
+    show_reset_credit_expiry_badge: Mapped[bool] = mapped_column(
+        Boolean,
+        default=True,
+        server_default=true(),
         nullable=False,
     )
     routing_strategy: Mapped[str] = mapped_column(
@@ -804,6 +1002,16 @@ class DashboardSettings(Base):
         default="{}",
         server_default=text("'{}'"),
         nullable=False,
+    )
+    # Data retention windows in days; NULL = never set from the dashboard
+    # (the deprecated env alias then applies), 0 = explicitly disabled.
+    request_log_retention_days: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
+    )
+    usage_history_retention_days: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
     )
     version: Mapped[int] = mapped_column(
         Integer,
@@ -1635,6 +1843,28 @@ class HttpBridgeSessionAlias(Base):
     )
 
 
+class HttpBridgeRetryCircuit(Base):
+    __tablename__ = "http_bridge_retry_circuits"
+
+    session_key_kind: Mapped[str] = mapped_column(String(64), primary_key=True)
+    session_key_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    api_key_scope: Mapped[str] = mapped_column(String(255), primary_key=True)
+    consecutive_failures: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        server_default=text("0"),
+    )
+    cooldown_until_epoch: Mapped[float] = mapped_column(
+        Float,
+        nullable=False,
+        default=0.0,
+        server_default=text("0"),
+    )
+    last_detail: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    updated_at_epoch: Mapped[float] = mapped_column(Float, nullable=False)
+
+
 _PRIMARY_WINDOW_INDEX_EXPR = func.coalesce(UsageHistory.window, literal_column("'primary'"))
 
 Index("idx_usage_recorded_at", UsageHistory.recorded_at)
@@ -1664,7 +1894,12 @@ Index("idx_api_keys_name", ApiKey.name)
 Index("idx_logs_account_time", RequestLog.account_id, RequestLog.requested_at)
 Index("idx_logs_model_source_time", RequestLog.model_source_id, RequestLog.requested_at)
 Index("idx_logs_api_key_time", RequestLog.api_key_id, RequestLog.requested_at.desc(), RequestLog.id.desc())
-Index("idx_logs_api_key_time_account", RequestLog.api_key_id, RequestLog.requested_at.desc(), RequestLog.account_id)
+Index(
+    "idx_logs_api_key_time_account",
+    RequestLog.api_key_id,
+    RequestLog.requested_at.desc(),
+    RequestLog.account_id,
+)
 Index("idx_logs_request_kind_time", RequestLog.request_kind, RequestLog.requested_at.desc(), RequestLog.id.desc())
 Index(
     "idx_logs_account_kind_deleted_latest",
@@ -1681,7 +1916,6 @@ Index(
     RequestLog.requested_at,
     RequestLog.id,
 )
-Index("idx_logs_requested_at", RequestLog.requested_at)
 Index("idx_logs_source_requested_at", RequestLog.source, RequestLog.requested_at.desc())
 Index("idx_logs_requested_at_id", RequestLog.requested_at.desc(), RequestLog.id.desc())
 Index(
@@ -1689,6 +1923,31 @@ Index(
     RequestLog.deleted_at,
     RequestLog.requested_at.desc(),
     RequestLog.id.desc(),
+)
+# Covering partial index for the dashboard usage aggregation hot path. On
+# PostgreSQL the INCLUDE payload lets the aggregation run as an index-only
+# scan without touching the heap; on SQLite it degrades to a partial index on
+# requested_at. Enforced via the manual drift index requirements because
+# partial-index reflection is not consistent across dialects.
+Index(
+    "idx_logs_dash_usage_covering",
+    RequestLog.requested_at,
+    postgresql_include=[
+        "account_id",
+        "api_key_id",
+        "model",
+        "reasoning_effort",
+        "request_kind",
+        "status",
+        "input_tokens",
+        "cached_input_tokens",
+        "output_tokens",
+        "reasoning_tokens",
+        "cost_usd",
+        "id",
+    ],
+    postgresql_where=text("deleted_at IS NULL"),
+    sqlite_where=text("deleted_at IS NULL"),
 )
 Index(
     "idx_logs_requested_at_model_tier",
@@ -1813,8 +2072,14 @@ Index(
     HttpBridgeSessionAlias.alias_hash,
     HttpBridgeSessionAlias.api_key_scope,
 )
-Index("ix_additional_usage_history_account_id", AdditionalUsageHistory.account_id)
 Index("ix_additional_usage_history_recorded_at", AdditionalUsageHistory.recorded_at)
+Index(
+    "ix_additional_usage_distinct_labels",
+    AdditionalUsageHistory.account_id,
+    AdditionalUsageHistory.quota_key,
+    AdditionalUsageHistory.limit_name,
+    AdditionalUsageHistory.metered_feature,
+)
 Index(
     "ix_rate_limit_attempts_type_key_attempted_at",
     RateLimitAttempt.type,

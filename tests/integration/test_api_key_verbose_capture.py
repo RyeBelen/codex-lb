@@ -288,6 +288,7 @@ async def test_verbose_capture_migration_upgrade_and_downgrade(tmp_path):
     db_url = f"sqlite+aiosqlite:///{tmp_path / 'verbose-capture.sqlite'}"
     revision = "20260824_000000_add_api_key_verbose_capture"
     parent_revision = "20260718_000000_merge_refresh_claims_and_historical_facts_heads"
+    merged_head = "20260901_000000_merge_production_and_verbose_capture_heads"
 
     await to_thread.run_sync(lambda: run_upgrade(db_url, revision, bootstrap_legacy=False))
     engine = create_async_engine(db_url, future=True)
@@ -324,6 +325,6 @@ async def test_verbose_capture_migration_upgrade_and_downgrade(tmp_path):
         result = await to_thread.run_sync(
             lambda: run_upgrade(db_url, "head", bootstrap_legacy=False)
         )
-        assert result.current_revision == revision
+        assert result.current_revision == merged_head
     finally:
         await engine.dispose()
