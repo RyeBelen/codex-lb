@@ -8,7 +8,13 @@ from importlib import import_module
 import pytest
 
 from app.core.shutdown import wait_for_tasks_to_drain
-from app.main import InFlightMiddleware, _drain_detached_control_plane_tasks, _release_leader_lease_within
+from app.main import (
+    InFlightMiddleware,
+    _close_proxy_http_bridge_sessions_for_shutdown,
+    _drain_detached_control_plane_tasks,
+    _drain_proxy_persistence_tasks,
+    _release_leader_lease_within,
+)
 
 app_main = import_module("app.main")
 shutdown_state = import_module("app.core.shutdown")
@@ -118,10 +124,64 @@ async def test_control_plane_drains_are_failure_isolated(
     monkeypatch.setattr(app_main.fleet_api, "drain_background_refresh_tasks", drain_fleet)
 
     with caplog.at_level(logging.WARNING, logger="app.main"):
-        await _drain_detached_control_plane_tasks(1)
+        assert await _drain_detached_control_plane_tasks(1) is False
 
     assert fleet_drained.is_set()
     assert "Failed to drain audit log tasks during shutdown" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_lifespan_recovery_settlement_pre_drain_uses_remaining_deadline() -> None:
+    calls: list[dict[str, object]] = []
+
+    class _ProxyService:
+        async def drain_persistence_tasks(self, **kwargs: object) -> bool:
+            calls.append(kwargs)
+            return True
+
+    assert await _drain_proxy_persistence_tasks(
+        _ProxyService(),
+        3.25,
+        task_name_prefixes=("http-bridge-recovery-settlement-",),
+        failure_message="unused",
+    )
+
+    assert calls == [
+        {
+            "timeout_seconds": 3.25,
+            "task_name_prefixes": ("http-bridge-recovery-settlement-",),
+        }
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ("mark", "close", "close_timeout"))
+async def test_bridge_shutdown_failure_suppresses_clean_marker_gate(failure: str) -> None:
+    calls: list[str] = []
+
+    class _ProxyService:
+        async def mark_http_bridge_draining(self) -> bool:
+            calls.append("mark")
+            if failure == "mark":
+                return False
+            return True
+
+        async def close_all_http_bridge_sessions(self) -> bool:
+            calls.append("close")
+            if failure == "close":
+                raise RuntimeError("bridge close failed")
+            if failure == "close_timeout":
+                return False
+            return True
+
+    assert (
+        await _close_proxy_http_bridge_sessions_for_shutdown(
+            _ProxyService(),
+            mark_draining=True,
+        )
+        is False
+    )
+    assert calls == ["mark", "close"]
 
 
 @pytest.mark.asyncio
@@ -149,7 +209,7 @@ async def test_control_plane_drain_requires_stable_clean_pass(
     monkeypatch.setattr(app_main, "drain_audit_log_tasks", drain_audit)
     monkeypatch.setattr(app_main.fleet_api, "drain_background_refresh_tasks", drain_fleet)
 
-    await _drain_detached_control_plane_tasks(1)
+    assert await _drain_detached_control_plane_tasks(1) is True
 
     assert audit_calls == 2
     assert fleet_calls == 2
@@ -169,16 +229,17 @@ async def test_release_leader_lease_within_returns_when_release_wedged(
             self.gate = asyncio.Event()
             self.started = asyncio.Event()
 
-        async def release(self) -> None:
+        async def release(self) -> bool:
             self.started.set()
             await self.gate.wait()
+            return True
 
     election = _WedgedElection()
     monkeypatch.setattr(app_main, "get_leader_election", lambda: election)
 
     loop = asyncio.get_running_loop()
     start = loop.time()
-    await _release_leader_lease_within(0.2)
+    assert await _release_leader_lease_within(0.2) is False
     elapsed = loop.time() - start
 
     assert 0.2 <= elapsed < 1.0
@@ -197,13 +258,14 @@ async def test_release_leader_lease_within_awaits_quick_release(
         def __init__(self) -> None:
             self.released = False
 
-        async def release(self) -> None:
+        async def release(self) -> bool:
             self.released = True
+            return True
 
     election = _FastElection()
     monkeypatch.setattr(app_main, "get_leader_election", lambda: election)
 
-    await _release_leader_lease_within(5)
+    assert await _release_leader_lease_within(5) is True
 
     assert election.released is True
 
@@ -213,13 +275,29 @@ async def test_release_leader_lease_within_swallows_release_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class _BrokenElection:
-        async def release(self) -> None:
+        async def release(self) -> bool:
             raise RuntimeError("db down")
 
     monkeypatch.setattr(app_main, "get_leader_election", lambda: _BrokenElection())
 
-    # Must not raise: a failed release must never fail shutdown.
-    await _release_leader_lease_within(5)
+    # Must not raise: a failed release must never fail shutdown, but it must
+    # suppress the clean marker because the database-owning drain failed.
+    assert await _release_leader_lease_within(5) is False
+
+
+@pytest.mark.asyncio
+async def test_release_leader_lease_within_propagates_unsuccessful_release(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _UnsuccessfulElection:
+        async def release(self) -> bool:
+            return False
+
+    monkeypatch.setattr(app_main, "get_leader_election", lambda: _UnsuccessfulElection())
+
+    # A completed release task can still report that detached work or the row
+    # deletion was not durably completed; that result must suppress CLEAN.
+    assert await _release_leader_lease_within(5) is False
 
 
 @pytest.fixture(autouse=True)
@@ -674,7 +752,7 @@ async def test_in_flight_middleware_increments_and_decrements() -> None:
     async def receive():  # noqa: ANN202
         return {"type": "http.request", "body": b"", "more_body": False}
 
-    sent_messages: list[dict] = []
+    sent_messages: list[dict[str, object]] = []
 
     async def send(msg):  # noqa: ANN001, ANN202
         sent_messages.append(msg)
@@ -701,7 +779,7 @@ async def test_in_flight_middleware_checks_http_drain_after_registration(
 
     monkeypatch.setattr(shutdown_state, "is_draining", observe_drain_after_registration)
     middleware = InFlightMiddleware(inner_app)
-    sent_messages: list[dict] = []
+    sent_messages: list[dict[str, object]] = []
 
     async def receive():  # noqa: ANN202
         return {"type": "http.request", "body": b"", "more_body": False}
@@ -810,7 +888,7 @@ async def test_in_flight_middleware_checks_websocket_drain_after_registration(
 
     monkeypatch.setattr(shutdown_state, "is_draining", observe_drain_after_registration)
     middleware = InFlightMiddleware(inner_app)
-    sent_messages: list[dict] = []
+    sent_messages: list[dict[str, object]] = []
 
     async def ws_receive():  # noqa: ANN202
         return {"type": "websocket.connect"}
@@ -861,7 +939,7 @@ async def test_in_flight_middleware_rejects_new_websocket_during_drain() -> None
     async def ws_receive():  # noqa: ANN202
         return {"type": "websocket.connect"}
 
-    sent_messages: list[dict] = []
+    sent_messages: list[dict[str, object]] = []
 
     async def ws_send(msg):  # noqa: ANN001, ANN202
         sent_messages.append(msg)
@@ -980,7 +1058,7 @@ async def test_in_flight_middleware_allows_internal_bridge_handoff_during_drain(
     async def receive():  # noqa: ANN202
         return {"type": "http.request", "body": b"{}", "more_body": False}
 
-    sent_messages: list[dict] = []
+    sent_messages: list[dict[str, object]] = []
 
     async def send(msg):  # noqa: ANN001, ANN202
         sent_messages.append(msg)
@@ -1020,7 +1098,7 @@ async def test_in_flight_middleware_allows_drain_status_during_drain() -> None:
     async def receive():  # noqa: ANN202
         return {"type": "http.request", "body": b"", "more_body": False}
 
-    sent_messages: list[dict] = []
+    sent_messages: list[dict[str, object]] = []
 
     async def send(msg):  # noqa: ANN001, ANN202
         sent_messages.append(msg)
@@ -1060,7 +1138,7 @@ async def test_in_flight_middleware_allows_drain_stop_during_drain() -> None:
     async def receive():  # noqa: ANN202
         return {"type": "http.request", "body": b"", "more_body": False}
 
-    sent_messages: list[dict] = []
+    sent_messages: list[dict[str, object]] = []
 
     async def send(msg):  # noqa: ANN001, ANN202
         sent_messages.append(msg)
@@ -1069,3 +1147,115 @@ async def test_in_flight_middleware_allows_drain_stop_during_drain() -> None:
 
     assert app_called is True
     assert sent_messages[0]["status"] == 200
+
+
+@pytest.mark.asyncio
+async def test_clean_shutdown_is_recorded_after_successful_disposal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    order: list[str] = []
+
+    async def _close_db() -> bool:
+        order.append("close_db")
+        return True
+
+    monkeypatch.setattr(app_main, "close_db", _close_db)
+    monkeypatch.setattr(app_main, "mark_sqlite_shutdown_clean", lambda: order.append("mark_clean"))
+
+    await app_main._close_db_and_record_clean_shutdown(
+        database_tasks_drained=True,
+        leader_lease_release_completed=True,
+    )
+
+    assert order == ["close_db", "mark_clean"]
+
+
+@pytest.mark.asyncio
+async def test_clean_shutdown_is_not_recorded_when_wedged_teardown_is_abandoned(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    marked = False
+
+    async def _close_db() -> bool:
+        return False
+
+    def _mark_clean() -> None:
+        nonlocal marked
+        marked = True
+
+    monkeypatch.setattr(app_main, "close_db", _close_db)
+    monkeypatch.setattr(app_main, "mark_sqlite_shutdown_clean", _mark_clean)
+
+    await app_main._close_db_and_record_clean_shutdown(
+        database_tasks_drained=True,
+        leader_lease_release_completed=True,
+    )
+
+    assert marked is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("gate", ("database", "leader"))
+async def test_clean_shutdown_is_not_recorded_when_database_drain_is_incomplete(
+    monkeypatch: pytest.MonkeyPatch,
+    gate: str,
+) -> None:
+    marked = False
+
+    async def _close_db() -> bool:
+        return True
+
+    def _mark_clean() -> None:
+        nonlocal marked
+        marked = True
+
+    monkeypatch.setattr(app_main, "close_db", _close_db)
+    monkeypatch.setattr(app_main, "mark_sqlite_shutdown_clean", _mark_clean)
+
+    if gate == "database":
+        await app_main._close_db_and_record_clean_shutdown(
+            database_tasks_drained=False,
+            leader_lease_release_completed=True,
+        )
+    else:
+        await app_main._close_db_and_record_clean_shutdown(
+            database_tasks_drained=True,
+            leader_lease_release_completed=False,
+        )
+
+    assert marked is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("failure", "expected"),
+    [
+        pytest.param(RuntimeError("dispose failed"), RuntimeError, id="dispose-raises"),
+        pytest.param(asyncio.CancelledError(), asyncio.CancelledError, id="dispose-cancelled"),
+    ],
+)
+async def test_clean_shutdown_is_not_recorded_when_disposal_does_not_complete(
+    monkeypatch: pytest.MonkeyPatch,
+    failure: BaseException,
+    expected: type[BaseException],
+) -> None:
+    """An incomplete teardown is exactly what the next startup's scan is for."""
+    marked = False
+
+    async def _close_db() -> bool:
+        raise failure
+
+    def _mark_clean() -> None:
+        nonlocal marked
+        marked = True
+
+    monkeypatch.setattr(app_main, "close_db", _close_db)
+    monkeypatch.setattr(app_main, "mark_sqlite_shutdown_clean", _mark_clean)
+
+    with pytest.raises(expected):
+        await app_main._close_db_and_record_clean_shutdown(
+            database_tasks_drained=True,
+            leader_lease_release_completed=True,
+        )
+
+    assert marked is False

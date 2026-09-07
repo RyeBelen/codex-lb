@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import json
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Awaitable, Mapping
 from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from json import JSONDecodeError
@@ -14,6 +15,9 @@ from app.core.clients.http import lease_http_session
 from app.core.crypto import TokenEncryptor
 from app.core.types import JsonValue
 from app.core.utils.json_guards import is_json_mapping
+from app.core.utils.shared_future import (
+    _await_cleanup_deferring_cancellation as _shared_await_cleanup_deferring_cancellation,
+)
 from app.db.models import ModelSource
 
 _DEFAULT_SOURCE_TIMEOUT_SECONDS = 600
@@ -82,6 +86,13 @@ class SourceAudioTranscription:
 
 
 @dataclass(frozen=True, slots=True)
+class SourceEmbeddings:
+    payload: dict[str, JsonValue]
+    usage: SourceUsage | None
+    upstream_status_code: int
+
+
+@dataclass(frozen=True, slots=True)
 class SourceChatStream:
     body: AsyncIterator[bytes]
     usage_holder: "SourceUsageHolder"
@@ -101,42 +112,66 @@ class SourceUsageHolder:
     timings: SourceTimings | None = None
 
 
+async def _await_cleanup_deferring_cancellation(awaitable: Awaitable[object]) -> None:
+    """Finish owned upstream cleanup even if the caller is cancelled again."""
+
+    await _shared_await_cleanup_deferring_cancellation(awaitable)
+
+
+async def _await_result_deferring_cancellation(awaitable: Awaitable[object]) -> bool:
+    """Finish owned cleanup and report whether cancellation arrived mid-flight."""
+
+    return await _shared_await_cleanup_deferring_cancellation(awaitable) is not None
+
+
 async def forward_chat_completion(
     source: ModelSource,
     payload: dict[str, JsonValue],
     *,
     encryptor: TokenEncryptor | None = None,
 ) -> SourceChatCompletion:
+    stack = AsyncExitStack()
     try:
-        async with lease_http_session() as session:
-            timeout = aiohttp.ClientTimeout(total=_source_timeout_seconds(source))
-            async with session.post(
+        session = await stack.enter_async_context(lease_http_session())
+        timeout = aiohttp.ClientTimeout(total=_source_timeout_seconds(source))
+        response = await stack.enter_async_context(
+            session.post(
                 _source_url(source, "/chat/completions"),
                 headers=_source_headers(source, encryptor=encryptor),
                 json=payload,
                 timeout=timeout,
-            ) as response:
-                data = await _response_json(response)
-                if response.status >= 400:
-                    raise ModelSourceForwardingError(
-                        status_code=response.status,
-                        payload=_redact_source_error_payload(
-                            _error_payload(data),
-                            source,
-                            encryptor=encryptor,
-                        ),
-                        upstream_status_code=response.status,
-                    )
-                if data is None:
-                    raise _invalid_upstream_response_error(response.status)
-                return SourceChatCompletion(
-                    payload=data,
-                    usage=_usage_from_chat_payload(data),
-                    timings=_timings_from_payload(data),
-                    upstream_status_code=response.status,
-                )
+            )
+        )
+        data = await _response_json(response)
+        if response.status >= 400:
+            raise ModelSourceForwardingError(
+                status_code=response.status,
+                payload=_redact_source_error_payload(
+                    _error_payload(data),
+                    source,
+                    encryptor=encryptor,
+                ),
+                upstream_status_code=response.status,
+            )
+        if data is None:
+            raise _invalid_upstream_response_error(response.status)
+        result = SourceChatCompletion(
+            payload=data,
+            usage=_usage_from_chat_payload(data),
+            timings=_timings_from_payload(data),
+            upstream_status_code=response.status,
+        )
     except (aiohttp.ClientError, TimeoutError) as exc:
+        await _await_cleanup_deferring_cancellation(stack.aclose())
         raise _unreachable_error(exc) from exc
+    except BaseException:
+        await _await_cleanup_deferring_cancellation(stack.aclose())
+        raise
+
+    cleanup_cancelled = await _await_result_deferring_cancellation(stack.aclose())
+    if cleanup_cancelled:
+        raise asyncio.CancelledError
+    return result
 
 
 async def stream_chat_completion(
@@ -150,10 +185,15 @@ async def stream_chat_completion(
     stack, response = await _open_source_stream(source, "/chat/completions", payload, encryptor=encryptor)
 
     async def body() -> AsyncIterator[bytes]:
-        async with stack:
+        try:
             async for chunk in response.content.iter_chunked(4096):
                 usage_parser.feed(chunk)
                 yield chunk
+        finally:
+            # A plain ``async with stack`` unwinds unshielded: repeated
+            # cancellation delivery can interrupt ``__aexit__`` mid-unwind and
+            # leak the pooled HTTP session lease.
+            await _await_cleanup_deferring_cancellation(stack.aclose())
 
     return SourceChatStream(body=body(), usage_holder=usage_holder, upstream_status_code=response.status)
 
@@ -249,6 +289,43 @@ async def forward_audio_transcription(
         raise _unreachable_error(exc) from exc
 
 
+async def forward_embeddings(
+    source: ModelSource,
+    payload: dict[str, JsonValue],
+    *,
+    encryptor: TokenEncryptor | None = None,
+) -> SourceEmbeddings:
+    try:
+        async with lease_http_session() as session:
+            timeout = aiohttp.ClientTimeout(total=_source_timeout_seconds(source))
+            async with session.post(
+                _source_url(source, "/embeddings"),
+                headers=_source_headers(source, encryptor=encryptor),
+                json=payload,
+                timeout=timeout,
+            ) as response:
+                data = await _response_json(response)
+                if response.status >= 400:
+                    raise ModelSourceForwardingError(
+                        status_code=response.status,
+                        payload=_redact_source_error_payload(
+                            _error_payload(data),
+                            source,
+                            encryptor=encryptor,
+                        ),
+                        upstream_status_code=response.status,
+                    )
+                if data is None:
+                    raise _invalid_upstream_response_error(response.status)
+                return SourceEmbeddings(
+                    payload=data,
+                    usage=_usage_from_embeddings_payload(data),
+                    upstream_status_code=response.status,
+                )
+    except (aiohttp.ClientError, TimeoutError) as exc:
+        raise _unreachable_error(exc) from exc
+
+
 async def stream_responses(
     source: ModelSource,
     payload: dict[str, JsonValue],
@@ -260,10 +337,15 @@ async def stream_responses(
     stack, response = await _open_source_stream(source, "/responses", payload, encryptor=encryptor)
 
     async def body() -> AsyncIterator[bytes]:
-        async with stack:
+        try:
             async for chunk in response.content.iter_chunked(4096):
                 usage_parser.feed(chunk)
                 yield chunk
+        finally:
+            # A plain ``async with stack`` unwinds unshielded: repeated
+            # cancellation delivery can interrupt ``__aexit__`` mid-unwind and
+            # leak the pooled HTTP session lease.
+            await _await_cleanup_deferring_cancellation(stack.aclose())
 
     return SourceResponsesStream(body=body(), usage_holder=usage_holder, upstream_status_code=response.status)
 
@@ -309,10 +391,10 @@ async def _open_source_stream(
             )
         return stack, response
     except (aiohttp.ClientError, TimeoutError) as exc:
-        await stack.aclose()
+        await _await_cleanup_deferring_cancellation(stack.aclose())
         raise _unreachable_error(exc) from exc
     except BaseException:
-        await stack.aclose()
+        await _await_cleanup_deferring_cancellation(stack.aclose())
         raise
 
 
@@ -481,6 +563,14 @@ def _usage_from_responses_payload(payload: Mapping[str, JsonValue]) -> SourceUsa
     if not is_json_mapping(usage):
         return None
     return _usage_from_responses_mapping(usage)
+
+
+def _usage_from_embeddings_payload(payload: Mapping[str, JsonValue]) -> SourceUsage | None:
+    """Embeddings responses report prompt/total tokens and no completion tokens."""
+    usage = payload.get("usage")
+    if not is_json_mapping(usage):
+        return None
+    return _usage_from_mapping(usage) or _usage_from_total_tokens_mapping(usage)
 
 
 def _usage_from_audio_body(body: bytes, content_type: str | None) -> SourceUsage | None:

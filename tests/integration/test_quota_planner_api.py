@@ -12,11 +12,20 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.crypto import TokenEncryptor
 from app.core.utils.time import utcnow
-from app.db.models import Account, AccountStatus, QuotaPlannerDecision, QuotaWindowObservation, RequestLog, UsageHistory
+from app.db.models import (
+    Account,
+    AccountStatus,
+    ApiKey,
+    QuotaPlannerDecision,
+    QuotaWindowObservation,
+    RequestLog,
+    UsageHistory,
+)
 from app.db.session import SessionLocal
 from app.modules.api_keys.service import ApiKeyInvalidError, ApiKeyNotFoundError, ApiKeyRateLimitExceededError
-from app.modules.quota_planner.logic import PlannerSettings
+from app.modules.quota_planner.logic import PlannerAction, PlannerSettings
 from app.modules.quota_planner.repository import QuotaPlannerRepository
+from app.modules.quota_planner.scheduler import QuotaPlannerScheduler
 from app.modules.quota_planner.warmup import QuotaWarmupService, WarmupUsage
 
 pytestmark = pytest.mark.integration
@@ -621,6 +630,107 @@ async def test_quota_planner_warm_now_claims_planned_decision_before_probe(monke
 
 
 @pytest.mark.asyncio
+async def test_quota_planner_scheduler_reclaims_expired_executing_warmup_claim(monkeypatch, db_setup):
+    del db_setup
+    encryptor = TokenEncryptor()
+    cycle_key = "reclaim-expired-executing-claim"
+    async with SessionLocal() as session:
+        account = Account(
+            id="acc-warm-expired-claim",
+            email="warm-expired-claim@example.test",
+            plan_type="plus",
+            access_token_encrypted=encryptor.encrypt("access"),
+            refresh_token_encrypted=encryptor.encrypt("refresh"),
+            id_token_encrypted=encryptor.encrypt("id"),
+            last_refresh=utcnow(),
+            status=AccountStatus.ACTIVE,
+        )
+        session.add(account)
+        repo = QuotaPlannerRepository(session)
+        await repo.upsert_settings(
+            PlannerSettings(
+                mode="auto",
+                allow_synthetic_traffic=True,
+                dry_run=False,
+                max_warmups_per_day=3,
+                max_warmup_credits_per_day=1.0,
+                warmup_model_preference="gpt-5.4-mini",
+            )
+        )
+        await repo.add_window_observation(
+            account_id=account.id,
+            model="gpt-5.4-mini",
+            source="warmup_probe",
+            confidence="observed",
+        )
+        decision = await repo.log_decision(
+            mode="auto",
+            action="warmup",
+            idempotency_key=f"{cycle_key}:auto:{account.id}:warmup",
+            account_id=account.id,
+            scheduled_at=utcnow() - timedelta(minutes=5),
+            score=3.0,
+            reason="expired_claim_reclaim",
+            status="planned",
+        )
+        claimed = await repo.claim_warmup_decision(
+            decision.id,
+            since=utcnow().replace(hour=0, minute=0, second=0, microsecond=0),
+            max_warmups=3,
+            max_credits=1.0,
+            claim_ttl_seconds=60.0,
+        )
+        assert claimed is not None
+        stale_claim_time = utcnow() - timedelta(minutes=10)
+        claimed.executed_at = stale_claim_time
+        claimed.lease_expires_at = stale_claim_time
+        await session.commit()
+
+    forecast = SimpleNamespace(peak_slot_start=None, peak_demand_units=0.0)
+    simulation = SimpleNamespace(loss=0.0, unmet_demand=0.0)
+
+    monkeypatch.setattr("app.modules.quota_planner.scheduler._build_states", lambda **kwargs: ([], {}))
+    monkeypatch.setattr("app.modules.quota_planner.scheduler.build_demand_forecast", lambda **kwargs: forecast)
+    monkeypatch.setattr("app.modules.quota_planner.scheduler.simulate_pool", lambda **kwargs: simulation)
+    monkeypatch.setattr(
+        "app.modules.quota_planner.scheduler.plan_shadow_actions",
+        lambda **kwargs: [
+            PlannerAction(
+                account_id="acc-warm-expired-claim",
+                action="warmup",
+                scheduled_at=utcnow() - timedelta(minutes=1),
+                score=3.0,
+                reason="expired_claim_reclaim",
+                warmup_cycle_key=cycle_key,
+            )
+        ],
+    )
+
+    async def fake_send(self, *, account, model, request_id):
+        del self, account, model, request_id
+        return WarmupUsage(input_tokens=3, output_tokens=1, cached_input_tokens=0, reasoning_tokens=None)
+
+    async def noop_record_effect(self, account, model, *, source, confidence):
+        del self, account, model, source, confidence
+
+    monkeypatch.setattr(QuotaWarmupService, "_send_warmup_probe", fake_send)
+    monkeypatch.setattr(QuotaWarmupService, "_record_warmup_effect", noop_record_effect)
+
+    await QuotaPlannerScheduler()._run_once_as_leader()
+
+    async with SessionLocal() as session:
+        refreshed = await session.get(QuotaPlannerDecision, decision.id)
+        assert refreshed is not None
+        assert refreshed.status == "executed"
+        assert refreshed.reason == "warmup_executed"
+        assert refreshed.lease_expires_at is None
+        assert refreshed.executed_at is not None
+        assert refreshed.executed_at > stale_claim_time
+        logs = await session.execute(select(RequestLog).where(RequestLog.request_kind == "warmup"))
+        assert len(logs.scalars().all()) == 1
+
+
+@pytest.mark.asyncio
 async def test_quota_planner_cancel_decision_does_not_cancel_executing(async_client, db_setup):
     del db_setup
     async with SessionLocal() as session:
@@ -931,6 +1041,156 @@ async def test_quota_planner_warm_now_cancellation_releases_api_key_reservation(
             )
 
     assert failed_reservations == [("reservation-cancelled", "gpt-5.4-mini", 0, 0, 0)]
+
+
+@pytest.mark.asyncio
+async def test_quota_planner_warm_now_limit_free_key_probes_without_reservation(monkeypatch, db_setup):
+    """A key with no applicable limits admits without a reservation; the
+    warmup probe must execute and never attempt reservation settlement."""
+    del db_setup
+    encryptor = TokenEncryptor()
+    async with SessionLocal() as session:
+        account = Account(
+            id="acc-warm-unlimited-key",
+            email="warm-unlimited-key@example.test",
+            plan_type="plus",
+            access_token_encrypted=encryptor.encrypt("access"),
+            refresh_token_encrypted=encryptor.encrypt("refresh"),
+            id_token_encrypted=encryptor.encrypt("id"),
+            last_refresh=utcnow(),
+            status=AccountStatus.ACTIVE,
+        )
+        session.add(account)
+        repo = QuotaPlannerRepository(session)
+        await repo.upsert_settings(
+            PlannerSettings(
+                mode="auto",
+                allow_synthetic_traffic=True,
+                dry_run=False,
+                max_warmup_credits_per_day=1.0,
+                warmup_model_preference="gpt-5.4-mini",
+            )
+        )
+        await repo.add_window_observation(
+            account_id=account.id,
+            model="gpt-5.4-mini",
+            source="warmup_probe",
+            confidence="observed",
+        )
+        service = QuotaWarmupService(session)
+
+        class FakeApiKeys:
+            async def enforce_limits_for_request(self, *args, **kwargs):
+                del args, kwargs
+                return None
+
+            async def finalize_usage_reservation(self, *args, **kwargs):
+                del args, kwargs
+                raise AssertionError("limit-free warmup must not finalize a reservation")
+
+            async def fail_usage_reservation(self, *args, **kwargs):
+                del args, kwargs
+                raise AssertionError("limit-free warmup must not fail a reservation")
+
+        async def fake_send(self, *, account, model, request_id):
+            del self, account, model, request_id
+            return WarmupUsage(input_tokens=3, output_tokens=1, cached_input_tokens=0, reasoning_tokens=None)
+
+        async def noop_record_effect(self, account, model, *, source, confidence):
+            del self, account, model, source, confidence
+
+        monkeypatch.setattr(service, "_api_keys", FakeApiKeys())
+        monkeypatch.setattr(QuotaWarmupService, "_send_warmup_probe", fake_send)
+        monkeypatch.setattr(QuotaWarmupService, "_record_warmup_effect", noop_record_effect)
+
+        result = await service.warm_now(
+            account_id=account.id,
+            model="gpt-5.4-mini",
+            api_key_id="api-key-unlimited",
+            force_probe=True,
+        )
+
+    assert result.status == "executed"
+    assert result.reason == "warmup_executed"
+
+
+@pytest.mark.asyncio
+async def test_quota_planner_warm_now_limit_free_admission_keeps_shared_session_state(monkeypatch, db_setup):
+    """Regression: the limit-free early return closes the admission
+    transaction on the warmup service's shared session. It must do so
+    without expiring tracked ORM state (``rollback()`` expires everything
+    even with ``expire_on_commit=False``): the probe reads
+    ``account.access_token_encrypted`` and the error path reads
+    ``decision.id`` after admission, which raised ``MissingGreenlet`` when
+    the shared ``account``/``decision`` objects were expired. Exercises the
+    REAL ``ApiKeysService`` with a real limit-free key row — a fake api-key
+    service returning ``None`` never runs the transaction-closing path."""
+    del db_setup
+    encryptor = TokenEncryptor()
+    async with SessionLocal() as session:
+        account = Account(
+            id="acc-warm-limit-free-real",
+            email="warm-limit-free-real@example.test",
+            plan_type="plus",
+            access_token_encrypted=encryptor.encrypt("access"),
+            refresh_token_encrypted=encryptor.encrypt("refresh"),
+            id_token_encrypted=encryptor.encrypt("id"),
+            last_refresh=utcnow(),
+            status=AccountStatus.ACTIVE,
+        )
+        session.add(account)
+        # Real API key with no configured limits: admission takes the
+        # limit-free early return inside the real ApiKeysService.
+        session.add(
+            ApiKey(
+                id="api-key-limit-free-real",
+                name="limit-free warmup key",
+                key_hash="limit-free-warmup-hash",
+                key_prefix="sk-lfw",
+            )
+        )
+        repo = QuotaPlannerRepository(session)
+        await repo.upsert_settings(
+            PlannerSettings(
+                mode="auto",
+                allow_synthetic_traffic=True,
+                dry_run=False,
+                max_warmup_credits_per_day=1.0,
+                warmup_model_preference="gpt-5.4-mini",
+            )
+        )
+        service = QuotaWarmupService(session)
+
+        probed_tokens: list[str] = []
+
+        async def fake_send(self, *, account, model, request_id):
+            del model, request_id
+            # Mirror the real probe's first attribute access on the shared
+            # session's tracked account: raises MissingGreenlet if admission
+            # expired it.
+            probed_tokens.append(self._encryptor.decrypt(account.access_token_encrypted))
+            return WarmupUsage(input_tokens=3, output_tokens=1, cached_input_tokens=0, reasoning_tokens=None)
+
+        async def noop_record_effect(self, account, model, *, source, confidence):
+            del self, account, model, source, confidence
+
+        monkeypatch.setattr(QuotaWarmupService, "_send_warmup_probe", fake_send)
+        monkeypatch.setattr(QuotaWarmupService, "_record_warmup_effect", noop_record_effect)
+
+        result = await service.warm_now(
+            account_id=account.id,
+            model="gpt-5.4-mini",
+            api_key_id="api-key-limit-free-real",
+            force_probe=True,
+        )
+
+        # The tracked objects must remain readable after admission (the
+        # failure-handling path reads ``decision.id``-style attributes too).
+        assert account.access_token_encrypted is not None
+
+    assert probed_tokens == ["access"]
+    assert result.status == "executed"
+    assert result.reason == "warmup_executed"
 
 
 @pytest.mark.asyncio

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import builtins
 import json
 import logging
 import sqlite3
@@ -34,10 +35,33 @@ def test_main_passes_timestamped_log_config(monkeypatch):
     formatters = log_config["formatters"]
     assert formatters["default"]["fmt"].startswith("%(asctime)s ")
     assert formatters["access"]["fmt"].startswith("%(asctime)s ")
-    assert kwargs["timeout_keep_alive"] == 7200
+    assert kwargs["timeout_keep_alive"] == 300
     assert kwargs["ws_max_size"] == 128 * 1024 * 1024
+    assert kwargs["ws_ping_interval"] == 20.0
+    assert kwargs["ws_ping_timeout"] is None
     assert "workers" not in kwargs
     assert kwargs["proxy_headers"] is False
+
+
+@pytest.mark.parametrize("source", ["flag", "env"])
+def test_main_passes_custom_ws_ping_settings(monkeypatch, source):
+    captured: dict[str, Any] = {}
+
+    def fake_run(*args, **kwargs):
+        captured.update(kwargs)
+
+    monkeypatch.setattr(cli, "_run_server", fake_run)
+    if source == "flag":
+        argv = ["--ws-ping-interval", "30.5", "--ws-ping-timeout", "90"]
+    else:
+        monkeypatch.setenv("UVICORN_WS_PING_INTERVAL", "30.5")
+        monkeypatch.setenv("UVICORN_WS_PING_TIMEOUT", "90")
+        argv = []
+
+    cli.main(argv)
+
+    assert captured["ws_ping_interval"] == 30.5
+    assert captured["ws_ping_timeout"] == 90.0
 
 
 def test_main_pins_one_worker_when_web_concurrency_requests_more(monkeypatch):
@@ -226,6 +250,9 @@ def test_run_server_uses_graceful_server_and_shared_timeout(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     captured: dict[str, Any] = {}
+    # Warnings (aiohttp ResourceWarning reprs) must flow through the redacting
+    # log handlers rather than raw stderr.
+    monkeypatch.setattr(logging, "captureWarnings", lambda capture: captured.__setitem__("capture_warnings", capture))
 
     class FakeConfig:
         def __init__(self, *args: object, **kwargs: object) -> None:
@@ -252,16 +279,38 @@ def test_run_server_uses_graceful_server_and_shared_timeout(
 
     cli._run_server("app.main:app", host="127.0.0.1", port=2455)
 
+    from app.core.http_protocol_httptools import UpgradeTolerantHttpToolsProtocol
+
     assert captured["config_args"] == ("app.main:app",)
     assert captured["config_kwargs"] == {
         "host": "127.0.0.1",
         "port": 2455,
         "workers": 1,
+        "http": UpgradeTolerantHttpToolsProtocol,
         "timeout_graceful_shutdown": 17,
     }
     assert captured["drain_timeout_seconds"] == 17
     assert captured["loaded"] is True
     assert captured["ran"] is True
+    assert captured["capture_warnings"] is True
+
+
+def test_load_http_protocol_class_falls_back_to_h11_without_httptools(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.core.http_protocol import UpgradeTolerantH11Protocol
+
+    real_import = builtins.__import__
+
+    def fail_httptools_import(name: str, *args: Any, **kwargs: Any) -> object:
+        if name in {"httptools", "app.core.http_protocol_httptools"}:
+            raise ImportError(name)
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.delitem(sys.modules, "app.core.http_protocol_httptools", raising=False)
+    monkeypatch.setattr(builtins, "__import__", fail_httptools_import)
+
+    assert cli._load_http_protocol_class() is UpgradeTolerantH11Protocol
 
 
 def test_run_server_pins_one_worker_despite_ambient_web_concurrency(

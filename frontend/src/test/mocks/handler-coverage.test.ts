@@ -70,6 +70,8 @@ const EXPECTED_ENDPOINTS = [
 	// settings
 	"GET /api/settings",
 	"PUT /api/settings",
+	"GET /api/settings/telemetry",
+	"PUT /api/settings/telemetry",
 	"GET /api/settings/upstream-proxy",
 	"POST /api/settings/upstream-proxy/endpoints",
 	"POST /api/settings/upstream-proxy/endpoints/:endpointId/test",
@@ -103,6 +105,7 @@ const EXPECTED_ENDPOINTS = [
 	"PATCH /api/api-keys/:keyId",
 	"DELETE /api/api-keys/:keyId",
 	"POST /api/api-keys/:keyId/regenerate",
+	"GET /api/api-keys/usage-daily",
 	"GET /api/api-keys/:keyId/trends",
 	"GET /api/api-keys/:keyId/usage-7d",
 	// automations

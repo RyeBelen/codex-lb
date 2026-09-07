@@ -116,24 +116,24 @@ export function UsageDonuts({
 				onChange={setStatusFilters}
 			/>
 			<Suspense fallback={<div className="grid gap-4 lg:grid-cols-2" />}>
-			<div className="grid gap-4 lg:grid-cols-2">
-			<DonutChart
-				title={t("dashboard.usage.fiveHourCredits")}
-				items={primaryChartItems}
-				total={visiblePrimaryTotal}
-				centerValue={visiblePrimaryCenterValue}
-				safeLine={safeLinePrimary}
-				centerLayout="credits"
-			/>
-			<DonutChart
-				title={t("dashboard.usage.weeklyCredits")}
-				items={secondaryChartItems}
-				total={visibleSecondaryTotal}
-				centerValue={visibleSecondaryCenterValue}
-				safeLine={safeLineSecondary}
-				centerLayout="credits"
-			/>
-			</div>
+				<div className="grid min-w-0 gap-4 lg:grid-cols-2">
+					<DonutChart
+						title={t("dashboard.usage.fiveHourCredits")}
+						items={primaryChartItems}
+						total={visiblePrimaryTotal}
+						centerValue={visiblePrimaryCenterValue}
+						safeLine={safeLinePrimary}
+						centerLayout="credits"
+					/>
+					<DonutChart
+						title={t("dashboard.usage.weeklyCredits")}
+						items={secondaryChartItems}
+						total={visibleSecondaryTotal}
+						centerValue={visibleSecondaryCenterValue}
+						safeLine={safeLineSecondary}
+						centerLayout="credits"
+					/>
+				</div>
 			</Suspense>
 		</div>
 	);

@@ -21,7 +21,29 @@ from app.core.utils.proxy_env import outbound_proxy_env_configured
 logger = logging.getLogger(__name__)
 
 BASE_DIR = Path(__file__).resolve().parents[3]
-ENV_FILES = (BASE_DIR / ".env", BASE_DIR / ".env.local")
+
+
+def _resolve_env_files() -> tuple[Path, ...]:
+    """Resolve the env files read at settings load.
+
+    Default: ``.env`` / ``.env.local`` next to the module root (the repository
+    checkout). ``CODEX_LB_ENV_FILE`` — an ``os.pathsep``-separated list of
+    paths — overrides that discovery for installs whose module root cannot
+    contain env files: the Nix package's module root lives in the read-only
+    store, so its wrapper points this at the launch directory. It is a
+    bootstrap environment variable rather than a ``Settings`` field because
+    the env-file locations must be known before Settings can read env files.
+    Unset (every non-Nix launch path) preserves module-root discovery
+    unchanged; launch-directory env files are never loaded implicitly.
+    """
+    raw = os.getenv("CODEX_LB_ENV_FILE", "")
+    files = tuple(Path(entry.strip()).expanduser() for entry in raw.split(os.pathsep) if entry.strip())
+    if files:
+        return files
+    return (BASE_DIR / ".env", BASE_DIR / ".env.local")
+
+
+ENV_FILES = _resolve_env_files()
 
 # OAuth protocol constants. These values identify codex-lb to OpenAI's OAuth
 # endpoints exactly like the Codex CLI; they are protocol constants, not
@@ -242,9 +264,12 @@ class Settings(BaseSettings):
     database_url: str = DEFAULT_DATABASE_URL
     # Pool timeout and recycle are fixed constants in ``app/db/session.py``;
     # the background-task engine always derives its pool sizing from the two
-    # settings below.
-    database_pool_size: int = Field(default=15, gt=0)
-    database_max_overflow: int = Field(default=10, ge=0)
+    # settings below. Defaults are sized so one replica's two pooled engines
+    # cap at (25 + 15) * 2 = 80 PostgreSQL connections, preserving >= 20 raw
+    # server slots on PostgreSQL's default max_connections=100 for reserved
+    # connections, the migration path's two-connection peak, and operations.
+    database_pool_size: int = Field(default=25, gt=0)
+    database_max_overflow: int = Field(default=15, ge=0)
     database_migrate_on_startup: bool = True
     database_sqlite_pre_migrate_backup_enabled: bool = True
     database_sqlite_pre_migrate_backup_max_files: int = Field(default=5, ge=1)
@@ -287,6 +312,7 @@ class Settings(BaseSettings):
     usage_refresh_enabled: bool = True
     usage_refresh_interval_seconds: int = Field(default=60, gt=0)
     live_usage_ingestion_enabled: bool = True
+    rate_limit_reset_credits_refresh_enabled: bool = True
     rate_limit_reset_credits_refresh_interval_seconds: int = Field(default=60, gt=0)
     openai_cache_affinity_max_age_seconds: int = Field(default=1800, gt=0)
     warmup_model: str = "gpt-5.4-mini"
@@ -298,6 +324,10 @@ class Settings(BaseSettings):
     http_responses_session_bridge_codex_prewarm_enabled: bool = False
     http_responses_session_bridge_stuck_gate_retire_after_seconds: float = Field(default=300.0, gt=0)
     http_responses_session_bridge_anchor_poison_failure_threshold: int = Field(default=7, ge=1, le=100)
+    # Cap on server-owned recovery attempts while the client stream is held
+    # open after an eligible eventless terminal (`server_indefinite_recovery`
+    # mode). Once exhausted, the bridge emits one terminal `response.failed`.
+    http_responses_session_bridge_server_recovery_max_attempts: int = Field(default=6, ge=1, le=100)
     http_responses_session_bridge_max_sessions: int = Field(default=256, gt=0)
     http_responses_session_bridge_queue_limit: int = Field(default=8, gt=0)
     http_responses_session_bridge_clean_close_retry_jitter_max_seconds: float = Field(
@@ -306,6 +336,42 @@ class Settings(BaseSettings):
         le=30.0,
     )
     http_responses_session_bridge_gateway_safe_mode: bool = False
+    # Attach the durable operation identity to response.create client metadata.
+    # The upstream must explicitly support/deduplicate this value before any
+    # automatic replay is enabled; metadata-only propagation is safe by default.
+    http_responses_session_bridge_operation_ledger_enabled: bool = True
+    # Bound durable replay storage per operation so a long response cannot
+    # exhaust the database. An incomplete spool is never replayed.
+    http_responses_session_bridge_operation_event_spool_max_bytes: int = Field(default=2 * 1024 * 1024, gt=0)
+    # Rollout fence: chunks_v2 must be enabled only after every serving replica
+    # runs the dual-reader schema expansion.
+    http_responses_session_bridge_operation_spool_format: Literal["rows_v1", "chunks_v2"] = "rows_v1"
+    http_responses_session_bridge_operation_event_spool_batch_size: int = Field(default=32, gt=0, le=256)
+    http_responses_session_bridge_operation_event_spool_flush_interval_seconds: float = Field(
+        default=0.1,
+        ge=0.01,
+        le=5.0,
+    )
+    http_responses_session_bridge_operation_event_spool_max_pending_events: int = Field(default=2048, gt=0)
+    http_responses_session_bridge_operation_event_spool_max_pending_bytes: int = Field(
+        default=32 * 1024 * 1024,
+        gt=0,
+    )
+    # Keep durable transcript material short-lived by default. The transcript
+    # is sensitive prompt/output data and is only a recovery aid.
+    http_responses_session_bridge_operation_spool_retention_seconds: float = Field(
+        default=7 * 24 * 60 * 60,
+        gt=0,
+    )
+    # Recovery-first mode can either ask the client to drop an ambiguous anchor
+    # or let the bridge retry that anchored request once on a fresh upstream
+    # socket. Both are at-least-once strategies; fail-closed remains default.
+    http_responses_session_bridge_ambiguous_continuation_recovery_mode: Literal[
+        "fail_closed",
+        "client_full_history_once",
+        "server_anchored_replay_once",
+        "server_indefinite_recovery",
+    ] = "fail_closed"
     http_responses_session_bridge_instance_id: str = Field(default_factory=_default_http_bridge_instance_id)
     http_responses_session_bridge_instance_ring: Annotated[list[str], NoDecode] = Field(default_factory=list)
     http_responses_session_bridge_advertise_base_url: str | None = None
@@ -325,6 +391,8 @@ class Settings(BaseSettings):
     usage_history_retention_days: int = Field(default=0, ge=0, le=3650)
     quota_planner_scheduler_enabled: bool = True
     automations_scheduler_enabled: bool = True
+    telemetry_enabled: bool | None = None
+    telemetry_endpoint: str = "https://telemetry.tokmaxxing.com"
     encryption_key_file: Path = DEFAULT_ENCRYPTION_KEY_FILE
     # Startup cross-replica encryption-key consistency check against the shared
     # database sentinel: "enforce" refuses startup on mismatch, "warn" logs an
@@ -384,10 +452,10 @@ class Settings(BaseSettings):
     # --- Multi-replica & production settings ---
     # Prometheus metrics
     metrics_enabled: bool = False
-    metrics_port: int = 9090
+    metrics_port: int = Field(default=9090, ge=1, le=65535)
 
     # Logging
-    log_format: str = "text"  # "text" or "json"
+    log_format: Literal["text", "json"] = "text"
 
     # Leader election
     leader_election_enabled: bool = True
@@ -438,18 +506,26 @@ class Settings(BaseSettings):
     workers_per_instance: int = Field(default=1, ge=1)
     proxy_refresh_failure_cooldown_seconds: float = Field(default=5.0, ge=0.0)
     usage_refresh_auth_failure_cooldown_seconds: float = Field(default=300.0, ge=0.0)
+    timeout_invariant_validation_strict: bool = False
 
     # Local memory-pressure guard (0 = disabled). Requests are rejected with
     # 503 once RSS reaches the threshold; a warning is logged from 80% of it
     # (``app/core/resilience/memory_monitor.py`` derives the warning level).
     memory_reject_threshold_mb: int = 0
 
+    # Event-loop lag watchdog (0 = disabled). Samples asyncio.sleep drift once
+    # per second; lag at or above the threshold emits a rate-limited warning
+    # and Prometheus signals (``app/core/resilience/loop_lag_monitor.py``).
+    # Default 0.5s: an order of magnitude above healthy scheduling jitter,
+    # well below the lag that fails 10s-budget health checks.
+    event_loop_lag_warn_threshold_seconds: float = Field(default=0.5, ge=0.0)
+
     # OpenTelemetry
     otel_enabled: bool = False
     otel_exporter_endpoint: str = ""
 
     # Shutdown drain
-    shutdown_drain_timeout_seconds: int = 30
+    shutdown_drain_timeout_seconds: int = Field(default=30, gt=0, le=300)
 
     # HTTP connector limits
     http_connector_limit: int = 100

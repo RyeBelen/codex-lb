@@ -1,9 +1,12 @@
-import { render, screen } from "@testing-library/react";
+import { act, render, screen } from "@testing-library/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import userEvent from "@testing-library/user-event";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { MemoryRouter } from "react-router-dom";
+import { beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 
 import { SettingsPage } from "@/features/settings/components/settings-page";
 import { useAuthStore } from "@/features/auth/hooks/use-auth";
+import type { DashboardSettings } from "@/features/settings/schemas";
 import { createDashboardSettings } from "@/test/mocks/factories";
 
 const useSettingsMock = vi.fn();
@@ -19,6 +22,7 @@ const quotaPlannerSectionMock = vi.fn();
 const stickySessionsSectionMock = vi.fn();
 const modelSourcesSettingsMock = vi.fn();
 const dataRetentionSettingsMock = vi.fn();
+const telemetrySettingsMock = vi.fn();
 
 vi.mock("@/features/settings/hooks/use-settings", () => ({
   useSettings: () => useSettingsMock(),
@@ -27,6 +31,10 @@ vi.mock("@/features/settings/hooks/use-settings", () => ({
 
 vi.mock("@/features/accounts/hooks/use-accounts", () => ({
   useAccounts: () => useAccountsMock(),
+}));
+
+vi.mock("@/features/settings/components/settings-skeleton", () => ({
+  SettingsSkeleton: () => <div data-testid="settings-skeleton" />,
 }));
 
 vi.mock("@/features/settings/components/appearance-settings", () => ({
@@ -76,6 +84,13 @@ vi.mock("@/features/settings/components/data-retention-settings", () => ({
   },
 }));
 
+vi.mock("@/features/settings/components/telemetry-settings", () => ({
+  TelemetrySettings: (props: unknown) => {
+    telemetrySettingsMock(props);
+    return <div>Telemetry Settings</div>;
+  },
+}));
+
 vi.mock("@/features/api-keys/components/api-keys-section", () => ({
   ApiKeysSection: (props: unknown) => {
     apiKeysSectionMock(props);
@@ -111,9 +126,28 @@ vi.mock("@/features/model-sources/components/model-sources-settings", () => ({
   },
 }));
 
+type SettingsQueryState = {
+  data: DashboardSettings | undefined;
+  error: unknown;
+  isPending: boolean;
+  isFetching: boolean;
+  refetch: Mock;
+};
+
 describe("SettingsPage", () => {
   const settings = createDashboardSettings();
   const upstreamAdmin = { endpoints: [], pools: [], bindings: [], routingEnabled: false, defaultPoolId: null };
+
+  function mockSettingsQuery(settingsQuery: SettingsQueryState) {
+    useSettingsMock.mockReturnValue({
+      settingsQuery,
+      updateSettingsMutation: {
+        isPending: false,
+        error: null,
+        mutateAsync: vi.fn().mockResolvedValue(undefined),
+      },
+    });
+  }
 
   beforeEach(() => {
     useAuthStore.setState({
@@ -123,17 +157,12 @@ describe("SettingsPage", () => {
       canWrite: true,
     });
 
-    useSettingsMock.mockReturnValue({
-      settingsQuery: {
-        data: settings,
-        error: null,
-        refetch: vi.fn().mockResolvedValue(undefined),
-      },
-      updateSettingsMutation: {
-        isPending: false,
-        error: null,
-        mutateAsync: vi.fn().mockResolvedValue(undefined),
-      },
+    mockSettingsQuery({
+      data: settings,
+      error: null,
+      isPending: false,
+      isFetching: false,
+      refetch: vi.fn().mockResolvedValue(undefined),
     });
     useAccountsMock.mockReturnValue({
       accountsQuery: {
@@ -162,7 +191,28 @@ describe("SettingsPage", () => {
     stickySessionsSectionMock.mockReset();
     modelSourcesSettingsMock.mockReset();
     dataRetentionSettingsMock.mockReset();
+    telemetrySettingsMock.mockReset();
   });
+
+  function renderSettings(initialEntry = "/settings") {
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    const renderTree = () => (
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter initialEntries={[initialEntry]}>
+          <SettingsPage />
+        </MemoryRouter>
+      </QueryClientProvider>
+    );
+    const rendered = render(renderTree());
+    return {
+      ...rendered,
+      rerenderSettings: () => {
+        rendered.rerender(renderTree());
+      },
+    };
+  }
 
   async function expandAdvancedSettings() {
     const user = userEvent.setup({ delay: null });
@@ -170,7 +220,7 @@ describe("SettingsPage", () => {
   }
 
   it("keeps advanced sections collapsed and unmounted by default", () => {
-    render(<SettingsPage />);
+    renderSettings();
 
     expect(screen.getByRole("button", { name: "Show advanced settings" })).toBeInTheDocument();
     expect(screen.queryByText("Routing Settings")).not.toBeInTheDocument();
@@ -192,10 +242,11 @@ describe("SettingsPage", () => {
     expect(screen.getByText("Appearance Settings")).toBeInTheDocument();
     expect(screen.getByText("Import Settings")).toBeInTheDocument();
     expect(screen.getByText("API Keys Section")).toBeInTheDocument();
+    expect(screen.getByText("Telemetry Settings")).toBeInTheDocument();
   });
 
   it("mounts every advanced section after one expand interaction", async () => {
-    render(<SettingsPage />);
+    renderSettings();
 
     await expandAdvancedSettings();
 
@@ -211,7 +262,7 @@ describe("SettingsPage", () => {
   it("disables write-capable sections for read-only guests", async () => {
     useAuthStore.setState({ canWrite: false });
 
-    render(<SettingsPage />);
+    renderSettings();
 
     expect(screen.getByText("You are viewing the dashboard with read-only guest access. Admin controls are disabled.")).toBeInTheDocument();
     expect(screen.queryByText("Guest Access Settings")).not.toBeInTheDocument();
@@ -219,6 +270,7 @@ describe("SettingsPage", () => {
     expect(screen.queryByText("Session Settings")).not.toBeInTheDocument();
     expect(importSettingsMock).toHaveBeenCalledWith(expect.objectContaining({ busy: true }));
     expect(apiKeysSectionMock).toHaveBeenCalledWith(expect.objectContaining({ disabled: true }));
+    expect(telemetrySettingsMock).toHaveBeenCalledWith(expect.objectContaining({ disabled: true }));
 
     await expandAdvancedSettings();
 
@@ -231,7 +283,7 @@ describe("SettingsPage", () => {
   });
 
   it("keeps guest access settings available for writable sessions", async () => {
-    render(<SettingsPage />);
+    renderSettings();
 
     expect(screen.getByText("Guest Access Settings")).toBeInTheDocument();
     expect(guestAccessSettingsMock).toHaveBeenCalledWith(
@@ -245,4 +297,140 @@ describe("SettingsPage", () => {
 
     expect(routingSettingsMock).toHaveBeenCalledWith(expect.objectContaining({ busy: false }));
   });
+
+  it("shows an initial settings fetch error with retry", () => {
+    mockSettingsQuery({
+      data: undefined,
+      error: new Error("load failed"),
+      isPending: false,
+      isFetching: false,
+      refetch: vi.fn().mockResolvedValue(undefined),
+    });
+
+    renderSettings();
+
+    expect(screen.getByRole("alert")).toHaveTextContent("load failed");
+    expect(screen.getByRole("button", { name: "Retry" })).toBeEnabled();
+    expect(screen.queryByTestId("settings-skeleton")).not.toBeInTheDocument();
+  });
+
+  it("falls back to load-failure copy when the initial settings error has no message", () => {
+    mockSettingsQuery({
+      data: undefined,
+      error: {},
+      isPending: false,
+      isFetching: false,
+      refetch: vi.fn().mockResolvedValue(undefined),
+    });
+
+    renderSettings();
+
+    expect(screen.getByRole("alert")).toHaveTextContent("Failed to load settings");
+  });
+
+  it("refetches settings when retry is activated after a failed initial load", async () => {
+    const refetch = vi.fn().mockResolvedValue(undefined);
+    mockSettingsQuery({
+      data: undefined,
+      error: new Error("load failed"),
+      isPending: false,
+      isFetching: false,
+      refetch,
+    });
+    renderSettings();
+
+    await userEvent.setup({ delay: null }).click(screen.getByRole("button", { name: "Retry" }));
+
+    expect(refetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps retry visible and disabled while the settings refetch is in flight", async () => {
+    let finishRefetch: (() => void) | undefined;
+    const refetch = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          finishRefetch = resolve;
+        }),
+    );
+    mockSettingsQuery({
+      data: undefined,
+      error: new Error("load failed"),
+      isPending: false,
+      isFetching: false,
+      refetch,
+    });
+
+    const rendered = renderSettings();
+    await userEvent.setup({ delay: null }).click(screen.getByRole("button", { name: "Retry" }));
+    mockSettingsQuery({
+      data: undefined,
+      error: null,
+      isPending: true,
+      isFetching: true,
+      refetch,
+    });
+    rendered.rerenderSettings();
+
+    expect(screen.getByRole("button", { name: "Retry" })).toBeDisabled();
+    expect(screen.getByRole("alert")).toHaveTextContent("load failed");
+    expect(screen.queryByTestId("settings-skeleton")).not.toBeInTheDocument();
+
+    mockSettingsQuery({
+      data: undefined,
+      error: new Error("load failed"),
+      isPending: false,
+      isFetching: false,
+      refetch,
+    });
+    expect(finishRefetch).toBeTypeOf("function");
+    await act(async () => {
+      finishRefetch?.();
+    });
+    rendered.rerenderSettings();
+
+    expect(screen.getByRole("button", { name: "Retry" })).toBeEnabled();
+  });
+
+  it("keeps the skeleton while the first settings load is pending", () => {
+    mockSettingsQuery({
+      data: undefined,
+      error: null,
+      isPending: true,
+      isFetching: true,
+      refetch: vi.fn().mockResolvedValue(undefined),
+    });
+
+    renderSettings();
+
+    expect(screen.getByTestId("settings-skeleton")).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Retry" })).not.toBeInTheDocument();
+  });
+
+  it("keeps the settings form visible when a fetch error arrives with cached data", () => {
+    mockSettingsQuery({
+      data: settings,
+      error: new Error("refresh failed"),
+      isPending: false,
+      isFetching: false,
+      refetch: vi.fn().mockResolvedValue(undefined),
+    });
+
+    renderSettings();
+
+    expect(screen.getByText("refresh failed")).toBeInTheDocument();
+    expect(screen.getByText("Import Settings")).toBeInTheDocument();
+    expect(screen.getByText("API Keys Section")).toBeInTheDocument();
+    expect(screen.queryByTestId("settings-skeleton")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Retry" })).not.toBeInTheDocument();
+  });
+
+  it("expands Advanced and mounts firewall on the advanced deeplink", () => {
+    renderSettings("/settings?advanced=1#firewall");
+
+    expect(screen.getByText("Firewall Section")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Hide advanced settings" })).toBeInTheDocument();
+    expect(firewallSectionMock).toHaveBeenCalled();
+  });
+
 });

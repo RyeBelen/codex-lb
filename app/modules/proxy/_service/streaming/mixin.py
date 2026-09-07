@@ -20,6 +20,7 @@ from app.core.clients.proxy import (  # noqa: F401  # noqa: F401
     _as_image_fetch_session,
     _inline_content_images,
     _inline_input_image_urls,
+    _is_native_codex_request,
     _ws_transport_payload_budget_bytes,
     filter_inbound_headers,
     pop_compact_timeout_overrides,
@@ -38,10 +39,12 @@ from app.core.errors import (
 from app.core.errors import (
     PREVIOUS_RESPONSE_NOT_FOUND_MESSAGE as PREVIOUS_RESPONSE_NOT_FOUND_MESSAGE,
 )
-from app.core.errors import (
-    response_failed_event,
+from app.core.errors import synthetic_stream_failure_event as response_failed_event
+from app.core.openai.parsing import (
+    _LIFECYCLE_EVENT_TYPES,
+    classify_event_type,
+    parse_sse_event_payload,
 )
-from app.core.openai.parsing import parse_sse_event_payload
 from app.core.openai.requests import (
     ResponsesRequest,
 )
@@ -273,17 +276,19 @@ from app.modules.proxy._service.streaming.helpers import (
 from app.modules.proxy._service.streaming.helpers import (
     _mark_downstream_stream_cancelled,
     _mark_upstream_stream_incomplete,
+    _openai_error_fields,
     _raw_stream_error_code_or_upstream,
+    _rewrite_malformed_stream_error_event,
+    _stream_transport_failure_event_or_raise,
 )
-from app.modules.proxy._service.streaming.helpers import (
-    _raw_stream_error_fields as _raw_error_fields,
-)
+from app.modules.proxy._service.streaming.helpers import _raw_stream_error_fields as _raw_error_fields
 from app.modules.proxy._service.streaming.helpers import (
     _resolve_upstream_route_for_account as _resolve_upstream_route_for_account_helper,
 )
 from app.modules.proxy._service.streaming.helpers import (
     _select_account_with_budget_for_stream as _select_account_with_budget_for_stream_helper,
 )
+from app.modules.proxy._service.streaming.helpers import _settle_background_ack as _settle_bg_ack
 from app.modules.proxy._service.streaming.protocol import _StreamingServiceProtocol
 from app.modules.proxy._service.streaming.retry import _StreamingRetryMixin
 from app.modules.proxy._service.support import (
@@ -292,13 +297,13 @@ from app.modules.proxy._service.support import (
     _WEBSOCKET_FULL_REPLAY_WAIT_MIN_ITEMS,  # noqa: F401
     _WEBSOCKET_FULL_REPLAY_WAIT_POLL_SECONDS,  # noqa: F401
     _ApiKeyReservationTouchState,
-    _event_type_from_payload,
     _finalize_ttft_latency_ms,
     _RequestLogFailureMetadata,
     _RetryableStreamError,
     _StreamSettlement,
     _TerminalStreamError,
     _ttft_event_latency_ms,
+    _verbatim_relay_event_type,
     _WebSocketUpstreamControl,
 )
 from app.modules.proxy._service.support import (
@@ -491,6 +496,7 @@ class _StreamingMixin(_StreamingRetryMixin):
         enforce_openai_sdk_contract: bool = True,
     ) -> AsyncIterator[str]:
         proxy = cast(_StreamingServiceProtocol, self)
+        preserve_native_failure_lifecycle = not enforce_openai_sdk_contract and _is_native_codex_request(headers)
         account_id_value = account.id
         access_token = proxy._encryptor.decrypt(account.access_token_encrypted)
         account_id = _header_account_id(account.chatgpt_account_id)
@@ -521,6 +527,26 @@ class _StreamingMixin(_StreamingRetryMixin):
         response_create_lease = AdmissionLease(None, stage="response_create", request_id=request_id)
         account_response_create_lease: AccountLease | None = None
         api_key_reservation_touch_state = _ApiKeyReservationTouchState(last_touch_at=start)
+
+        async def _touch_api_key_reservation() -> None:
+            api_key_reservation_touch_state.last_touch_at = await proxy._maybe_touch_api_key_reservation(
+                api_key=api_key,
+                reservation=api_key_reservation,
+                last_touch_at=api_key_reservation_touch_state.last_touch_at,
+                request_id=request_id,
+                surface="stream",
+            )
+
+        async def _record_or_defer_owner_recovery_health(error: UpstreamError, code: str | None) -> None:
+            if code is None:
+                return
+            if api_key_reservation is None:
+                await proxy._handle_stream_error(account, error, code)
+                return
+            settlement.error_code = code
+            settlement.account_health_error = True
+            settlement.settlement_order_required = True
+
         api_key_reservation_heartbeat_stop = asyncio.Event()
         api_key_reservation_heartbeat_task: asyncio.Task[None] | None = None
         if api_key_reservation is not None:
@@ -575,14 +601,13 @@ class _StreamingMixin(_StreamingRetryMixin):
                 error_code = "stream_incomplete"
                 error_message = "Upstream websocket closed before response.completed"
                 settlement.record_success = False
-                settlement.account_health_error = True
+                terminal_event_seen = settlement.account_health_error = True
                 settlement.error = {"message": error_message}
-                yield format_sse_event(
-                    response_failed_event(
-                        error_code,
-                        error_message,
-                        response_id=request_id,
-                    )
+                yield _stream_transport_failure_event_or_raise(
+                    error_code,
+                    error_message,
+                    response_id=request_id,
+                    preserve_native_failure_lifecycle=preserve_native_failure_lifecycle,
                 )
                 return
             except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
@@ -593,37 +618,34 @@ class _StreamingMixin(_StreamingRetryMixin):
                 error_code = "upstream_unavailable"
                 error_message = str(exc) or "Request to upstream timed out"
                 settlement.record_success = False
-                settlement.account_health_error = True
+                terminal_event_seen = settlement.account_health_error = True
                 settlement.error = {"message": error_message}
-                yield format_sse_event(
-                    response_failed_event(
-                        error_code,
-                        error_message,
-                        response_id=request_id,
-                    )
+                yield _stream_transport_failure_event_or_raise(
+                    error_code,
+                    error_message,
+                    response_id=request_id,
+                    preserve_native_failure_lifecycle=preserve_native_failure_lifecycle,
                 )
                 return
             response_create_lease.release()
             await proxy._load_balancer.release_account_lease(account_response_create_lease)
             account_response_create_lease = None
             first_payload = parse_sse_data_json(first)
-            event = parse_sse_event_payload(first_payload)
-            event_type = _event_type_from_payload(event, first_payload)
-            terminal_event_seen = event_type in {
-                "response.completed",
-                "response.failed",
-                "response.incomplete",
-                "error",
-            }
+            event_type = classify_event_type(first_payload)
+            event = parse_sse_event_payload(first_payload) if event_type in _LIFECYCLE_EVENT_TYPES else None
             preserve_raw_sse_line = not enforce_openai_sdk_contract and event_type == "error"
+            malformed_error_rewrite = _rewrite_malformed_stream_error_event(
+                enforce_openai_sdk_contract=enforce_openai_sdk_contract,
+                event=event,
+                event_type=event_type,
+                event_payload=first_payload,
+                response_id=response_id,
+            )
+            if malformed_error_rewrite is not None:
+                first, event, first_payload, event_type = malformed_error_rewrite
+            terminal_event_seen, response_id, usage = _settle_bg_ack(settlement, payload, first_payload, response_id)
             if event_type not in {"response.completed", "response.failed", "response.incomplete", "error"}:
-                api_key_reservation_touch_state.last_touch_at = await proxy._maybe_touch_api_key_reservation(
-                    api_key=api_key,
-                    reservation=api_key_reservation,
-                    last_touch_at=api_key_reservation_touch_state.last_touch_at,
-                    request_id=request_id,
-                    surface="stream",
-                )
+                await _touch_api_key_reservation()
             event_service_tier = _facade()._service_tier_from_event_payload(first_payload)
             if event_service_tier is not None:
                 actual_service_tier = event_service_tier
@@ -652,7 +674,7 @@ class _StreamingMixin(_StreamingRetryMixin):
                 else:
                     raw_error_type = error.type if error else None
                     raw_error_message = error.message if error else None
-                    raw_error_param = error.param if error else None
+                    raw_error_param = error.param_state if error else None
                     code = _normalize_error_code(
                         error.code if error else None,
                         raw_error_type,
@@ -673,12 +695,6 @@ class _StreamingMixin(_StreamingRetryMixin):
                 settlement.record_success = False
                 if rewritten_error is not None:
                     rewritten_code, rewritten_message, upstream_error_code = rewritten_error
-                    if upstream_error_code is not None:
-                        await proxy._handle_stream_error(
-                            account,
-                            upstream_error,
-                            upstream_error_code,
-                        )
                     first, event, first_payload, event_type = _facade()._build_rewritten_stream_response_failed_event(
                         response_id=response_id,
                         error_code=rewritten_code,
@@ -686,11 +702,10 @@ class _StreamingMixin(_StreamingRetryMixin):
                     )
                     error_code = rewritten_code
                     error_message = rewritten_message
+                    await _record_or_defer_owner_recovery_health(upstream_error, upstream_error_code)
                     upstream_error = cast(
                         UpstreamError, {"message": rewritten_message, "type": "upstream_error", "code": rewritten_code}
                     )
-                    settlement.error = upstream_error
-                    settlement.account_health_error = False
                 else:
                     error_code = code
                     error_message = raw_error_message
@@ -754,6 +769,8 @@ class _StreamingMixin(_StreamingRetryMixin):
                 else:
                     if first_payload is not None and not preserve_raw_sse_line:
                         first = format_sse_event(first_payload)
+                    if event_type in {"response.completed", "response.failed", "response.incomplete", "error"}:
+                        terminal_event_seen = True
                     if latency_first_token_ms is None:
                         latency_first_token_ms = _ttft_event_latency_ms(
                             event_type, first_payload, ttft_reasoning_deltas, attempt_started_at
@@ -765,37 +782,28 @@ class _StreamingMixin(_StreamingRetryMixin):
             if terminal_stream_error is not None:
                 raise terminal_stream_error
             async for line in iterator:
+                if verbatim_type := _verbatim_relay_event_type(line, latency_first_token_ms, ttft_reasoning_deltas):
+                    await _touch_api_key_reservation()
+                    if verbatim_type in _facade()._TEXT_DELTA_EVENT_TYPES:
+                        saw_text_delta = settlement.downstream_text_visible = True
+                    settlement.downstream_visible = True
+                    yield line
+                    continue
                 event_payload = parse_sse_data_json(line)
-                event = parse_sse_event_payload(event_payload)
-                event_type = _event_type_from_payload(event, event_payload)
-                if event_type in {"response.completed", "response.failed", "response.incomplete", "error"}:
-                    terminal_event_seen = True
+                event_type = classify_event_type(event_payload)
+                event = parse_sse_event_payload(event_payload) if event_type in _LIFECYCLE_EVENT_TYPES else None
                 preserve_raw_sse_line = not enforce_openai_sdk_contract and event_type == "error"
-                if (
-                    enforce_openai_sdk_contract
-                    and event_type == "error"
-                    and (event is None or event.error is None)
-                    and isinstance(event_payload, dict)
-                ):
-                    message_value = event_payload.get("message")
-                    message = (
-                        message_value.strip()
-                        if isinstance(message_value, str) and message_value.strip()
-                        else "Upstream error"
-                    )
-                    line, event, event_payload, event_type = _facade()._build_rewritten_stream_response_failed_event(
-                        response_id=response_id,
-                        error_code="upstream_error",
-                        error_message=message,
-                    )
+                malformed_error_rewrite = _rewrite_malformed_stream_error_event(
+                    enforce_openai_sdk_contract=enforce_openai_sdk_contract,
+                    event=event,
+                    event_type=event_type,
+                    event_payload=event_payload,
+                    response_id=response_id,
+                )
+                if malformed_error_rewrite is not None:
+                    line, event, event_payload, event_type = malformed_error_rewrite
                 if event_type not in {"response.completed", "response.failed", "response.incomplete", "error"}:
-                    api_key_reservation_touch_state.last_touch_at = await proxy._maybe_touch_api_key_reservation(
-                        api_key=api_key,
-                        reservation=api_key_reservation,
-                        last_touch_at=api_key_reservation_touch_state.last_touch_at,
-                        request_id=request_id,
-                        surface="stream",
-                    )
+                    await _touch_api_key_reservation()
                 event_service_tier = _facade()._service_tier_from_event_payload(event_payload)
                 if event_service_tier is not None:
                     actual_service_tier = event_service_tier
@@ -821,15 +829,15 @@ class _StreamingMixin(_StreamingRetryMixin):
                                 settlement.response_id = response_id
                         else:
                             error = event.error
+                        raw_error_type, raw_error_message, raw_error_param = _openai_error_fields(error)
                         if preserve_raw_sse_line and error is None:
-                            _, raw_error_message, _, raw_error_code = _raw_error_fields(event_type, event_payload)
+                            raw_error_type, raw_error_message, raw_error_param, raw_error_code = _raw_error_fields(
+                                event_type,
+                                event_payload,
+                            )
                             upstream_error = cast(UpstreamError, {"message": raw_error_message or "Upstream error"})
                         else:
-                            raw_error_code = _normalize_error_code(
-                                error.code if error else None,
-                                error.type if error else None,
-                            )
-                            raw_error_message = error.message if error else None
+                            raw_error_code = _normalize_error_code(error.code if error else None, raw_error_type)
                             upstream_error = _upstream_error_from_openai(error)
                         raw_error_code = _raw_stream_error_code_or_upstream(
                             event_type,
@@ -840,9 +848,9 @@ class _StreamingMixin(_StreamingRetryMixin):
                             previous_response_id=payload.previous_response_id,
                             preferred_account_id=preferred_account_id,
                             error_code=raw_error_code,
-                            error_type=error.type if error else None,
-                            error_message=error.message if error else None,
-                            error_param=error.param if error else None,
+                            error_type=raw_error_type,
+                            error_message=raw_error_message,
+                            error_param=raw_error_param,
                         )
                         if rewritten_error is not None:
                             response_id = (
@@ -851,12 +859,6 @@ class _StreamingMixin(_StreamingRetryMixin):
                                 else request_id
                             )
                             rewritten_code, rewritten_message, upstream_error_code = rewritten_error
-                            if upstream_error_code is not None:
-                                await proxy._handle_stream_error(
-                                    account,
-                                    _upstream_error_from_openai(error),
-                                    upstream_error_code,
-                                )
                             (
                                 line,
                                 event,
@@ -871,7 +873,9 @@ class _StreamingMixin(_StreamingRetryMixin):
                             error_message = rewritten_message
                             settlement.error = _upstream_error_from_openai(error)
                             settlement.record_success = False
-                            settlement.account_health_error = False
+                            await _record_or_defer_owner_recovery_health(
+                                _upstream_error_from_openai(error), upstream_error_code
+                            )
                         else:
                             error_code = raw_error_code
                             error_message = raw_error_message
@@ -915,11 +919,11 @@ class _StreamingMixin(_StreamingRetryMixin):
                         event_type,
                     ) = _facade()._build_rewritten_stream_response_failed_event(
                         response_id=response_id,
-                        error_code="stream_incomplete",
+                        error_code=_facade()._SUPPRESSED_DUPLICATE_TOOL_CALL_ERROR_CODE,
                         error_message=_facade()._SUPPRESSED_DUPLICATE_TOOL_CALL_MESSAGE,
                     )
                     status = "error"
-                    error_code = "stream_incomplete"
+                    error_code = _facade()._SUPPRESSED_DUPLICATE_TOOL_CALL_ERROR_CODE
                     error_message = _facade()._SUPPRESSED_DUPLICATE_TOOL_CALL_MESSAGE
                     settlement.record_success = False
                     settlement.account_health_error = False
@@ -940,6 +944,8 @@ class _StreamingMixin(_StreamingRetryMixin):
                 settlement.downstream_visible = True
                 if event_type in _facade()._TEXT_DELTA_EVENT_TYPES:
                     settlement.downstream_text_visible = True
+                if event_type in {"response.completed", "response.failed", "response.incomplete", "error"}:
+                    terminal_event_seen = True
                 yield line
             if not terminal_event_seen:
                 status, error_code, error_message, failure_metadata = _mark_upstream_stream_incomplete(settlement)
@@ -956,21 +962,16 @@ class _StreamingMixin(_StreamingRetryMixin):
                 ),
                 error_type=error.type if error else None,
                 error_message=error.message if error else None,
-                error_param=error.param if error else None,
+                error_param=error.param_state if error else None,
             )
             if rewritten_error is not None:
                 rewritten_code, rewritten_message, upstream_error_code = rewritten_error
-                if upstream_error_code is not None:
-                    await proxy._handle_stream_error(
-                        account,
-                        _upstream_error_from_openai(error),
-                        upstream_error_code,
-                    )
                 status = "error"
                 error_code = rewritten_code
                 error_message = rewritten_message
                 settlement.record_success = False
-                settlement.account_health_error = False
+                settlement.error = _upstream_error_from_openai(error)
+                await _record_or_defer_owner_recovery_health(_upstream_error_from_openai(error), upstream_error_code)
                 yield _facade()._build_rewritten_stream_response_failed_event(
                     response_id=request_id,
                     error_code=rewritten_code,
@@ -1005,16 +1006,18 @@ class _StreamingMixin(_StreamingRetryMixin):
         except _TerminalStreamError:
             raise
         except (asyncio.CancelledError, GeneratorExit):
-            status, error_code, error_message, failure_metadata = _mark_downstream_stream_cancelled(settlement)
+            if not terminal_event_seen:
+                status, error_code, error_message, failure_metadata = _mark_downstream_stream_cancelled(settlement)
             raise
         except Exception:
             if settlement.downstream_visible:
                 status, error_code, error_message, failure_metadata = _mark_upstream_stream_incomplete(settlement)
-                yield _facade()._build_rewritten_stream_response_failed_event(
+                yield _stream_transport_failure_event_or_raise(
+                    error_code,
+                    error_message,
                     response_id=request_id,
-                    error_code=error_code,
-                    error_message=error_message,
-                )[0]
+                    preserve_native_failure_lifecycle=preserve_native_failure_lifecycle,
+                )
                 return
             raise
         finally:
@@ -1039,7 +1042,8 @@ class _StreamingMixin(_StreamingRetryMixin):
             settlement.input_tokens = input_tokens
             settlement.output_tokens = output_tokens
             settlement.cached_input_tokens = cached_input_tokens
-            settlement.error_code = error_code
+            if settlement.error_code is None:
+                settlement.error_code = error_code
             settlement.error_message = error_message
             await proxy._write_request_log(
                 account_id=account_id_value,

@@ -10,6 +10,102 @@ fixed, and how removed settings are retired.
 See `openspec/specs/deployment-installation/spec.md` for normative
 requirements.
 
+## Nix flake workflow
+
+The root flake is an additive installation and development path for Nix users.
+It builds the same `codex-lb` distribution and CLI entry points as the Python
+package while deriving dependency versions and hashes from `uv.lock`. The
+flake inputs pin nixpkgs, uv2nix, pyproject.nix, and the shared build-system
+overlay so a dependency update is an explicit lock-file change.
+
+The package uses pyproject.nix's application wrapper rather than exposing its
+internal Python virtual environment. Runtime dependencies are limited to the
+project's default dependency set; metrics, tracing, documentation, and
+development dependencies stay out of the proxy package. Nix builds the
+dashboard from `frontend/bun.lock` and copies the compiled assets into the
+Python wheel, matching the existing container and release build. Package source
+filtering includes only the backend, frontend build inputs, configuration,
+project metadata, license, and readme, so unrelated repository files do not
+affect either source hash.
+
+The development shell uses the default runtime dependencies plus the `dev`
+dependency group. Documentation tooling and optional metrics and tracing
+integrations stay out of the default shell so its closure remains focused. Its
+project wheel is editable and points at the checkout through
+`REPO_ROOT`; `UV_NO_SYNC=1`, `UV_PYTHON_DOWNLOADS=never`, and the pinned Python
+3.13 interpreter keep uv from replacing the Nix-managed environment. Hatch's
+editable path loads `editables` dynamically, so the flake supplies that helper
+from the pinned build-system overlay as a dev-only build dependency. The
+editable derivation hashes only project metadata, package roots, and the small
+`config` package, so ordinary application source edits do not invalidate the
+development shell.
+
+Supported outputs are AArch64 Darwin, AArch64 Linux, and x86-64 Linux. The
+pinned nixpkgs revision has dropped x86-64 Darwin support, so the flake does not
+advertise an output that cannot evaluate. A missing compatible wheel or native
+library after a lock update is expected to fail during `nix build` or
+`nix flake check`, rather than falling back to an unpinned installer.
+
+For example, from a checkout:
+
+```bash
+nix run .                 # start the proxy through app.cli:main
+nix develop               # enter the editable development shell
+nix build                 # build the wrapped codex-lb application
+nix flake check           # build the default package
+```
+
+`nix run . -- --help` verifies the proxy command without starting the server.
+The packaged app reads `.env` and `.env.local` from the directory where it is
+launched: the wrapper defaults the `CODEX_LB_ENV_FILE` settings-load override
+(an `os.pathsep`-separated path list) to the launch directory because the
+packaged module root sits in the read-only Nix store where env files cannot
+exist. An operator-provided `CODEX_LB_ENV_FILE` wins, and non-Nix launch
+paths keep module-root discovery. Application state still follows the normal
+data-directory rules and is never written into the immutable Nix store.
+
+## Timeout Invariant Linter Scope
+
+The timeout invariant linter is a startup `Settings` guardrail. Strict mode is
+an opt-in startup or CI failure path for violating startup configuration, not a
+general runtime timeout validator.
+
+Validated inputs:
+
+- The `Settings` object materialized at startup.
+- Explicitly imported code constants used by the two constant-backed rules:
+  model-registry refresh cadence and durable HTTP bridge retry-circuit TTL.
+
+Known non-goals and follow-ups:
+
+- Per-request `ContextVar` overrides are not revalidated. Current anchors:
+  `app/core/clients/proxy.py:3450-3467`,
+  `app/modules/proxy/_service/streaming/helpers.py:861-868`,
+  `app/modules/proxy/_service/compact.py:727-738`,
+  `app/modules/proxy/_service/transcribe.py:230-232`,
+  `app/core/clients/files.py:77-90`, and
+  `app/modules/proxy/service.py:1464-1478`.
+- Runtime clamps and derived effective values are not fully modeled. Current
+  anchors: `app/core/clients/proxy.py:1049-1088`,
+  `app/core/auth/refresh.py:391-395`, and
+  `app/modules/proxy/load_balancer.py:1846-1856`.
+- Runtime DB, API-key, and model-source settings can affect timeout-bearing
+  paths without startup revalidation. Current anchors:
+  `app/core/config/settings_cache.py:22-36`,
+  `app/modules/settings/api.py:547-710`,
+  `app/modules/proxy/_service/streaming/retry.py:153-165`, and
+  `app/modules/model_sources/forwarding.py:112-221`.
+
+Example: `python -m app.core.timeout_invariants --strict` validates the
+startup `Settings` view and exits nonzero when any enforced rule fails.
+Running the same command without `--strict` reports violations but exits zero,
+matching the default startup behavior.
+
+`CODEX_LB_TIMEOUT_INVARIANT_VALIDATION_STRICT` is intentionally a setting
+rather than a hard default because existing deployments may carry legacy timeout
+values that deserve CRITICAL diagnostics first, not surprise startup refusal.
+The default remains non-strict; operators and CI opt into fail-fast behavior.
+
 ## Helm termination-grace upgrade contract
 
 The graceful-shutdown chart adds a render-time guard:

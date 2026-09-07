@@ -405,3 +405,262 @@ enable switches.
 - **WHEN** Codex bridge requests are served
 - **THEN** no session prewarm is attempted and visible requests record
   `prewarm_status=not_applicable`
+
+### Requirement: Response-create dump directory is bounded without configuration
+
+The oversized response-create dump directory under `<data-dir>/debug/response-create-dumps` MUST be bounded on the base install path with no operator configuration. When the service captures an oversized `response.create` payload, it MUST NOT write a new dump if a dump for the same payload fingerprint is already stored, and after storing a dump it MUST remove the oldest stored dumps so that at most a fixed number of dump pairs remain. Each dump is a pair of a gzipped payload file and a meta file that MUST be added and removed together. Suppressing a duplicate MUST remain operator-visible in the logs, because the recurrence signal is the reason the dump path exists.
+
+#### Scenario: Repeated identical payloads are stored once
+
+- **GIVEN** an oversized `response.create` payload has already been dumped
+- **WHEN** a retry of the byte-identical payload is dumped again
+- **THEN** no additional dump pair is written
+- **AND** the originally stored dump pair is retained
+- **AND** the suppressed duplicate is logged with its payload fingerprint and the path of the existing dump
+
+#### Scenario: Distinct payloads are stored separately
+
+- **GIVEN** an oversized `response.create` payload has already been dumped
+- **WHEN** a different oversized payload is dumped
+- **THEN** a separate dump pair is written for it
+
+#### Scenario: Oldest dumps are pruned once the directory is full
+
+- **GIVEN** the dump directory already holds the maximum number of dump pairs
+- **WHEN** a dump for a new payload is written
+- **THEN** the oldest dump pairs are removed so the maximum is not exceeded
+- **AND** each removed payload file has its meta file removed with it
+- **AND** the newly written dump pair is retained
+
+#### Scenario: Dump retention needs no setting
+
+- **GIVEN** a default installation with no dump-related configuration
+- **WHEN** oversized response-create dumps are captured over time
+- **THEN** duplicate suppression and pruning apply
+- **AND** no `CODEX_LB_*` setting is required to bound the directory
+
+### Requirement: External secret references support provider-native layouts
+
+When `externalSecrets.enabled=true`, the Helm chart MUST render an
+`external-secrets.io/v1` ExternalSecret. The database URL and encryption key
+MUST each accept an independent remote key and an optional JSON property. An
+empty remote key MUST default to the release fullname, and the default
+properties MUST preserve the existing `database-url` and `encryption-key` JSON
+layout. Explicitly nulled remote reference overrides MUST render the default
+layout instead of failing the template.
+
+#### Scenario: Existing JSON secret layout remains the default
+
+- **WHEN** external secrets mode is enabled without remote reference overrides
+- **THEN** both target keys read from the remote secret named after the release
+- **AND** they extract the `database-url` and `encryption-key` JSON properties
+- **AND** the rendered ExternalSecret uses `external-secrets.io/v1`
+
+#### Scenario: Individual remote secrets need no JSON property
+
+- **WHEN** an operator configures separate absolute remote keys for the database URL and encryption key
+- **AND** leaves both property values empty
+- **THEN** each target key reads the complete value of its configured remote secret
+- **AND** the rendered remote references omit `property`
+
+#### Scenario: Nulled overrides fall back to the default layout
+
+- **WHEN** an operator explicitly nulls `externalSecrets.remoteRefs` or one of its subtrees
+- **THEN** rendering succeeds
+- **AND** the affected target keys use the release fullname and their default JSON properties
+
+### Requirement: Helm PostgreSQL capacity guidance accounts for both application pools
+
+Helm sizing documentation and production-oriented values SHALL calculate maximum application PostgreSQL connections as `(databasePoolSize + databaseMaxOverflow) * 2 pooled engines * 1 supported worker * maxReplicas`. Values described as fitting PostgreSQL's default `max_connections=100` MUST reserve at least 20 raw server slots for PostgreSQL-reserved connections, the migration path's two-connection peak, administration, and transient non-application clients.
+
+#### Scenario: Default chart reaches its HPA ceiling
+
+- **WHEN** the default chart scales to `autoscaling.maxReplicas`
+- **THEN** both application pools across all replicas require no more than 80 PostgreSQL connections
+- **AND** at least 20 raw server slots remain outside the application-pool budget
+
+#### Scenario: Production overlay reaches its HPA ceiling
+
+- **WHEN** `values-prod.yaml` scales to `autoscaling.maxReplicas`
+- **THEN** both application pools across all replicas require no more than 80 PostgreSQL connections
+- **AND** at least 20 raw server slots remain available for PostgreSQL reservations, migrations, administration, and transient non-application clients
+
+### Requirement: Helm Grafana dashboard titles are configurable
+
+The Helm chart MUST allow operators to override the titles of packaged Grafana
+dashboards by JSON filename. The default values MUST preserve the packaged
+dashboard titles.
+
+#### Scenario: Operator uses concise titles in a folder hierarchy
+
+- **GIVEN** Grafana dashboard provisioning is enabled
+- **AND** title overrides map `codex-lb.json` to `Overview` and
+  `ttft-breakdown.json` to `TTFT Breakdown`
+- **WHEN** the chart renders the Grafana dashboard ConfigMap
+- **THEN** each dashboard JSON document contains its configured title
+- **AND** dashboard UIDs and all panel definitions remain unchanged
+
+#### Scenario: Default titles remain compatible
+
+- **GIVEN** Grafana dashboard provisioning is enabled
+- **AND** the operator does not customize dashboard titles
+- **WHEN** the chart renders the Grafana dashboard ConfigMap
+- **THEN** the overview title remains `codex-lb`
+- **AND** the TTFT title remains `codex-lb TTFT Breakdown`
+- **AND** each ConfigMap value remains byte-identical to the chart's raw-file rendering
+
+### Requirement: Helm preStop shares the application drain deadline
+
+The Helm lifecycle hook MUST start local drain and poll its strict status. The configured routing dwell and application deadline MUST be measured from Python preStop-helper start. The hook MUST convey its helper-anchored absolute monotonic drain deadline to the loopback drain-start endpoint; that deadline-bearing request MUST commit the one-way process barrier. The application MUST reject non-finite values, clamp the supplied deadline so it cannot exceed the configured application timeout measured from receipt, and return the effective committed absolute deadline. The hook MUST validate that response and use the earlier of its local and returned deadlines. Local drain-start request latency or an earlier process deadline MUST therefore consume that single absolute budget rather than create another period. The hook MUST exit once the dwell has elapsed with `draining=true` and `in_flight=0`, or when the effective application drain deadline is exhausted. It MUST NOT add a second fixed drain period. A start, status, or status-schema failure MUST end the hook promptly so kubelet can deliver SIGTERM as the fallback, without rolling back a barrier already accepted by the application. Kubernetes termination grace MUST be documented as beginning before helper launch, with exec/Python launch latency consuming the hard grace but not restarting or shortening the helper-anchored application budget.
+
+#### Scenario: Routing dwell completes with no in-flight work
+
+- **WHEN** the Python preStop helper starts the routing dwell and status reports zero in-flight work
+- **THEN** the hook waits through the routing dwell measured from helper start
+- **AND** the loopback drain-start request establishes the helper-start-anchored application deadline
+- **AND** local drain-start request latency does not restart that dwell
+- **AND** exits without waiting through the rest of the drain timeout
+
+#### Scenario: Drain-start request cannot extend the deadline
+
+- **WHEN** the loopback drain-start request reaches the application after helper start
+- **THEN** the application uses no deadline later than the hook's supplied absolute deadline
+- **AND** clamps that value to no later than its configured timeout from receipt
+- **AND** commits the process barrier and returns the effective deadline
+- **AND** the hook bounds all later polling by that returned deadline
+- **AND** rejects a non-finite supplied deadline
+
+#### Scenario: Work remains after routing dwell
+
+- **WHEN** routing dwell has elapsed and status still reports positive `in_flight`
+- **THEN** the hook continues polling until `in_flight=0` or the shared deadline
+
+#### Scenario: Drain start or status fails
+
+- **WHEN** the local drain start request, status request, or status schema fails
+- **THEN** preStop exits promptly with failure
+- **AND** it does not blindly sleep through another timeout
+
+#### Scenario: Helm timing values are unsafe
+
+- **WHEN** `config.shutdownDrainTimeoutSeconds` is shorter than `preStopSleepSeconds`
+- **OR** `terminationGracePeriodSeconds` is shorter than `config.shutdownDrainTimeoutSeconds + 32`
+- **THEN** chart rendering fails with a helpful timing-contract error
+
+#### Scenario: Operator reads shutdown documentation
+
+- **WHEN** an operator inspects Helm shutdown tuning
+- **THEN** documentation states that preStop and SIGTERM share one application deadline
+- **AND** distinguishes the earlier Kubernetes hard-grace start from the Python helper's application-deadline start
+- **AND** uses the nested `config.shutdownDrainTimeoutSeconds` values key
+- **AND** warns that an old or custom `terminationGracePeriodSeconds` from a values file, `--set`, or `--reuse-values` below `config.shutdownDrainTimeoutSeconds + 32` makes Helm rendering fail before resources are applied
+- **AND** states that the minimum is the configured drain timeout plus 32 seconds, is 62 seconds at the default 30-second drain timeout, and that the chart default is 65 seconds
+- **AND** directs the operator to remove the override or raise it to at least the computed minimum before installing or upgrading
+- **AND** states that omitting the key under `--reuse-values` retains the stored low value, so that path must set at least the computed minimum explicitly, while adopting the chart default requires an intentional non-reuse or `--reset-values` upgrade with the key absent
+
+### Requirement: Shipped launch paths use the pre-connection drain server
+
+Every shipped or documented launch path for the main application MUST delegate to the project CLI so direct SIGTERM commits the application drain barrier before Uvicorn closes connections. Development Compose MUST preserve source-watch behavior without replacing the project server with Uvicorn's reload supervisor.
+
+#### Scenario: Development Compose watches application source
+
+- **WHEN** the development Compose service is started with watch enabled
+- **THEN** it launches the main application through `python -m app.cli`
+- **AND** an application source sync restarts that service
+- **AND** it does not launch direct Uvicorn reload
+
+#### Scenario: Operator follows a shipped local command
+
+- **WHEN** an operator follows a repository-documented command for the main application
+- **THEN** that command delegates to `app.cli`
+- **AND** direct SIGTERM reaches the pre-connection drain server
+
+### Requirement: Nix flake provides reproducible development and execution paths
+
+The repository MUST provide a locked Nix flake for each supported Nix platform. The flake MUST expose the proxy as its default package and default app, and MUST expose a default development shell containing an editable project installation, all locked runtime dependencies, the `dev` dependency group, and the project package manager. The default package and development shell MUST exclude documentation dependencies and optional runtime integrations unless they are required by those outputs. The flake package and development shell MUST use Python 3.13 and MUST derive Python dependencies from the committed `pyproject.toml` and `uv.lock` files.
+
+Because the packaged module root lives in the read-only Nix store where env files cannot exist, the packaged entry points MUST provide launch-directory `.env` / `.env.local` loading through the explicit `CODEX_LB_ENV_FILE` settings-load override (an `os.pathsep`-separated env-file path list, honored before Settings reads env files), defaulted by the package wrapper and never overriding an operator-provided value. Nix packaging MUST NOT change env-file discovery for non-Nix launch paths: without `CODEX_LB_ENV_FILE`, env files resolve relative to the installed module root and launch-directory env files are never loaded implicitly.
+
+#### Scenario: Default package builds the proxy
+
+- **WHEN** a user runs `nix build`
+- **THEN** Nix builds a package containing the `codex-lb` and `codex-lb-db` commands
+- **AND** the package contains the compiled dashboard served by the proxy root route
+- **AND** the package uses the dependency versions and hashes recorded by the flake and Python lock files
+
+#### Scenario: Default app runs the proxy CLI
+
+- **WHEN** a user runs `nix run . -- --help`
+- **THEN** the packaged `codex-lb` command prints its CLI help and exits successfully
+- **AND** running `nix run .` without help arguments starts the proxy through the project-owned CLI entry point
+- **AND** the packaged app loads `.env` and `.env.local` from the directory where it is launched
+- **AND** an operator-provided `CODEX_LB_ENV_FILE` value takes precedence over the launch-directory default
+
+#### Scenario: Non-Nix launch paths keep module-root env-file discovery
+
+- **WHEN** the application is launched outside the Nix wrapper without `CODEX_LB_ENV_FILE`
+- **THEN** `.env` and `.env.local` resolve relative to the installed module root
+- **AND** env files in the launch directory are not loaded
+
+#### Scenario: Development shell is editable and complete
+
+- **WHEN** a user enters the repository with `nix develop`
+- **THEN** the shell provides Python 3.13, `uv`, the project CLI entry points, runtime dependencies, and the `dev` dependency group
+- **AND** Python imports resolve the project packages from the working tree so source edits take effect without rebuilding the shell
+- **AND** documentation dependencies and optional metrics and tracing integrations are absent from the default shell
+- **AND** `uv` is prevented from downloading Python or replacing the Nix-managed environment
+
+#### Scenario: Flake check builds the package
+
+- **WHEN** a user runs `nix flake check`
+- **THEN** Nix builds the default package
+
+### Requirement: Official Linux container packages locked native egress
+
+The official Linux container build MUST compile the native egress worker from
+the repository-root Cargo workspace with its committed lockfile and pinned
+toolchain in an isolated Rust build stage, and MUST install only the resulting
+release executable as `codex-lb-native-egress` on the runtime path. The
+executable MUST support a long-lived multiplexed request protocol and reusable
+reqwest client pools without requiring a sidecar or operator setting. The
+runtime image MUST NOT contain the Rust toolchain or Cargo build directory.
+Python wheel and source installs MUST remain valid when the executable is
+absent.
+
+#### Scenario: Container runtime exposes native helper
+
+- **WHEN** the official Linux image is built from the repository
+- **THEN** `codex-lb-native-egress` is executable on the runtime path
+- **AND** it was built with the committed lockfile
+- **AND** it accepts multiple request commands during one process lifetime
+- **AND** Cargo and the Rust compiler are absent from the runtime image
+
+#### Scenario: Universal Python package remains portable
+
+- **WHEN** a wheel or source install runs on a platform without the helper
+- **THEN** importing and starting codex-lb succeeds
+- **AND** supported direct requests fall back to the Python transport
+
+### Requirement: Rust migration uses one final-state workspace
+
+The repository MUST maintain one virtual Cargo workspace at its root, one
+committed application lockfile, and a pinned Rust toolchain. Production Rust
+code MUST live in focused crates below `crates/`; it MUST NOT be isolated in a
+temporary language or helper subtree that requires a repository-wide move when
+the Python backend is retired. The protocol, reusable transport, and worker
+binary MUST remain separate dependency layers, with the worker depending on
+transport and transport depending on the runtime-free protocol crate. Workspace
+policy MUST forbid unsafe Rust by default, deny Clippy warnings in CI, and audit
+advisories, licenses, wildcard dependencies, and non-approved sources.
+
+#### Scenario: Another backend slice migrates to Rust
+
+- **WHEN** a cohesive Python-owned backend slice gains a Rust implementation
+- **THEN** its focused crate is added under the existing root workspace
+- **AND** reusable libraries do not depend on executable crates
+
+#### Scenario: Python backend is eventually retired
+
+- **WHEN** Rust becomes the application owner
+- **THEN** the existing root workspace and crates remain at their canonical paths
+- **AND** the server application is added without relocating a temporary `rust/` or `native/` tree

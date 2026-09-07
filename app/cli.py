@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import math
 import os
 import sqlite3
@@ -62,11 +63,14 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--ssl-keyfile", default=os.getenv("SSL_KEYFILE"))
     parser.add_argument(
         "--timeout-keep-alive",
-        default=os.getenv("UVICORN_TIMEOUT_KEEP_ALIVE", "7200"),
+        default=os.getenv("UVICORN_TIMEOUT_KEEP_ALIVE", "300"),
         help=(
-            "Seconds to keep idle HTTP connections open. Codex CLI reuses local "
-            "connections for large compact POSTs; short keepalive windows can leave the "
-            "client writing to a stale socket before the request reaches the app."
+            "Seconds an idle keep-alive HTTP connection stays open between requests "
+            "(env: UVICORN_TIMEOUT_KEEP_ALIVE). Keep it above any client's connection-pool "
+            "idle timeout (reqwest default 90s; Codex CLI opens a fresh connection per "
+            "/responses request, so this mainly matters for other SDKs and reverse proxies) "
+            "and well under an hour, because every idle connection is held for the full "
+            "window. uvicorn's stock 5s default is too short for pooled clients."
         ),
     )
     parser.add_argument(
@@ -151,6 +155,12 @@ def _load_graceful_drain_server():
     return GracefulDrainServer
 
 
+def _load_http_protocol_class() -> Any:
+    from app.core.http_protocol import load_http_protocol_class
+
+    return load_http_protocol_class()
+
+
 def _load_shutdown_drain_timeout_seconds() -> int:
     from app.core.config.settings import get_settings
 
@@ -158,6 +168,10 @@ def _load_shutdown_drain_timeout_seconds() -> int:
 
 
 def _run_server(app: str, **kwargs: Any) -> None:
+    # Route warnings.warn() output (for example aiohttp ResourceWarning reprs
+    # that embed connection keys) through the redacting log handlers instead
+    # of raw stderr.
+    logging.captureWarnings(True)
     uvicorn = _load_uvicorn()
     drain_timeout_seconds = _load_shutdown_drain_timeout_seconds()
     config = uvicorn.Config(
@@ -166,6 +180,11 @@ def _run_server(app: str, **kwargs: Any) -> None:
         # this explicitly prevents Uvicorn from treating ambient
         # WEB_CONCURRENCY as an unsupported multiprocess launch.
         workers=1,
+        # Serve valid HTTP/1.1 requests that opportunistically offer an h2c
+        # upgrade (JetBrains/Ktor clients) instead of rejecting them; the
+        # stock httptools protocol drops the body or answers 400. See
+        # app/core/http_protocol.py and issue #1757.
+        http=_load_http_protocol_class(),
         timeout_graceful_shutdown=drain_timeout_seconds,
         **kwargs,
     )

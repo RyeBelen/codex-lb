@@ -29,7 +29,11 @@ from app.db.models import Account, AccountStatus
 from app.modules.api_keys.service import ApiKeyData, ApiKeyUsageReservationData
 from app.modules.proxy._service.support import _call_with_supported_optional_kwargs, _request_log_client_fields
 from app.modules.proxy.helpers import _header_account_id, _normalize_error_code, _parse_openai_error
-from app.modules.proxy.request_policy import normalize_upstream_model_alias, validate_model_access
+from app.modules.proxy.request_policy import (
+    apply_prohibit_fast_mode,
+    normalize_upstream_model_alias,
+    validate_model_access,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -248,7 +252,6 @@ class _WarmupMixin:
                     headers=filtered_headers,
                     warmup_model=effective_model,
                     prohibit_fast_mode=prohibit_fast_mode,
-                    allow_pre_submit_errors_as_result=len(accounts_to_submit) > 1,
                 )
 
         submission_results = await asyncio.gather(*(_submit_account_warmup(account) for account in accounts_to_submit))
@@ -286,7 +289,9 @@ class _WarmupMixin:
         *,
         api_key: ApiKeyData | None,
     ) -> list[_WarmupAccountSnapshot]:
-        active_accounts = [account for account in accounts if account.status == AccountStatus.ACTIVE]
+        active_accounts = [
+            account for account in accounts if account.status in (AccountStatus.ACTIVE, AccountStatus.REAUTH_REQUIRED)
+        ]
         if api_key is None or not api_key.account_assignment_scope_enabled:
             return active_accounts
         assigned_ids = {account_id for account_id in api_key.assigned_account_ids if account_id}
@@ -300,7 +305,6 @@ class _WarmupMixin:
         headers: Mapping[str, str],
         warmup_model: str,
         prohibit_fast_mode: bool,
-        allow_pre_submit_errors_as_result: bool = False,
     ) -> _WarmupSubmitResult:
         started_at = time.monotonic()
         useragent, useragent_group, conversation_id = _request_log_client_fields(headers)
@@ -342,7 +346,12 @@ class _WarmupMixin:
                 input="warmup",
                 store=False,
             )
-            normalize_upstream_model_alias(payload, prohibit_fast_mode=prohibit_fast_mode)
+            normalize_upstream_model_alias(payload)
+            apply_prohibit_fast_mode(
+                payload,
+                prohibit_fast_mode=prohibit_fast_mode,
+                request_id=request_id,
+            )
             response = await _call_with_supported_optional_kwargs(
                 _service_core_compact_responses(),
                 payload,
@@ -423,13 +432,9 @@ class _WarmupMixin:
         except ProxyAuthError as exc:
             error_code = "auth_error"
             error_message = str(exc) or "Warmup authentication failed"
-            if not allow_pre_submit_errors_as_result:
-                raise
         except ProxyRateLimitError as exc:
             error_code = "rate_limit_exceeded"
             error_message = str(exc) or "Warmup request was rate limited"
-            if not allow_pre_submit_errors_as_result:
-                raise
         except Exception as exc:
             error_code = "upstream_error"
             error_message = str(exc) or "Warmup request failed"

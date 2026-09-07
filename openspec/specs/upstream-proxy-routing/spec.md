@@ -47,14 +47,29 @@ Request logs for migrated upstream calls MUST record route mode, proxy pool id, 
 - **THEN** the log MUST include the fail-closed reason without proxy credentials.
 
 ### Requirement: Codex installation metadata must be account-owned
-Codex `response.create` requests sent through account-scoped bridge or websocket transports MUST use the selected local account's stored `x-codex-installation-id` value in `client_metadata`.
+
+Codex `response.create` requests sent through account-scoped HTTP/SSE, bridge,
+or WebSocket transports MUST use the selected local account's stored
+`x-codex-installation-id` value in `client_metadata`. For the observed Codex CLI
+0.150.1 Responses wire profile, the same value MUST NOT be synthesized as a
+standalone upstream HTTP request or WebSocket handshake header. Header location
+is part of the wire profile and MUST be selected per transport rather than
+inferred from the existence of an account installation id.
 
 #### Scenario: Client-supplied installation id is replaced
+
 - **GIVEN** a client sends `client_metadata.x-codex-installation-id`
 - **AND** codex-lb selects account `A`
 - **WHEN** codex-lb sends the upstream `response.create` request
 - **THEN** the upstream `client_metadata.x-codex-installation-id` MUST equal account `A`'s stored installation id
 - **AND** it MUST NOT equal the client-supplied value.
+
+#### Scenario: Profiled Responses egress omits standalone installation header
+
+- **GIVEN** codex-lb selects an account with a stored installation id
+- **WHEN** it opens a Codex CLI 0.150.1-profiled Responses HTTP/SSE request or WebSocket connection
+- **THEN** the selected account installation id MUST be present in each `response.create.client_metadata`
+- **AND** `x-codex-installation-id` MUST be absent from the standalone upstream request or handshake headers.
 
 ### Requirement: Upstream proxy pool membership must reject duplicates
 Dashboard upstream proxy pool member mutations MUST reject attempts to add an endpoint that is already a member of the target pool with a validation error instead of surfacing a database integrity failure.
@@ -95,3 +110,67 @@ failure.
 - **GIVEN** a routed WebSocket context manager enters successfully
 - **WHEN** the client returns the opened WebSocket and its context to the caller
 - **THEN** the caller can exit the returned context using the existing ownership contract
+
+### Requirement: Cached route resolution preserves fail-closed semantics
+
+Any cache in front of upstream-route resolution MUST store the resolver's outcome verbatim — a resolved route, a permitted direct-egress `None`, or a fail-closed error with its reason. A cache hit MUST reproduce that outcome exactly: it MUST NOT convert a fail-closed outcome or a routed outcome into direct egress, and it MUST NOT substitute a different pool or endpoint than the resolver chose. Cache staleness MUST be bounded by invalidation on admin mutations (same-replica: before the mutating response returns; peers: within one cache-invalidation poll interval) with a TTL backstop for out-of-band edits.
+
+#### Scenario: Cached fail-closed outcome keeps failing closed
+
+- **GIVEN** an account-bound pool with no active usable endpoint whose fail-closed resolution outcome is cached
+- **WHEN** further upstream operations are attempted for that account
+- **THEN** each operation MUST fail before opening an upstream network connection with the same fail-closed reason
+- **AND** it MUST NOT use the default pool, environment proxy, or direct egress
+
+#### Scenario: New binding takes effect without a direct-egress window on the mutating replica
+
+- **GIVEN** an account whose cached resolution outcome is direct-egress `None`
+- **WHEN** an operator saves an active proxy binding for that account
+- **THEN** the mutating replica's cached outcome MUST be invalidated before the binding response returns, so subsequent requests on that replica resolve the bound pool
+
+### Requirement: Confirmed account-proxy connection failures fail over safely
+
+When an account-routed transport reports that it could not connect to the selected proxy endpoint and proves that the upstream request was not dispatched, the service MUST classify the failure with sanitized structured pre-dispatch provenance. For a route with another usable endpoint in the same proxy pool, the client MUST try that endpoint before moving accounts, including for a non-idempotent request. If the pool cannot connect, movable Responses requests MUST exclude the failed account and retry another eligible account within the existing request budget and attempt limits.
+
+This behavior MUST cover raw HTTP/SSE, native Responses WebSocket, and the HTTP responses bridge. Before recording transient account backoff, the service MUST release response-create and stream leases held for the failed account. A request-scoped API-key reservation MUST remain singular across an internal pre-dispatch failover, MUST settle or release at the terminal request outcome before the account-health write, and MUST NOT be reacquired solely for the internal failover. If neither settlement nor fallback release can be confirmed, the service MUST leave the health write unapplied. HTTP-bridge startup cleanup MUST release only an unowned current request lifecycle, and each reservation lifecycle MUST drain only its own health writes after confirmed settlement or release. The confirmed failure MUST place the account at the existing bounded transient error-backoff floor, but MUST NOT pause, deactivate, rate-limit, or quota-penalize it.
+
+The service MUST NOT replay a request when dispatch is unknown or when the request depends on hard previous-response, turn-state, uploaded-file, single-account, or other required account ownership. If no eligible replacement account exists, the service MUST preserve the original sanitized upstream-unavailable failure instead of replacing it with a generated `no_accounts` error.
+
+#### Scenario: POST uses a healthy endpoint from the same proxy pool
+
+- **GIVEN** a non-idempotent Responses POST is routed through a proxy pool with two endpoints
+- **AND** connecting to the first endpoint fails before request dispatch
+- **WHEN** the second endpoint is reachable
+- **THEN** the service sends the request through the second endpoint
+- **AND** it does not move the request to another account
+
+#### Scenario: movable request retries another account
+
+- **GIVEN** two eligible accounts and the first account's complete proxy route refuses connections before dispatch
+- **WHEN** a fresh Responses request has no hard account ownership
+- **THEN** the service releases the first account's response-create and stream leases
+- **AND** it settles or releases any request-scoped API-key reservation before the account-health write
+- **AND** it records bounded transient backoff for the first account
+- **AND** it excludes the first account and completes through the second account
+- **AND** no failure event from the first attempt is forwarded downstream
+
+#### Scenario: hard account ownership fails closed
+
+- **GIVEN** a Responses request depends on a previous-response owner or an account-scoped uploaded file
+- **AND** the required account's proxy refuses the connection before dispatch
+- **WHEN** another account is otherwise eligible
+- **THEN** the service does not send the request to the other account
+- **AND** it returns the sanitized upstream-unavailable failure for the required account
+
+#### Scenario: ambiguous transport failure is not replayed
+
+- **WHEN** a POST transport failure cannot prove that request dispatch was impossible
+- **THEN** the service does not use that failure as authorization to retry another proxy endpoint or account
+
+#### Scenario: empty replacement pool preserves the original failure
+
+- **GIVEN** a movable request has a confirmed pre-dispatch proxy connection failure
+- **AND** no other eligible account can be selected
+- **THEN** the client receives the original sanitized upstream-unavailable failure
+- **AND** the failure is not replaced with `no_accounts`
+

@@ -13,6 +13,7 @@ class _WebSocketServiceProtocol(Protocol):
     _decide_websocket_failover_action: Any
     _downstream_websocket_is_idle: Any
     _drain_deferred_account_error_backoffs: Any
+    _drain_deferred_keyed_stream_health: Any
     _emit_pending_websocket_keepalive: Any
     _emit_websocket_connect_failure: Any
     _emit_websocket_connect_timeout: Any
@@ -59,6 +60,7 @@ class _WebSocketServiceProtocol(Protocol):
     _settle_stream_api_key_usage: Any
     _start_request_state_api_key_reservation_heartbeat: Any
     _try_open_websocket_connect_attempt: Any
+    _touch_active_websocket_thread_affinity: Any
     _websocket_continuity_index: Any
     _websocket_continuity_state_for_request: Any
     _websocket_previous_response_account_index: Any

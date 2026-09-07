@@ -302,6 +302,45 @@ if PROMETHEUS_AVAILABLE:
         ["outcome"],
         registry=REGISTRY,
     )
+    http_bridge_spool_cleanup_runs_total = Counter(
+        "codex_lb_http_bridge_spool_cleanup_runs_total",
+        "Total durable HTTP bridge transcript cleanup passes by outcome",
+        ["outcome"],
+        registry=REGISTRY,
+    )
+    http_bridge_spool_cleanup_deleted_operations_total = Counter(
+        "codex_lb_http_bridge_spool_cleanup_deleted_operations_total",
+        "Total durable HTTP bridge operations deleted by transcript retention",
+        registry=REGISTRY,
+    )
+    http_bridge_spool_cleanup_duration_seconds = Histogram(
+        "codex_lb_http_bridge_spool_cleanup_duration_seconds",
+        "Durable HTTP bridge transcript cleanup pass duration",
+        registry=REGISTRY,
+    )
+    http_bridge_spool_cleanup_backlog_likely = Gauge(
+        "codex_lb_http_bridge_spool_cleanup_backlog_likely",
+        "Whether the latest durable transcript cleanup pass stopped with likely backlog",
+        registry=REGISTRY,
+        **({"multiprocess_mode": "livemostrecent"} if MULTIPROCESS_MODE else {}),
+    )
+    http_bridge_operation_abandonment_total = Counter(
+        "codex_lb_http_bridge_operation_abandonment_total",
+        "Total ambiguous HTTP bridge operations fenced as abandoned",
+        ["source_state"],
+        registry=REGISTRY,
+    )
+    event_loop_lag_seconds = Gauge(
+        "codex_lb_event_loop_lag_seconds",
+        "Sampled event-loop scheduling lag (asyncio.sleep drift) in seconds",
+        registry=REGISTRY,
+        **({"multiprocess_mode": "livemax"} if MULTIPROCESS_MODE else {}),
+    )
+    event_loop_lag_warnings_total = Counter(
+        "codex_lb_event_loop_lag_warnings_total",
+        "Total event-loop lag samples at or above the warning threshold",
+        registry=REGISTRY,
+    )
     stream_keepalive_sent_total = Counter(
         "codex_lb_stream_keepalive_sent_total",
         "Total downstream SSE keepalive frames emitted by surface",
@@ -385,6 +424,13 @@ else:
     http_bridge_prewarm_total: CounterLike | None = None
     http_bridge_stuck_retire_total: CounterLike | None = None
     http_bridge_retry_circuit_total: CounterLike | None = None
+    http_bridge_spool_cleanup_runs_total: CounterLike | None = None
+    http_bridge_spool_cleanup_deleted_operations_total: CounterLike | None = None
+    http_bridge_spool_cleanup_duration_seconds: HistogramLike | None = None
+    http_bridge_spool_cleanup_backlog_likely: GaugeLike | None = None
+    http_bridge_operation_abandonment_total: CounterLike | None = None
+    event_loop_lag_seconds: GaugeLike | None = None
+    event_loop_lag_warnings_total: CounterLike | None = None
     stream_keepalive_sent_total: CounterLike | None = None
     stream_idle_timeout_total: CounterLike | None = None
     cache_invalidation_bump_failures_total: CounterLike | None = None
@@ -429,9 +475,16 @@ __all__ = [
     "cap_partition_replicas",
     "circuit_breaker_state",
     "continuity_fail_closed_total",
+    "event_loop_lag_seconds",
+    "event_loop_lag_warnings_total",
     "continuity_owner_resolution_total",
     "http_bridge_prewarm_total",
     "http_bridge_retry_circuit_total",
+    "http_bridge_spool_cleanup_backlog_likely",
+    "http_bridge_spool_cleanup_deleted_operations_total",
+    "http_bridge_spool_cleanup_duration_seconds",
+    "http_bridge_spool_cleanup_runs_total",
+    "http_bridge_operation_abandonment_total",
     "http_bridge_stuck_retire_total",
     "stream_keepalive_sent_total",
     "stream_idle_timeout_total",

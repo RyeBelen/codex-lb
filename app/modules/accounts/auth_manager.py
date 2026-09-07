@@ -30,6 +30,7 @@ from app.core.config.settings import get_settings
 from app.core.crypto import TokenEncryptor
 from app.core.plan_types import coerce_account_plan_type
 from app.core.upstream_proxy import UpstreamProxyRouteError, resolve_upstream_route
+from app.core.utils.shared_future import wait_on_shared_future
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountProxyBinding, AccountStatus
 from app.db.session import get_background_session
@@ -196,7 +197,12 @@ class _RefreshSingleflight:
                 self._inflight[key] = task
                 task.add_done_callback(lambda done, *, cache_key=key: self._schedule_complete(cache_key, done))
         assert task is not None
-        return await asyncio.shield(task)
+        # Not asyncio.shield: shield attaches per-waiter callbacks to the
+        # shared singleflight task, which degrades to O(N^2) removal scans
+        # when piled-up waiters are cancelled (see shared_future.py). The
+        # helper preserves shield semantics: a cancelled waiter detaches
+        # without aborting the refresh.
+        return await wait_on_shared_future(task)
 
     def _schedule_complete(self, key: _RefreshSingleflightKey, task: asyncio.Task[Account]) -> None:
         asyncio.create_task(self._complete(key, task))
@@ -205,8 +211,13 @@ class _RefreshSingleflight:
         try:
             async with self._lock:
                 current = self._inflight.get(key)
-                if current is task:
-                    self._inflight.pop(key, None)
+                if current is not task:
+                    # A successor owns settlement for this key; consume the
+                    # stale task's result without touching its cache state.
+                    if not task.cancelled():
+                        task.exception()
+                    return
+                self._inflight.pop(key, None)
                 if task.cancelled():
                     self._recent_failures.pop(key, None)
                     return
@@ -276,7 +287,7 @@ class AuthManager:
         self._refresh_claims = refresh_claims
 
     async def ensure_fresh(self, account: Account, *, force: bool = False) -> Account:
-        if force or should_refresh(account.last_refresh):
+        if force or (account.status != AccountStatus.REAUTH_REQUIRED and should_refresh(account.last_refresh)):
             account = await _REFRESH_SINGLEFLIGHT.run(
                 _refresh_singleflight_key(self._encryptor, account),
                 lambda: self._run_refresh(account),
@@ -286,9 +297,9 @@ class AuthManager:
     async def _run_refresh(self, account: Account) -> Account:
         """Singleflight body for token refresh.
 
-        Runs inside a detached task that the singleflight keeps alive with
-        ``asyncio.shield`` (so concurrent waiters share one refresh and a
-        cancelled waiter does not abort it). Because the task outlives the
+        Runs inside a detached task that the singleflight keeps alive via
+        ``wait_on_shared_future`` (so concurrent waiters share one refresh and
+        a cancelled waiter does not abort it). Because the task outlives the
         caller, it MUST NOT use the caller's request-scoped session: when a
         client disconnects, the caller is cancelled and its
         ``async with get_background_session()`` closes that session, while this
@@ -331,6 +342,20 @@ class AuthManager:
     async def refresh_account(self, account: Account) -> Account:
         claims = self._refresh_claims if self._refresh_claims is not None else get_refresh_claim_coordinator()
         if claims is None:
+            requested_fingerprint = _refresh_token_material_fingerprint(
+                self._encryptor,
+                account.refresh_token_encrypted,
+            )
+            latest = await self._repo.get_by_id_fresh(account.id)
+            if latest is not None:
+                if (
+                    _refresh_token_material_fingerprint(self._encryptor, latest.refresh_token_encrypted)
+                    != requested_fingerprint
+                ):
+                    return _adopt_account_row(account, latest)
+                _adopt_account_row(account, latest)
+                if account.status in _TERMINAL_REFRESH_STATUSES:
+                    raise _terminal_status_refresh_error(account)
             return await self._perform_refresh(account, refresh_token_encrypted=account.refresh_token_encrypted)
         return await self._refresh_account_with_claim(account, claims)
 
@@ -917,7 +942,6 @@ class AuthManager:
             if applied:
                 account.status = status
                 account.deactivation_reason = reason
-                mark_account_routing_unavailable(account.id)
                 get_account_selection_cache().invalidate()
                 logger.warning(
                     "Token-refresh compare-and-set for account_id=%s could not persist the freshly "
@@ -1038,7 +1062,8 @@ class AuthManager:
             if applied:
                 account.status = status
                 account.deactivation_reason = reason
-                mark_account_routing_unavailable(account.id)
+                if status == AccountStatus.DEACTIVATED:
+                    mark_account_routing_unavailable(account.id)
                 get_account_selection_cache().invalidate()
                 return None
             # CAS missed: the freshly observed account state changed between the

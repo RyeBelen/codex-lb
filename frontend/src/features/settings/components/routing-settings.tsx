@@ -110,10 +110,12 @@ function createRoutingSettingsDraft(settings: DashboardSettings): RoutingSetting
   return {
     warmupModel: settings.warmupModel,
     cacheAffinityTtl: String(settings.openaiCacheAffinityMaxAgeSeconds),
-    proxyAccountResponseCreateLimit: String(settings.proxyAccountResponseCreateLimit),
-    proxyAccountStreamLimit: String(settings.proxyAccountStreamLimit),
-    proxyAccountStreamRecoveryReserve: String(settings.proxyAccountStreamRecoveryReserve),
-    proxyApiKeyFairShareCongestionThresholdPct: String(settings.proxyApiKeyFairShareCongestionThresholdPct),
+    proxyAccountResponseCreateLimit: overrideToInput(settings.proxyAccountResponseCreateLimitOverride),
+    proxyAccountStreamLimit: overrideToInput(settings.proxyAccountStreamLimitOverride),
+    proxyAccountStreamRecoveryReserve: overrideToInput(settings.proxyAccountStreamRecoveryReserveOverride),
+    proxyApiKeyFairShareCongestionThresholdPct: overrideToInput(
+      settings.proxyApiKeyFairShareCongestionThresholdPctOverride,
+    ),
     relativeAvailabilityPower: String(settings.relativeAvailabilityPower),
     relativeAvailabilityTopK: String(settings.relativeAvailabilityTopK),
     stickyPrimaryThreshold: String(settings.stickyReallocationPrimaryBudgetThresholdPct ?? 95),
@@ -142,6 +144,33 @@ function parseNonnegativeInteger(value: string): number | null {
   }
   const parsed = Number(normalized);
   return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : null;
+}
+
+function thresholdHintValues(value: number): { used: string; remaining: string } {
+  // Derive the remaining percent from the rounded used percent so the two
+  // displayed values always sum to exactly 100.
+  const used = Number(value.toFixed(1));
+  const remaining = Number((100 - used).toFixed(1));
+  return { used: String(used), remaining: String(remaining) };
+}
+
+type ParsedCapacityOverride =
+  | { valid: true; value: number | null }
+  | { valid: false; value: null };
+
+function parseCapacityOverride(value: string, max: number | null = null): ParsedCapacityOverride {
+  if (value.trim() === "") {
+    return { valid: true, value: null };
+  }
+  const parsed = parseNonnegativeInteger(value);
+  if (parsed === null || (max !== null && parsed > max)) {
+    return { valid: false, value: null };
+  }
+  return { valid: true, value: parsed };
+}
+
+function overrideToInput(value: number | null | undefined): string {
+  return value == null ? "" : String(value);
 }
 
 export function RoutingSettings({
@@ -185,29 +214,62 @@ export function RoutingSettings({
   const cacheAffinityTtlValid = Number.isInteger(parsedCacheAffinityTtl) && parsedCacheAffinityTtl > 0;
   const cacheAffinityTtlChanged =
     cacheAffinityTtlValid && parsedCacheAffinityTtl !== settings.openaiCacheAffinityMaxAgeSeconds;
-  const parsedProxyAccountResponseCreateLimit = parseNonnegativeInteger(draft.proxyAccountResponseCreateLimit);
-  const parsedProxyAccountStreamLimit = parseNonnegativeInteger(draft.proxyAccountStreamLimit);
-  const parsedProxyAccountStreamRecoveryReserve = parseNonnegativeInteger(
+  const parsedProxyAccountResponseCreateLimit = parseCapacityOverride(draft.proxyAccountResponseCreateLimit);
+  const parsedProxyAccountStreamLimit = parseCapacityOverride(draft.proxyAccountStreamLimit);
+  const parsedProxyAccountStreamRecoveryReserve = parseCapacityOverride(
     draft.proxyAccountStreamRecoveryReserve,
   );
-  const parsedProxyApiKeyFairShareCongestionThresholdPct = parseNonnegativeInteger(
+  const parsedProxyApiKeyFairShareCongestionThresholdPct = parseCapacityOverride(
     draft.proxyApiKeyFairShareCongestionThresholdPct,
+    100,
   );
+  const effectiveProxyAccountStreamLimit =
+    parsedProxyAccountStreamLimit.value ?? settings.proxyAccountStreamLimitEnvironmentValue;
+  const effectiveProxyAccountStreamRecoveryReserve =
+    parsedProxyAccountStreamRecoveryReserve.value ?? settings.proxyAccountStreamRecoveryReserveEnvironmentValue;
   const accountCapacityLimitsValid =
-    parsedProxyAccountResponseCreateLimit !== null &&
-    parsedProxyAccountStreamLimit !== null &&
-    parsedProxyAccountStreamRecoveryReserve !== null &&
-    parsedProxyApiKeyFairShareCongestionThresholdPct !== null &&
-    parsedProxyApiKeyFairShareCongestionThresholdPct <= 100 &&
-    (parsedProxyAccountStreamLimit === 0 ||
-      parsedProxyAccountStreamRecoveryReserve <= parsedProxyAccountStreamLimit);
+    parsedProxyAccountResponseCreateLimit.valid &&
+    parsedProxyAccountStreamLimit.valid &&
+    parsedProxyAccountStreamRecoveryReserve.valid &&
+    parsedProxyApiKeyFairShareCongestionThresholdPct.valid &&
+    (effectiveProxyAccountStreamLimit === 0 ||
+      effectiveProxyAccountStreamRecoveryReserve <= effectiveProxyAccountStreamLimit);
   const accountCapacityLimitsChanged =
     accountCapacityLimitsValid &&
-    (parsedProxyAccountResponseCreateLimit !== settings.proxyAccountResponseCreateLimit ||
-      parsedProxyAccountStreamLimit !== settings.proxyAccountStreamLimit ||
-      parsedProxyAccountStreamRecoveryReserve !== settings.proxyAccountStreamRecoveryReserve ||
-      parsedProxyApiKeyFairShareCongestionThresholdPct !==
-        settings.proxyApiKeyFairShareCongestionThresholdPct);
+    (parsedProxyAccountResponseCreateLimit.value !== (settings.proxyAccountResponseCreateLimitOverride ?? null) ||
+      parsedProxyAccountStreamLimit.value !== (settings.proxyAccountStreamLimitOverride ?? null) ||
+      parsedProxyAccountStreamRecoveryReserve.value !==
+        (settings.proxyAccountStreamRecoveryReserveOverride ?? null) ||
+      parsedProxyApiKeyFairShareCongestionThresholdPct.value !==
+        (settings.proxyApiKeyFairShareCongestionThresholdPctOverride ?? null));
+  const accountCapacityPatch: Partial<
+    Pick<
+      SettingsUpdateRequest,
+      | "proxyAccountResponseCreateLimit"
+      | "proxyAccountStreamLimit"
+      | "proxyAccountStreamRecoveryReserve"
+      | "proxyApiKeyFairShareCongestionThresholdPct"
+    >
+  > = {};
+  if (parsedProxyAccountResponseCreateLimit.value !== (settings.proxyAccountResponseCreateLimitOverride ?? null)) {
+    accountCapacityPatch.proxyAccountResponseCreateLimit = parsedProxyAccountResponseCreateLimit.value;
+  }
+  if (parsedProxyAccountStreamLimit.value !== (settings.proxyAccountStreamLimitOverride ?? null)) {
+    accountCapacityPatch.proxyAccountStreamLimit = parsedProxyAccountStreamLimit.value;
+  }
+  if (
+    parsedProxyAccountStreamRecoveryReserve.value !==
+    (settings.proxyAccountStreamRecoveryReserveOverride ?? null)
+  ) {
+    accountCapacityPatch.proxyAccountStreamRecoveryReserve = parsedProxyAccountStreamRecoveryReserve.value;
+  }
+  if (
+    parsedProxyApiKeyFairShareCongestionThresholdPct.value !==
+    (settings.proxyApiKeyFairShareCongestionThresholdPctOverride ?? null)
+  ) {
+    accountCapacityPatch.proxyApiKeyFairShareCongestionThresholdPct =
+      parsedProxyApiKeyFairShareCongestionThresholdPct.value;
+  }
   const warmupModelChanged = draft.warmupModel.trim() !== settings.warmupModel;
   const warmupModelValid = draft.warmupModel.trim().length > 0 && draft.warmupModel.trim().length <= WARMUP_MODEL_MAX_LENGTH;
   const parsedLimitWarmupCooldown = Number(draft.limitWarmupCooldown);
@@ -707,6 +769,7 @@ export function RoutingSettings({
                   step={1}
                   inputMode="numeric"
                   value={draft.proxyAccountResponseCreateLimit}
+                  placeholder={t("settings.routing.accountCapacity.inheritPlaceholder")}
                   disabled={busy}
                   onChange={(event) => updateDraft({ proxyAccountResponseCreateLimit: event.target.value })}
                   className="h-8 text-xs"
@@ -714,6 +777,13 @@ export function RoutingSettings({
                 <span className="block text-[11px] text-muted-foreground">
                   {t("settings.routing.accountCapacity.responseCreateDescription")}
                 </span>
+                {draft.proxyAccountResponseCreateLimit.trim() === "" ? (
+                  <span className="block text-[11px] text-muted-foreground">
+                    {t("settings.routing.accountCapacity.inheritHint", {
+                      value: settings.proxyAccountResponseCreateLimitEnvironmentValue,
+                    })}
+                  </span>
+                ) : null}
               </label>
               <label className="block space-y-1">
                 <span className="block text-[11px] font-medium text-muted-foreground">
@@ -726,6 +796,7 @@ export function RoutingSettings({
                   step={1}
                   inputMode="numeric"
                   value={draft.proxyAccountStreamLimit}
+                  placeholder={t("settings.routing.accountCapacity.inheritPlaceholder")}
                   disabled={busy}
                   onChange={(event) => updateDraft({ proxyAccountStreamLimit: event.target.value })}
                   className="h-8 text-xs"
@@ -733,6 +804,13 @@ export function RoutingSettings({
                 <span className="block text-[11px] text-muted-foreground">
                   {t("settings.routing.accountCapacity.streamDescription")}
                 </span>
+                {draft.proxyAccountStreamLimit.trim() === "" ? (
+                  <span className="block text-[11px] text-muted-foreground">
+                    {t("settings.routing.accountCapacity.inheritHint", {
+                      value: settings.proxyAccountStreamLimitEnvironmentValue,
+                    })}
+                  </span>
+                ) : null}
               </label>
               <label className="block space-y-1">
                 <span className="block text-[11px] font-medium text-muted-foreground">
@@ -745,6 +823,7 @@ export function RoutingSettings({
                   step={1}
                   inputMode="numeric"
                   value={draft.proxyAccountStreamRecoveryReserve}
+                  placeholder={t("settings.routing.accountCapacity.inheritPlaceholder")}
                   disabled={busy}
                   onChange={(event) => updateDraft({ proxyAccountStreamRecoveryReserve: event.target.value })}
                   className="h-8 text-xs"
@@ -752,6 +831,13 @@ export function RoutingSettings({
                 <span className="block text-[11px] text-muted-foreground">
                   {t("settings.routing.accountCapacity.streamRecoveryReserveDescription")}
                 </span>
+                {draft.proxyAccountStreamRecoveryReserve.trim() === "" ? (
+                  <span className="block text-[11px] text-muted-foreground">
+                    {t("settings.routing.accountCapacity.inheritHint", {
+                      value: settings.proxyAccountStreamRecoveryReserveEnvironmentValue,
+                    })}
+                  </span>
+                ) : null}
               </label>
               <label className="block space-y-1">
                 <span className="block text-[11px] font-medium text-muted-foreground">
@@ -765,6 +851,7 @@ export function RoutingSettings({
                   step={1}
                   inputMode="numeric"
                   value={draft.proxyApiKeyFairShareCongestionThresholdPct}
+                  placeholder={t("settings.routing.accountCapacity.inheritPlaceholder")}
                   disabled={busy}
                   onChange={(event) =>
                     updateDraft({ proxyApiKeyFairShareCongestionThresholdPct: event.target.value })
@@ -774,6 +861,13 @@ export function RoutingSettings({
                 <span className="block text-[11px] text-muted-foreground">
                   {t("settings.routing.accountCapacity.fairShareThresholdDescription")}
                 </span>
+                {draft.proxyApiKeyFairShareCongestionThresholdPct.trim() === "" ? (
+                  <span className="block text-[11px] text-muted-foreground">
+                    {t("settings.routing.accountCapacity.inheritHint", {
+                      value: settings.proxyApiKeyFairShareCongestionThresholdPctEnvironmentValue,
+                    })}
+                  </span>
+                ) : null}
               </label>
             </div>
             <Button
@@ -782,37 +876,47 @@ export function RoutingSettings({
               variant="outline"
               className="h-8 text-xs sm:w-40"
               disabled={busy || !accountCapacityLimitsChanged}
-              onClick={() =>
-                void save({
-                  proxyAccountResponseCreateLimit: parsedProxyAccountResponseCreateLimit!,
-                  proxyAccountStreamLimit: parsedProxyAccountStreamLimit!,
-                  proxyAccountStreamRecoveryReserve: parsedProxyAccountStreamRecoveryReserve!,
-                  proxyApiKeyFairShareCongestionThresholdPct:
-                    parsedProxyApiKeyFairShareCongestionThresholdPct!,
-                })
-              }
+              onClick={() => void save(accountCapacityPatch)}
             >
               {t("settings.routing.accountCapacity.save")}
             </Button>
           </div>
 
-          <div className="flex items-center justify-between p-3">
-            <div>
-              <p className="text-sm font-medium">{t("settings.routing.stickyThreads.label")}</p>
-              <p className="text-xs text-muted-foreground">{t("settings.routing.stickyThreads.description")}</p>
+          <div className="space-y-2 p-3">
+            <div className="flex items-center justify-between gap-4">
+              <div>
+                <p className="text-sm font-medium">{t("settings.routing.stickyThreads.label")}</p>
+                <p className="text-xs text-muted-foreground">{t("settings.routing.stickyThreads.description")}</p>
+              </div>
+              <Switch
+                aria-label={t("settings.routing.stickyThreads.ariaLabel")}
+                checked={settings.stickyThreadsEnabled}
+                disabled={busy}
+                onCheckedChange={(checked) => save({ stickyThreadsEnabled: checked })}
+              />
             </div>
-            <Switch
-              aria-label={t("settings.routing.stickyThreads.ariaLabel")}
-              checked={settings.stickyThreadsEnabled}
-              disabled={busy}
-              onCheckedChange={(checked) => save({ stickyThreadsEnabled: checked })}
-            />
+            <p className="text-xs text-muted-foreground">
+              {t("settings.routing.stickyThreads.hardAffinityNote")}
+            </p>
+          </div>
+
+          <div className="space-y-1 p-3">
+            <p className="text-sm font-medium">{t("settings.routing.quotaWindows.title")}</p>
+            <p className="text-xs text-muted-foreground">{t("settings.routing.quotaWindows.explainer")}</p>
           </div>
 
           <div className="flex flex-col gap-3 p-3 sm:flex-row sm:items-center sm:justify-between">
             <div>
               <p className="text-sm font-medium">{t("settings.routing.stickyThresholds.primaryLabel")}</p>
               <p className="text-xs text-muted-foreground">{t("settings.routing.stickyThresholds.primaryDescription")}</p>
+              {stickyPrimaryThresholdValid ? (
+                <p className="text-xs text-muted-foreground">
+                  {t(
+                    "settings.routing.stickyThresholds.usedRemainingHint",
+                    thresholdHintValues(parsedStickyPrimaryThreshold),
+                  )}
+                </p>
+              ) : null}
             </div>
             <div className="flex items-center gap-2">
               <Input
@@ -855,6 +959,14 @@ export function RoutingSettings({
             <div>
               <p className="text-sm font-medium">{t("settings.routing.stickyThresholds.secondaryLabel")}</p>
               <p className="text-xs text-muted-foreground">{t("settings.routing.stickyThresholds.secondaryDescription")}</p>
+              {stickySecondaryThresholdValid ? (
+                <p className="text-xs text-muted-foreground">
+                  {t(
+                    "settings.routing.stickyThresholds.usedRemainingHint",
+                    thresholdHintValues(parsedStickySecondaryThreshold),
+                  )}
+                </p>
+              ) : null}
             </div>
             <div className="flex items-center gap-2">
               <Input

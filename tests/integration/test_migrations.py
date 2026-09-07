@@ -4,7 +4,8 @@ from collections.abc import Callable
 
 import pytest
 from anyio import to_thread
-from sqlalchemy import text
+from sqlalchemy import event, text
+from sqlalchemy.engine import Engine
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from app.core.auth import DEFAULT_PLAN
@@ -1353,6 +1354,89 @@ async def test_usage_history_autovacuum_tuning_migration_sets_and_resets_relopti
 
 
 @pytest.mark.asyncio
+async def test_account_pending_deletion_migration_upgrade_and_downgrade(tmp_path):
+    """Round-trip the pending-deletion marker migration through Alembic:
+    parent -> revision adds the two guarded marker columns and the partial
+    queue index, downgrade removes all three, the guarded upgrade tolerates
+    pre-existing columns, and an upgrade to head proves the revision sits on
+    the single-head path."""
+    from alembic import command
+    from sqlalchemy import inspect as sa_inspect
+
+    from app.db.migrate import _build_alembic_config
+
+    db_url = f"sqlite+aiosqlite:///{tmp_path / 'account-pending-deletion.sqlite'}"
+    parent_revision = "20260812_120000_add_sticky_abandonment_scope"
+    pending_deletion_revision = "20260816_000000_add_account_pending_deletion"
+    marker_columns = {"delete_requested_at", "delete_history_requested"}
+    index_name = "idx_accounts_delete_requested_at"
+
+    def _schema_state(sync_conn):
+        inspector = sa_inspect(sync_conn)
+        columns = {column["name"] for column in inspector.get_columns("accounts")}
+        indexes = {index["name"] for index in inspector.get_indexes("accounts")}
+        return {"columns": columns & marker_columns, "index_present": index_name in indexes}
+
+    await to_thread.run_sync(lambda: run_upgrade(db_url, parent_revision, bootstrap_legacy=False))
+    engine = create_async_engine(db_url, future=True)
+    try:
+        async with engine.connect() as conn:
+            state = await conn.run_sync(_schema_state)
+        assert state == {"columns": set(), "index_present": False}
+
+        await to_thread.run_sync(lambda: run_upgrade(db_url, pending_deletion_revision, bootstrap_legacy=False))
+        async with engine.connect() as conn:
+            state = await conn.run_sync(_schema_state)
+        assert state == {"columns": marker_columns, "index_present": True}
+
+        # Downgrade refuses while a deletion is queued: the marker columns are
+        # the queue's only durable state, and dropping them would silently
+        # abandon an acknowledged deletion.
+        async with engine.begin() as conn:
+            await conn.execute(
+                text(
+                    "INSERT INTO accounts (id, codex_installation_id, email, plan_type, "
+                    "access_token_encrypted, refresh_token_encrypted, id_token_encrypted, "
+                    "last_refresh, status, delete_requested_at, delete_history_requested) "
+                    "VALUES ('acc_mig_pending', 'install-mig-pending', 'mig@example.com', 'plus', "
+                    "X'00', X'00', X'00', '2026-08-16 00:00:00', 'deactivated', "
+                    "'2026-08-16 00:00:00', 0)"
+                )
+            )
+        with pytest.raises(Exception, match="queued for"):
+            await to_thread.run_sync(lambda: command.downgrade(_build_alembic_config(db_url), parent_revision))
+        async with engine.connect() as conn:
+            state = await conn.run_sync(_schema_state)
+        assert state == {"columns": marker_columns, "index_present": True}
+        async with engine.begin() as conn:
+            await conn.execute(text("DELETE FROM accounts WHERE id = 'acc_mig_pending'"))
+
+        await to_thread.run_sync(lambda: command.downgrade(_build_alembic_config(db_url), parent_revision))
+        async with engine.connect() as conn:
+            state = await conn.run_sync(_schema_state)
+        assert state == {"columns": set(), "index_present": False}
+
+        # Guarded upgrade: a database where the columns already exist (e.g. a
+        # pre-merge build of this revision) must upgrade cleanly and still
+        # create the missing index.
+        async with engine.begin() as conn:
+            await conn.execute(text("ALTER TABLE accounts ADD COLUMN delete_requested_at DATETIME"))
+        await to_thread.run_sync(lambda: run_upgrade(db_url, pending_deletion_revision, bootstrap_legacy=False))
+        async with engine.connect() as conn:
+            state = await conn.run_sync(_schema_state)
+        assert state == {"columns": marker_columns, "index_present": True}
+
+        # Single-head path: upgrading to head from here must succeed and keep
+        # the marker schema in place.
+        await to_thread.run_sync(lambda: run_upgrade(db_url, "head", bootstrap_legacy=False))
+        async with engine.connect() as conn:
+            state = await conn.run_sync(_schema_state)
+        assert state == {"columns": marker_columns, "index_present": True}
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_account_plan_downgrade_observations_migration_upgrade_and_downgrade(tmp_path):
     """Round-trip the plan-downgrade evidence migration through Alembic itself.
 
@@ -1710,6 +1794,92 @@ async def test_stamped_merge_rollup_repair_downgrade_preserves_schema(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_quota_warmup_claim_expiry_migration_upgrade_and_downgrade(tmp_path):
+    from datetime import datetime, timezone
+
+    from alembic import command
+    from sqlalchemy import inspect as sa_inspect
+
+    from app.db.migrate import _build_alembic_config
+
+    db_url = f"sqlite+aiosqlite:///{tmp_path / 'quota-warmup-claim-expiry.sqlite'}"
+    parent_revision = "20260828_000000_add_accounts_chatgpt_identity_index"
+    claim_revision = "20260830_000000_add_quota_warmup_claim_expiry"
+
+    await to_thread.run_sync(lambda: run_upgrade(db_url, parent_revision, bootstrap_legacy=False))
+    engine = create_async_engine(db_url, future=True)
+    try:
+        async with engine.begin() as conn:
+            # A claim that could still be mid-probe when the migration runs
+            # (claim stamp = now) and one whose claim stamp is older than any
+            # probe can run (genuinely stranded by a crash).
+            await conn.execute(
+                text(
+                    """
+                    INSERT INTO quota_planner_decisions (
+                        id, mode, action, account_id, scheduled_at, executed_at,
+                        score, reason, forecast_snapshot_hash, state_before_json,
+                        state_after_json, status, idempotency_key, created_at
+                    ) VALUES (
+                        'warmup-legacy-executing', 'auto', 'warmup', 'acc-legacy', NULL, NULL,
+                        0.0, 'legacy_executing', NULL, NULL,
+                        NULL, 'executing', 'legacy-warmup-claim', CURRENT_TIMESTAMP
+                    ), (
+                        'warmup-legacy-stranded', 'auto', 'warmup', 'acc-legacy', NULL,
+                        '2026-01-01 00:00:00.000000',
+                        0.0, 'legacy_executing', NULL, NULL,
+                        NULL, 'executing', 'legacy-warmup-claim-stranded', '2026-01-01 00:00:00.000000'
+                    )
+                    """
+                )
+            )
+    finally:
+        await engine.dispose()
+
+    await to_thread.run_sync(lambda: run_upgrade(db_url, claim_revision, bootstrap_legacy=False))
+
+    engine = create_async_engine(db_url, future=True)
+    try:
+        async with engine.connect() as conn:
+            columns = await conn.run_sync(
+                lambda sync_conn: {
+                    column["name"] for column in sa_inspect(sync_conn).get_columns("quota_planner_decisions")
+                }
+            )
+            live_lease = (
+                await conn.execute(
+                    text("SELECT lease_expires_at FROM quota_planner_decisions WHERE id = 'warmup-legacy-executing'")
+                )
+            ).scalar_one()
+            stranded_lease = (
+                await conn.execute(
+                    text("SELECT lease_expires_at FROM quota_planner_decisions WHERE id = 'warmup-legacy-stranded'")
+                )
+            ).scalar_one()
+        assert "lease_expires_at" in columns
+        # A possibly-live legacy claim keeps a conservative execution window:
+        # its backfilled lease must still be in the future so a concurrent
+        # pre-migration probe is not reclaimed (and duplicated) mid-flight.
+        assert live_lease is not None
+        assert datetime.fromisoformat(str(live_lease)) > datetime.now(timezone.utc).replace(tzinfo=None)
+        # A claim stamped long before the migration is already expired and
+        # recoverable on the next scheduler sweep.
+        assert stranded_lease is not None
+        assert datetime.fromisoformat(str(stranded_lease)) <= datetime.now(timezone.utc).replace(tzinfo=None)
+
+        await to_thread.run_sync(lambda: command.downgrade(_build_alembic_config(db_url), parent_revision))
+        async with engine.connect() as conn:
+            columns_after = await conn.run_sync(
+                lambda sync_conn: {
+                    column["name"] for column in sa_inspect(sync_conn).get_columns("quota_planner_decisions")
+                }
+            )
+        assert "lease_expires_at" not in columns_after
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_conversation_presence_rollup_migration_upgrade_and_downgrade(tmp_path):
     from alembic import command
     from sqlalchemy import inspect as sa_inspect
@@ -1771,5 +1941,201 @@ async def test_conversation_presence_rollup_migration_upgrade_and_downgrade(tmp_
             state = await conn.run_sync(_schema_state)
         assert state["has_table"]
         assert "conversation_folded_through" in state["state_columns"]
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_file_account_pins_migration_upgrade_and_downgrade(tmp_path):
+    from alembic import command
+    from sqlalchemy import inspect as sa_inspect
+
+    from app.db.migrate import _build_alembic_config
+
+    db_url = f"sqlite+aiosqlite:///{tmp_path / 'file-account-pins.sqlite'}"
+    parent_revision = "20260806_000000_add_anonymous_telemetry"
+    pin_revision = "20260813_000000_add_file_account_pins"
+
+    def _schema_state(sync_conn):
+        inspector = sa_inspect(sync_conn)
+        if not inspector.has_table("file_account_pins"):
+            return None
+        columns = inspector.get_columns("file_account_pins")
+        file_id_column = next(column for column in columns if column["name"] == "file_id")
+        return {
+            "columns": {column["name"] for column in columns},
+            "file_id_length": file_id_column["type"].length,
+            "primary_key": inspector.get_pk_constraint("file_account_pins")["constrained_columns"],
+            "indexes": {index["name"] for index in inspector.get_indexes("file_account_pins")},
+        }
+
+    await to_thread.run_sync(lambda: run_upgrade(db_url, parent_revision, bootstrap_legacy=False))
+    engine = create_async_engine(db_url, future=True)
+    try:
+        async with engine.connect() as conn:
+            assert await conn.run_sync(_schema_state) is None
+
+        await to_thread.run_sync(lambda: run_upgrade(db_url, pin_revision, bootstrap_legacy=False))
+        async with engine.connect() as conn:
+            state = await conn.run_sync(_schema_state)
+        assert state == {
+            "columns": {"file_id", "account_id", "expires_at"},
+            "file_id_length": None,
+            "primary_key": ["file_id"],
+            "indexes": {"ix_file_account_pins_expires_at"},
+        }
+
+        await to_thread.run_sync(lambda: command.downgrade(_build_alembic_config(db_url), parent_revision))
+        async with engine.connect() as conn:
+            assert await conn.run_sync(_schema_state) is None
+
+        result = await to_thread.run_sync(lambda: run_upgrade(db_url, "head", bootstrap_legacy=False))
+        assert result.current_revision == _HEAD_REVISION
+        async with engine.connect() as conn:
+            assert await conn.run_sync(_schema_state) is not None
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_event_chunks_migration_preserves_legacy_and_guards_downgrade(tmp_path):
+    from alembic import command
+    from sqlalchemy import inspect as sa_inspect
+
+    from app.db.migrate import _build_alembic_config
+
+    db_url = f"sqlite+aiosqlite:///{tmp_path / 'http-bridge-event-chunks.sqlite'}"
+    parent_revision = "20260821_000000_add_retry_circuit_admission_generation"
+    chunk_revision = "20260826_000000_add_http_bridge_event_chunks"
+
+    def _schema_state(sync_conn):
+        inspector = sa_inspect(sync_conn)
+        return {
+            "has_chunks": inspector.has_table("http_bridge_operation_event_chunks"),
+            "operation_columns": {column["name"] for column in inspector.get_columns("http_bridge_operations")},
+        }
+
+    def _enable_sqlite_foreign_keys(dbapi_connection, _connection_record) -> None:
+        cursor = dbapi_connection.cursor()
+        try:
+            cursor.execute("PRAGMA foreign_keys=ON")
+        finally:
+            cursor.close()
+
+    await to_thread.run_sync(lambda: run_upgrade(db_url, parent_revision, bootstrap_legacy=False))
+    engine = create_async_engine(db_url, future=True)
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(
+                text(
+                    """
+                    INSERT INTO http_bridge_sessions (
+                        id, session_key_kind, session_key_value, session_key_hash,
+                        api_key_scope, owner_epoch, state, created_at, updated_at, last_seen_at
+                    ) VALUES (
+                        'session-legacy', 'session_header', 'legacy', 'legacy-hash',
+                        '__anonymous__', 0, 'closed', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                    )
+                    """
+                )
+            )
+            await conn.execute(
+                text(
+                    """
+                    INSERT INTO http_bridge_operations (
+                        operation_id, session_id, request_fingerprint, request_text,
+                        state, response_id, recovery_dispatch_count, event_bytes,
+                        event_spool_complete, created_at, updated_at
+                    ) VALUES (
+                        'operation-legacy', 'session-legacy', 'fingerprint-legacy', '{}',
+                        'completed', 'response-legacy', 0, 8, true, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                    )
+                    """
+                )
+            )
+            await conn.execute(
+                text(
+                    """
+                    INSERT INTO http_bridge_operation_events (
+                        event_id, operation_id, sequence_number, event_fingerprint, event_text, created_at
+                    ) VALUES (
+                        'event-legacy', 'operation-legacy', 1, 'event-fingerprint',
+                        'legacy-event', CURRENT_TIMESTAMP
+                    )
+                    """
+                )
+            )
+
+        await to_thread.run_sync(lambda: run_upgrade(db_url, chunk_revision, bootstrap_legacy=False))
+        async with engine.connect() as conn:
+            state = await conn.run_sync(_schema_state)
+            assert state["has_chunks"] is True
+            assert "spool_format" in state["operation_columns"]
+            assert (
+                await conn.execute(
+                    text("SELECT spool_format FROM http_bridge_operations WHERE operation_id = 'operation-legacy'")
+                )
+            ).scalar_one() == "rows_v1"
+            assert (
+                await conn.execute(
+                    text("SELECT event_text FROM http_bridge_operation_events WHERE event_id = 'event-legacy'")
+                )
+            ).scalar_one() == "legacy-event"
+
+        config = _build_alembic_config(db_url)
+        event.listen(Engine, "connect", _enable_sqlite_foreign_keys)
+        try:
+            await to_thread.run_sync(lambda: command.downgrade(config, parent_revision))
+        finally:
+            event.remove(Engine, "connect", _enable_sqlite_foreign_keys)
+        async with engine.connect() as conn:
+            state = await conn.run_sync(_schema_state)
+            assert state["has_chunks"] is False
+            assert "spool_format" not in state["operation_columns"]
+            assert (
+                await conn.execute(
+                    text("SELECT event_text FROM http_bridge_operation_events WHERE event_id = 'event-legacy'")
+                )
+            ).scalar_one() == "legacy-event"
+
+        await to_thread.run_sync(lambda: run_upgrade(db_url, chunk_revision, bootstrap_legacy=False))
+        async with engine.begin() as conn:
+            await conn.execute(
+                text(
+                    "UPDATE http_bridge_operations SET spool_format = 'chunks_v2' "
+                    "WHERE operation_id = 'operation-legacy'"
+                )
+            )
+
+        with pytest.raises(RuntimeError, match="cannot downgrade while chunks_v2 operations exist"):
+            await to_thread.run_sync(lambda: command.downgrade(config, parent_revision))
+        async with engine.begin() as conn:
+            await conn.execute(
+                text(
+                    "UPDATE http_bridge_operations SET spool_format = 'rows_v1' WHERE operation_id = 'operation-legacy'"
+                )
+            )
+            await conn.execute(
+                text(
+                    """
+                    INSERT INTO http_bridge_operation_event_chunks (
+                        operation_id, first_sequence_number, event_count, codec,
+                        uncompressed_bytes, payload, payload_sha256, created_at
+                    ) VALUES (
+                        'operation-legacy', 1, 1, 'test-codec', 1, X'00', 'chunk-hash', CURRENT_TIMESTAMP
+                    )
+                    """
+                )
+            )
+
+        with pytest.raises(RuntimeError, match="cannot downgrade while durable transcript chunks exist"):
+            await to_thread.run_sync(lambda: command.downgrade(config, parent_revision))
+        async with engine.connect() as conn:
+            state = await conn.run_sync(_schema_state)
+            assert state["has_chunks"] is True
+            assert "spool_format" in state["operation_columns"]
+            assert (
+                await conn.execute(text("SELECT COUNT(*) FROM http_bridge_operation_event_chunks"))
+            ).scalar_one() == 1
     finally:
         await engine.dispose()

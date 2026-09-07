@@ -7,7 +7,7 @@ from contextlib import asynccontextmanager
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 import pytest
 
@@ -202,7 +202,9 @@ class StubStickySessionsRepository(StickySessionsRepository):
         *,
         kind: StickySessionKind,
         max_age_seconds: int | None = None,
+        continuity_source: Literal["session_header", "thread_header", "turn_state"] | None = None,
     ) -> str | None:
+        del continuity_source
         return None
 
     async def get_account_id_and_abandonment(
@@ -211,11 +213,17 @@ class StubStickySessionsRepository(StickySessionsRepository):
         *,
         kind: StickySessionKind,
         max_age_seconds: int | None = None,
+        continuity_source: Literal["session_header", "thread_header", "turn_state"] | None = None,
     ) -> StickyOwnerLookup:
         # Delegates to get_account_id (rather than duplicating its logic) so
         # a test that only overrides get_account_id — the common pattern in
         # this file — is still observed here.
-        account_id = await self.get_account_id(key, kind=kind, max_age_seconds=max_age_seconds)
+        account_id = await self.get_account_id(
+            key,
+            kind=kind,
+            max_age_seconds=max_age_seconds,
+            continuity_source=continuity_source,
+        )
         return StickyOwnerLookup(account_id=account_id, continuity_abandoned=False)
 
     async def upsert(self, key: str, account_id: str, *, kind: StickySessionKind) -> StickySession:
@@ -1229,26 +1237,26 @@ async def test_select_account_filters_requested_service_tier_plans(monkeypatch) 
 
 @pytest.mark.asyncio
 async def test_select_account_filters_requested_service_tier_accounts(monkeypatch) -> None:
-    no_fast = _make_account("acc-tier-pro-default", "tier-pro-default@example.com")
-    no_fast.plan_type = "pro"
-    fast = _make_account("acc-tier-pro-fast", "tier-pro-fast@example.com")
-    fast.plan_type = "pro"
+    no_ultrafast = _make_account("acc-tier-pro-default", "tier-pro-default@example.com")
+    no_ultrafast.plan_type = "pro"
+    ultrafast = _make_account("acc-tier-pro-ultrafast", "tier-pro-ultrafast@example.com")
+    ultrafast.plan_type = "pro"
     now = utcnow()
     now_epoch = int(now.replace(tzinfo=timezone.utc).timestamp())
     usage_repo = StubUsageRepository(
         primary={
-            no_fast.id: UsageHistory(
+            no_ultrafast.id: UsageHistory(
                 id=63,
-                account_id=no_fast.id,
+                account_id=no_ultrafast.id,
                 recorded_at=now,
                 window="primary",
                 used_percent=1.0,
                 reset_at=now_epoch + 300,
                 window_minutes=5,
             ),
-            fast.id: UsageHistory(
+            ultrafast.id: UsageHistory(
                 id=64,
-                account_id=fast.id,
+                account_id=ultrafast.id,
                 recorded_at=now,
                 window="primary",
                 used_percent=2.0,
@@ -1264,7 +1272,7 @@ async def test_select_account_filters_requested_service_tier_accounts(monkeypatc
         lambda: SimpleNamespace(
             plan_types_for_model=lambda _model: frozenset({"pro"}),
             account_ids_for_model_service_tier=lambda _model, tier: (
-                frozenset({fast.id}) if tier == "priority" else None
+                frozenset({ultrafast.id}) if tier == "ultrafast" else None
             ),
             plan_types_for_model_service_tier=lambda _model, _tier: frozenset({"pro"}),
         ),
@@ -1272,15 +1280,15 @@ async def test_select_account_filters_requested_service_tier_accounts(monkeypatc
 
     balancer = LoadBalancer(
         lambda: _repo_factory(
-            StubAccountsRepository([no_fast, fast]),
+            StubAccountsRepository([no_ultrafast, ultrafast]),
             usage_repo,
             StubStickySessionsRepository(),
         )
     )
-    selection = await balancer.select_account(model="gpt-5.5", service_tier="priority")
+    selection = await balancer.select_account(model="gpt-5.6-sol", service_tier="ultrafast")
 
     assert selection.account is not None
-    assert selection.account.id == fast.id
+    assert selection.account.id == ultrafast.id
 
 
 @pytest.mark.asyncio
@@ -1701,8 +1709,8 @@ async def test_record_errors_does_not_restore_terminal_status(monkeypatch) -> No
 
 
 @pytest.mark.asyncio
-async def test_mark_permanent_failure_marks_account_routing_unavailable() -> None:
-    account = _make_account("acc-permanent-routing-unavailable", "permanent-routing@example.com")
+async def test_mark_reauth_failure_keeps_account_routing_available() -> None:
+    account = _make_account("acc-reauth-routing-available", "reauth-routing@example.com")
     accounts_repo = StubAccountsRepository([account])
     usage_repo = StubUsageRepository(primary={}, secondary={})
     sticky_repo = StubStickySessionsRepository()
@@ -1711,7 +1719,7 @@ async def test_mark_permanent_failure_marks_account_routing_unavailable() -> Non
     await balancer.mark_permanent_failure(account, "refresh_token_expired")
 
     assert account.status == AccountStatus.REAUTH_REQUIRED
-    assert is_account_routing_unavailable(account.id) is True
+    assert is_account_routing_unavailable(account.id) is False
 
 
 @pytest.mark.asyncio
@@ -1944,7 +1952,8 @@ async def test_select_account_skips_stale_persistence_after_terminal_status_upda
     selection = await select_task
 
     assert accounts_repo.status_updates[-1]["status"] == AccountStatus.REAUTH_REQUIRED
-    assert selection.account is None
+    assert selection.account is not None
+    assert selection.account.id == account.id
 
 
 @pytest.mark.asyncio
@@ -1992,7 +2001,8 @@ async def test_select_account_retries_after_post_persist_permanent_failure(monke
     selection = await balancer.select_account()
 
     assert account.status == AccountStatus.REAUTH_REQUIRED
-    assert selection.account is None
+    assert selection.account is not None
+    assert selection.account.id == account.id
 
 
 @pytest.mark.asyncio
@@ -2264,8 +2274,9 @@ async def test_select_account_sticky_reloads_inputs_after_stale_selected_persist
         *,
         kind: StickySessionKind,
         max_age_seconds: int | None = None,
+        continuity_source: Literal["session_header", "thread_header", "turn_state"] | None = None,
     ) -> str | None:
-        del key, kind, max_age_seconds
+        del key, kind, max_age_seconds, continuity_source
         return account.id
 
     original_persist_selection_state = balancer._persist_selection_state
@@ -2350,8 +2361,9 @@ async def test_select_account_sticky_does_not_return_stale_selection_at_retry_ca
         *,
         kind: StickySessionKind,
         max_age_seconds: int | None = None,
+        continuity_source: Literal["session_header", "thread_header", "turn_state"] | None = None,
     ) -> str | None:
-        del key, kind, max_age_seconds
+        del key, kind, max_age_seconds, continuity_source
         return account.id
 
     async def always_stale_selected_persist(
@@ -2435,8 +2447,9 @@ async def test_paused_legacy_hard_owner_fails_closed_without_rebinding(monkeypat
         *,
         kind: StickySessionKind,
         max_age_seconds: int | None = None,
+        continuity_source: Literal["session_header", "thread_header", "turn_state"] | None = None,
     ) -> str | None:
-        del key, kind, max_age_seconds
+        del key, kind, max_age_seconds, continuity_source
         return paused_team.id
 
     monkeypatch.setattr(sticky_repo, "get_account_id", pinned_account_id)
@@ -3463,6 +3476,35 @@ async def test_select_account_returns_data_unavailable_error_for_mapped_model(mo
 
 
 @pytest.mark.asyncio
+async def test_expired_reauth_error_precedes_additional_quota_data_unavailable(monkeypatch) -> None:
+    account = _make_account("acc-gated-expired-reauth", "gated-expired-reauth@example.com")
+    account.plan_type = "pro"
+    account.status = AccountStatus.REAUTH_REQUIRED
+    account.access_token_encrypted = TokenEncryptor().encrypt("e30.eyJleHAiOjB9.")
+    accounts_repo = StubAccountsRepository([account])
+    usage_repo = StubUsageRepository(primary={}, secondary={})
+    additional_usage_repo = StubAdditionalUsageRepository(primary={}, secondary={})
+
+    monkeypatch.setattr(
+        "app.modules.proxy.load_balancer.get_model_registry",
+        lambda: SimpleNamespace(plan_types_for_model=lambda _model: frozenset({"pro"})),
+    )
+    balancer = LoadBalancer(
+        lambda: _repo_factory(
+            accounts_repo,
+            usage_repo,
+            StubStickySessionsRepository(),
+            additional_usage_repo,
+        )
+    )
+    selection = await balancer.select_account(model="gpt-5.3-codex-spark")
+
+    assert selection.account is None
+    assert selection.error_message == "All accounts require re-authentication"
+    assert selection.error_code is None
+
+
+@pytest.mark.asyncio
 async def test_select_account_allows_plus_plan_without_additional_quota_rows(monkeypatch) -> None:
     account = _make_account("acc-plus-no-gated-rows", "plus-no-gated-rows@example.com")
     now = utcnow()
@@ -4039,9 +4081,7 @@ async def test_mark_permanent_failure_skips_routing_exclusion_on_peer_rotation()
 
 
 @pytest.mark.asyncio
-async def test_mark_permanent_failure_excludes_routing_on_genuine_failure() -> None:
-    """A genuine permanent failure (guarded CAS applies) both persists the
-    downgrade AND marks the account routing-unavailable locally, as before."""
+async def test_mark_reauth_failure_does_not_exclude_routing_on_genuine_failure() -> None:
     account = _make_account("acc-perm-routing-genuine")
     account.status = AccountStatus.ACTIVE
 
@@ -4054,6 +4094,23 @@ async def test_mark_permanent_failure_excludes_routing_on_genuine_failure() -> N
 
     assert downgraded is True
     assert account.status == AccountStatus.REAUTH_REQUIRED
+    assert is_account_routing_unavailable(account.id) is False
+
+
+@pytest.mark.asyncio
+async def test_mark_deactivation_failure_excludes_routing() -> None:
+    account = _make_account("acc-deactivated-routing-genuine")
+    account.status = AccountStatus.ACTIVE
+
+    accounts_repo = StubAccountsRepository([account])
+    usage_repo = StubUsageRepository(primary={}, secondary={})
+    sticky_repo = StubStickySessionsRepository()
+    balancer = LoadBalancer(lambda: _repo_factory(accounts_repo, usage_repo, sticky_repo))
+
+    downgraded = await balancer.mark_permanent_failure(account, "account_suspended")
+
+    assert downgraded is True
+    assert account.status == AccountStatus.DEACTIVATED
     assert is_account_routing_unavailable(account.id) is True
 
 
@@ -4136,7 +4193,7 @@ def test_enforced_service_tier_provenance_treats_default_aliases_as_omitted(
     service_tier_was_enforced = apply_api_key_enforcement(
         payload,
         _service_tier_enforcement_key("priority"),
-    )
+    ).service_tier_was_enforced
 
     assert service_tier_was_enforced is True
     assert payload.service_tier == "priority"
@@ -4175,7 +4232,7 @@ async def test_select_account_ignores_enforced_service_tier_the_model_never_adve
     service_tier_was_enforced = apply_api_key_enforcement(
         payload,
         _service_tier_enforcement_key("priority"),
-    )
+    ).service_tier_was_enforced
     assert service_tier_was_enforced is True
     assert apply_enforced_service_tier_model_fallback(
         payload,
@@ -4204,7 +4261,7 @@ async def test_select_account_ignores_enforced_service_tier_the_model_never_adve
         explicitly_requested = apply_api_key_enforcement(
             explicit_payload,
             _service_tier_enforcement_key("priority"),
-        )
+        ).service_tier_was_enforced
         assert explicitly_requested is False
         assert not apply_enforced_service_tier_model_fallback(
             explicit_payload,
@@ -4303,7 +4360,7 @@ async def test_api_key_enforced_priority_tier_still_routes_a_model_without_prior
         last_used_at=None,
     )
     payload = ResponsesRequest(model=model, instructions="ping", input=[])
-    service_tier_was_enforced = apply_api_key_enforcement(payload, api_key)
+    service_tier_was_enforced = apply_api_key_enforcement(payload, api_key).service_tier_was_enforced
     assert payload.service_tier == "priority"
     assert service_tier_was_enforced is True
     assert apply_enforced_service_tier_model_fallback(

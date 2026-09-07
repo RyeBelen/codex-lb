@@ -1,12 +1,14 @@
 ## Why
 
-The Codex upstream now sometimes rejects a stale Responses WebSocket anchor as `invalid_request_error` with only the message `Invalid \`previous_response_id\`.`. codex-lb does not classify that shape as continuity loss, so it leaks a raw HTTP-style 400 instead of using its existing recovery path.
+The ChatGPT-backed Codex WebSocket now emits stale-anchor failures as `invalid_request_error` with no `code` or `param` and the message ``Invalid `previous_response_id`.``. codex-lb does not recognize that observed shape, so it relays the raw 400 instead of entering its existing safe replay or sanitized client-recovery path.
+
+Production evidence on current upstream `main` recorded three affected Codex sessions in one overnight window. In every case the rejected anchor was a successful response from the same session and account only 9–17 seconds earlier, making this an active compatibility gap rather than an old retained response or account-routing mismatch.
 
 ## What Changes
 
-- Classify the observed no-code, no-param invalid `previous_response_id` envelope as a stale previous-response error.
-- Reuse the existing fresh-context replay and sanitized continuity-failure behavior.
-- Add regression coverage at the Codex-native WebSocket surface.
+- Classify the exact observed parameterless `invalid_request_error` message as a previous-response continuity miss.
+- Reuse the existing WebSocket recovery contract: transparently replay self-contained full resends without the anchor, surface sanitized canonical `previous_response_not_found` to Codex-native delta clients, and retain generic masking for public `/v1` clients.
+- Preserve classification boundaries for unrelated invalid-request errors and errors naming a different parameter.
 
 ## Capabilities
 
@@ -16,10 +18,10 @@ None.
 
 ### Modified Capabilities
 
-- `responses-api-compat`: Recognize the observed noncanonical stale-anchor error envelope and apply the existing recovery contract.
+- `responses-api-compat`: Recognize the parameterless invalid-previous-response error shape emitted by the upstream Codex WebSocket and route it through existing stale-anchor recovery and masking.
 
 ## Impact
 
-- Shared Responses error classification in `app/core/errors.py`.
-- Codex-native Responses WebSocket behavior and its integration coverage.
-- No API additions, configuration, migrations, or dependencies.
+- Shared OpenAI error classification in `app/core/errors.py`.
+- Direct Responses WebSocket behavior on `/backend-api/codex/responses` and `/v1/responses` through their existing recovery policies.
+- Route-level and classifier regression coverage; no API, schema, migration, dependency, configuration, or dashboard changes.

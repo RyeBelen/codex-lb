@@ -1,7 +1,13 @@
 import { lazy, Suspense, useState } from "react";
-import { Navigate, Outlet, Route, Routes } from "react-router-dom";
+import { Navigate, Outlet, Route, Routes, useLocation } from "react-router-dom";
 
 import { AppHeader } from "@/components/layout/app-header";
+import {
+  NotFoundPage,
+  RouteErrorBoundary,
+  RouteLoading,
+} from "@/components/layout/route-recovery";
+import { RouteScrollRestoration } from "@/components/layout/route-scroll-restoration";
 import {
   STATUS_BAR_DEFAULT_HEIGHT_PX,
   StatusBar,
@@ -10,6 +16,7 @@ import { Toaster } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { AuthGate } from "@/features/auth/components/auth-gate";
 import { useAuthStore } from "@/features/auth/hooks/use-auth";
+import { TelemetryConsentDialog } from "@/features/settings/components/telemetry-consent-dialog";
 import { useTimeFormatStore } from "@/hooks/use-time-format";
 
 // Route-level code splitting: only the visited page's chunk loads, instead
@@ -32,6 +39,7 @@ const SettingsPage = lazy(() =>
 );
 
 function AppLayout() {
+  const { hash, key: locationKey, pathname, search } = useLocation();
   const logout = useAuthStore((state) => state.logout);
   const passwordRequired = useAuthStore((state) => state.passwordRequired);
   const role = useAuthStore((state) => state.role);
@@ -47,6 +55,7 @@ function AppLayout() {
       data-time-format={timeFormat}
       style={{ paddingBottom: statusBarHeight }}
     >
+      <RouteScrollRestoration />
       <AppHeader
         onLogout={() => {
           void logout();
@@ -55,12 +64,18 @@ function AppLayout() {
         showAdminLogin={isGuest && passwordRequired}
         showLogout={(role === "admin" && passwordRequired) || (isGuest && guestPasswordRequired)}
       />
-      <main className="mx-auto w-full max-w-[1500px] flex-1 px-4 py-8 sm:px-6">
-        <Suspense fallback={null}>
-          <Outlet />
-        </Suspense>
+      <main className="mx-auto flex w-full max-w-[1500px] flex-1 flex-col px-4 py-8 sm:px-6">
+        <RouteErrorBoundary
+          key={pathname}
+          resetKey={`${locationKey}:${pathname}${search}${hash}`}
+        >
+          <Suspense fallback={<RouteLoading />}>
+            <Outlet />
+          </Suspense>
+        </RouteErrorBoundary>
       </main>
       <StatusBar onHeightChange={setStatusBarHeight} />
+      <TelemetryConsentDialog />
     </div>
   );
 }
@@ -79,7 +94,8 @@ export default function App() {
             <Route path="/automations" element={<AutomationsPage />} />
             <Route path="/apis" element={<ApisPage />} />
             <Route path="/settings" element={<SettingsPage />} />
-            <Route path="/firewall" element={<Navigate to="/settings" replace />} />
+            <Route path="/firewall" element={<Navigate to="/settings?advanced=1#firewall" replace />} />
+            <Route path="*" element={<NotFoundPage />} />
           </Route>
         </Routes>
       </AuthGate>

@@ -4,6 +4,8 @@ import asyncio
 import base64
 import contextlib
 import json
+import logging
+import socket
 import time
 from collections import deque
 from collections.abc import AsyncGenerator
@@ -11,13 +13,13 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Any, cast
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import anyio
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 import app.modules.proxy.load_balancer as load_balancer_module
 import app.modules.proxy.service as proxy_module
@@ -30,13 +32,16 @@ from app.core.utils.request_id import (
     set_request_scope_id,
 )
 from app.core.utils.time import utcnow
-from app.db.models import Account, AccountStatus, DashboardSettings, HttpBridgeSessionState, RequestLog
+from app.db.models import Account, AccountStatus, DashboardSettings, HttpBridgeSessionState, RequestLog, StickySession
 from app.db.session import SessionLocal
 from app.dependencies import get_proxy_service_for_app
 from app.modules.proxy._service import support as proxy_support
 from app.modules.proxy._service.http_bridge import quarantine as http_bridge_quarantine_module
+from app.modules.proxy._service.http_bridge import retry_circuit as http_bridge_retry_circuit_module
 from app.modules.proxy._service.http_bridge import streaming as http_bridge_streaming_module
+from app.modules.proxy._service.http_bridge import upstream_events as http_bridge_upstream_events_module
 from app.modules.proxy._service.http_bridge.helpers import (
+    _make_http_bridge_session_header_fallback_key,
     _release_http_bridge_unanchored_handoff,
     _reserve_http_bridge_unanchored_handoff,
 )
@@ -224,6 +229,9 @@ def _make_dashboard_settings(
         id=1,
         sticky_threads_enabled=False,
         upstream_stream_transport="auto",
+        # This suite exercises the bridge itself. Tests for policy-driven
+        # bypass override this explicitly (for example, ``always_http``).
+        http_downstream_transport_policy="always_websocket",
         prefer_earlier_reset_accounts=prefer_earlier_reset_accounts,
         routing_strategy="usage_weighted",
         openai_cache_affinity_max_age_seconds=300,
@@ -641,6 +649,15 @@ class _CompleteThenReasoningAbruptCloseUpstreamWebSocket(_ReasoningThenAbruptClo
         await super().send_text(text)
 
 
+class _CompleteThenPrecreatedCloseUpstreamWebSocket(_FakeBridgeUpstreamWebSocket):
+    async def send_text(self, text: str) -> None:
+        if not self.sent_text:
+            await super().send_text(text)
+            return
+        self.sent_text.append(text)
+        await self._messages.put(_FakeUpstreamMessage("close", close_code=1011))
+
+
 class _ErrorOnlyUpstreamWebSocket(_FakeBridgeUpstreamWebSocket):
     async def send_text(self, text: str) -> None:
         self.sent_text.append(text)
@@ -716,10 +733,25 @@ class _PreviousResponseNotFoundUpstreamWebSocket(_FakeBridgeUpstreamWebSocket):
         )
 
 
+class _PreviousResponseNotFoundAfterOutputUpstreamWebSocket(_PreviousResponseNotFoundUpstreamWebSocket):
+    async def send_text(self, text: str) -> None:
+        await self._messages.put(
+            _FakeUpstreamMessage(
+                "text",
+                text=json.dumps(
+                    {"type": "response.reasoning_summary_text.delta", "delta": "partial"},
+                    separators=(",", ":"),
+                ),
+            )
+        )
+        await super().send_text(text)
+
+
 class _AnonymousPreviousResponseNotFoundWithInflightUpstreamWebSocket(_FakeBridgeUpstreamWebSocket):
     def __init__(self) -> None:
         super().__init__()
         self.first_request_created = asyncio.Event()
+        self._anchored_followup_failed = False
 
     async def send_text(self, text: str) -> None:
         self.sent_text.append(text)
@@ -745,6 +777,57 @@ class _AnonymousPreviousResponseNotFoundWithInflightUpstreamWebSocket(_FakeBridg
 
         payload = json.loads(text)
         previous_response_id = payload.get("previous_response_id")
+        if self._anchored_followup_failed:
+            response_id = f"{self.response_id_prefix}_{len(self.sent_text)}"
+            await self._messages.put(
+                _FakeUpstreamMessage(
+                    "text",
+                    text=json.dumps(
+                        {
+                            "type": "response.created",
+                            "response": {
+                                "id": response_id,
+                                "object": "response",
+                                "status": "in_progress",
+                            },
+                        },
+                        separators=(",", ":"),
+                    ),
+                )
+            )
+            await self._messages.put(
+                _FakeUpstreamMessage(
+                    "text",
+                    text=json.dumps(
+                        {
+                            "type": "response.completed",
+                            "response": {
+                                "id": response_id,
+                                "object": "response",
+                                "status": "completed",
+                                "output": [
+                                    {
+                                        "type": "message",
+                                        "role": "assistant",
+                                        "content": [{"type": "output_text", "text": "OK"}],
+                                    }
+                                ],
+                                "usage": {
+                                    "input_tokens": 24,
+                                    "output_tokens": 2,
+                                    "total_tokens": 26,
+                                    "input_tokens_details": {"cached_tokens": 20},
+                                    "output_tokens_details": {"reasoning_tokens": 0},
+                                },
+                            },
+                        },
+                        separators=(",", ":"),
+                    ),
+                )
+            )
+            return
+
+        self._anchored_followup_failed = True
         await self._messages.put(
             _FakeUpstreamMessage(
                 "text",
@@ -2840,6 +2923,120 @@ async def test_v1_responses_http_bridge_replayed_turn_state_alias_preserves_owne
     await service._reconnect_http_bridge_session(replayed, request_state=request_state)
     assert connect_headers_seen[-1]["x-codex-turn-state"] == replay_turn_state
     await service._close_http_bridge_session(session)
+
+
+@pytest.mark.asyncio
+async def test_v1_responses_forwards_hard_continuation_with_canonical_prompt_cache_key(
+    async_client,
+    app_instance,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_bridge_settings_with_limits(
+        monkeypatch,
+        enabled=True,
+        instance_id="instance-b",
+        instance_ring=["instance-a", "instance-b"],
+    )
+    account_id = await _import_account(
+        async_client,
+        "acc_http_bridge_canonical_forward",
+        "http-bridge-canonical-forward@example.com",
+    )
+    service = get_proxy_service_for_app(app_instance)
+    prompt_cache_key = "canonical-forward-prompt-cache"
+    turn_state = "http_turn_canonical_forward"
+    response_id = "resp_canonical_forward"
+    durable_lookup = await service._durable_bridge.claim_live_session(
+        session_key_kind="prompt_cache",
+        session_key_value=prompt_cache_key,
+        api_key_id=None,
+        instance_id="instance-a",
+        owner_process_epoch="remote-process",
+        lease_ttl_seconds=60.0,
+        account_id=account_id,
+        model="gpt-5.1",
+        service_tier=None,
+        latest_turn_state=turn_state,
+        latest_response_id=response_id,
+        allow_takeover=True,
+    )
+    await service._durable_bridge.register_turn_state(
+        session_id=durable_lookup.session_id,
+        api_key_id=None,
+        instance_id="instance-a",
+        owner_epoch=durable_lookup.owner_epoch,
+        turn_state=turn_state,
+        lease_ttl_seconds=60.0,
+    )
+    await service._durable_bridge.register_previous_response_id(
+        session_id=durable_lookup.session_id,
+        api_key_id=None,
+        instance_id="instance-a",
+        owner_epoch=durable_lookup.owner_epoch,
+        response_id=response_id,
+        lease_ttl_seconds=60.0,
+    )
+
+    class Ring:
+        async def list_active(self, *, require_endpoint: bool = False) -> list[str]:
+            assert require_endpoint is True
+            return ["instance-a", "instance-b"]
+
+        async def resolve_endpoint(self, instance_id: str) -> str:
+            assert instance_id == "instance-a"
+            return "http://instance-a"
+
+    forwarded: list[proxy_module._HTTPBridgeOwnerForward] = []
+
+    async def fake_forward_http_bridge_request_to_owner(
+        *, owner_forward: proxy_module._HTTPBridgeOwnerForward, **_kwargs: Any
+    ) -> AsyncGenerator[str, None]:
+        forwarded.append(owner_forward)
+        yield proxy_module.format_sse_event(
+            {
+                "type": "response.completed",
+                "response": {
+                    "id": "resp_forwarded_complete",
+                    "object": "response",
+                    "status": "completed",
+                    "output": [],
+                },
+            }
+        )
+
+    original_ring = service._ring_membership
+    service._ring_membership = cast(Any, Ring())
+    monkeypatch.setattr(
+        service,
+        "_forward_http_bridge_request_to_owner",
+        fake_forward_http_bridge_request_to_owner,
+    )
+    try:
+        events = await _collect_sse_events(
+            async_client,
+            "/v1/responses",
+            json_body={
+                "model": "gpt-5.1",
+                "instructions": "Return exactly OK.",
+                "input": "continue",
+                "prompt_cache_key": prompt_cache_key,
+                "previous_response_id": response_id,
+                "stream": True,
+            },
+            headers={"x-codex-turn-state": turn_state},
+        )
+    finally:
+        service._ring_membership = original_ring
+
+    assert events[-1]["type"] == "response.completed"
+    assert len(forwarded) == 1
+    assert forwarded[0].owner_instance == "instance-a"
+    assert forwarded[0].owner_endpoint == "http://instance-a"
+    assert forwarded[0].key == proxy_module._HTTPBridgeSessionKey(
+        "prompt_cache",
+        prompt_cache_key,
+        None,
+    )
 
 
 @pytest.mark.asyncio
@@ -5151,6 +5348,7 @@ async def test_forwarded_recovery_uses_durable_owner_and_strips_stale_affinity(
 @pytest.mark.asyncio
 async def test_v1_responses_http_bridge_injects_interrupted_custom_tool_output_on_followup(
     async_client,
+    app_instance,
     monkeypatch,
 ):
     _install_bridge_settings(monkeypatch, enabled=True)
@@ -5160,7 +5358,7 @@ async def test_v1_responses_http_bridge_injects_interrupted_custom_tool_output_o
         "http-bridge-custom-interrupt@example.com",
     )
     account = await _get_account(account_id)
-    fake_upstream = _InterruptedCustomToolUpstreamWebSocket()
+    fake_upstream = _InterruptedCustomToolUpstreamWebSocket(emit_added=True)
 
     async def fake_select_account_with_budget(
         self,
@@ -5240,6 +5438,18 @@ async def test_v1_responses_http_bridge_injects_interrupted_custom_tool_output_o
     assert first.status_code == 200
     first_body = first.json()
     assert first_body["id"] == "resp_bridge_custom_1"
+
+    service = get_proxy_service_for_app(app_instance)
+    assert await service.drain_persistence_tasks(timeout_seconds=1)
+    async with SessionLocal() as session:
+        request_logs = list(
+            (
+                await session.execute(
+                    select(RequestLog).where(RequestLog.account_id == account_id).order_by(RequestLog.requested_at)
+                )
+            ).scalars()
+        )
+    assert any(log.latency_first_token_ms is not None for log in request_logs)
 
     second = await async_client.post(
         "/v1/responses",
@@ -5992,6 +6202,393 @@ async def test_backend_responses_http_bridge_prefers_codex_session_header_over_p
 
 
 @pytest.mark.asyncio
+async def test_backend_responses_goal_restart_bypasses_live_bridge_and_retires_unavailable_legacy_owner(
+    async_client,
+    app_instance,
+    monkeypatch,
+):
+    _install_bridge_settings(monkeypatch, enabled=True)
+    owner_id = await _import_account(
+        async_client,
+        "acc_backend_bridge_goal_restart_owner",
+        "backend-bridge-goal-restart-owner@example.com",
+    )
+    replacement_id = await _import_account(
+        async_client,
+        "acc_backend_bridge_goal_restart_replacement",
+        "backend-bridge-goal-restart-replacement@example.com",
+    )
+    owner = await _get_account(owner_id)
+    replacement = await _get_account(replacement_id)
+    owner_chatgpt_account_id = cast(str, owner.chatgpt_account_id)
+    replacement_chatgpt_account_id = cast(str, replacement.chatgpt_account_id)
+    raw_session = "backend-bridge-goal-restart-session"
+    selection_key = _codex_session_selection_key(raw_session)
+    async with SessionLocal() as session:
+        await StickySessionsRepository(session).upsert(
+            raw_session,
+            owner.id,
+            kind=proxy_module.StickySessionKind.CODEX_SESSION,
+        )
+
+    owner_send_started = asyncio.Event()
+    owner_send_release = asyncio.Event()
+
+    class _BlockingOwnerUpstream(_FakeBridgeUpstreamWebSocket):
+        async def send_text(self, text: str) -> None:
+            if not self.sent_text:
+                owner_send_started.set()
+                await owner_send_release.wait()
+            await super().send_text(text)
+
+    owner_upstream = _BlockingOwnerUpstream("resp_bridge_goal_owner")
+    replacement_upstream = _FakeBridgeUpstreamWebSocket("resp_bridge_goal_replacement")
+    connected_account_ids: list[str] = []
+
+    async def fake_ensure_fresh_with_budget(self, target, *, force=False, timeout_seconds):
+        del self, force, timeout_seconds
+        return target
+
+    async def fake_connect_responses_websocket(
+        headers,
+        access_token,
+        account_id_header,
+        *,
+        base_url=None,
+        session=None,
+    ):
+        del headers, access_token, base_url, session
+        connected_account_ids.append(account_id_header)
+        if account_id_header == owner_chatgpt_account_id:
+            return owner_upstream
+        assert account_id_header == replacement_chatgpt_account_id
+        return replacement_upstream
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
+    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+
+    headers = {"session_id": raw_session}
+    first_response_task = asyncio.create_task(
+        _collect_sse_events(
+            async_client,
+            "/backend-api/codex/responses",
+            headers=headers,
+            json_body={
+                "model": "gpt-5.1",
+                "instructions": "Return exactly OK.",
+                "input": "prime the live bridge",
+                "stream": True,
+            },
+        )
+    )
+    await _wait_for_event(owner_send_started)
+
+    service = get_proxy_service_for_app(app_instance)
+    bridge_key = proxy_module._HTTPBridgeSessionKey("session_header", raw_session, None)
+    async with service._http_bridge_lock:
+        old_bridge = service._http_bridge_sessions[bridge_key]
+    assert old_bridge.account.id == owner.id
+    # Change only the persisted account row. The live bridge deliberately
+    # retains its earlier detached ACTIVE Account object, reproducing the
+    # reuse path that used to bypass authoritative restart selection.
+    async with SessionLocal() as session:
+        await session.execute(update(Account).where(Account.id == owner.id).values(status=AccountStatus.QUOTA_EXCEEDED))
+        await session.commit()
+
+    try:
+        restart_events = await _collect_sse_events(
+            async_client,
+            "/backend-api/codex/responses",
+            headers=headers,
+            json_body={
+                "model": "gpt-5.1",
+                "instructions": "Continue the existing task.",
+                "input": [
+                    {
+                        "role": "developer",
+                        "content": (
+                            '<codex_internal_context source="goal">\nContinue working toward the active thread goal.'
+                        ),
+                    },
+                    {"role": "user", "content": [{"type": "input_text", "text": "continue"}]},
+                ],
+                "stream": True,
+            },
+        )
+        async with service._http_bridge_lock:
+            replacement_bridge = service._http_bridge_sessions[bridge_key]
+        assert replacement_bridge is not old_bridge
+        assert replacement_bridge.account.id == replacement.id
+        assert replacement_bridge.key == bridge_key
+        assert old_bridge.upstream_control.retire_after_drain is True
+    finally:
+        owner_send_release.set()
+        first_events = await asyncio.wait_for(first_response_task, timeout=_TEST_SYNC_TIMEOUT_SECONDS)
+
+    assert first_events[-1]["response"]["id"] == "resp_bridge_goal_owner_1"
+    assert restart_events[-1]["response"]["id"] == "resp_bridge_goal_replacement_1"
+    assert connected_account_ids == [owner_chatgpt_account_id, replacement_chatgpt_account_id]
+    assert len(owner_upstream.sent_text) == 1
+    assert len(replacement_upstream.sent_text) == 1
+    assert old_bridge.closed is True
+
+    follow_up_events = await _collect_sse_events(
+        async_client,
+        "/backend-api/codex/responses",
+        headers=headers,
+        json_body={
+            "model": "gpt-5.1",
+            "instructions": "Return exactly OK.",
+            "input": "continue on the replacement bridge",
+            "stream": True,
+        },
+    )
+    assert follow_up_events[-1]["response"]["id"] == "resp_bridge_goal_replacement_2"
+    assert len(owner_upstream.sent_text) == 1
+    assert len(replacement_upstream.sent_text) == 2
+
+    async with SessionLocal() as session:
+        rows = {
+            row.key: row
+            for row in (
+                await session.execute(
+                    select(StickySession).where(
+                        StickySession.key.in_((raw_session, selection_key)),
+                        StickySession.kind == proxy_module.StickySessionKind.CODEX_SESSION,
+                    )
+                )
+            ).scalars()
+        }
+    assert rows[raw_session].account_id == owner.id
+    assert rows[raw_session].continuity_abandoned_at is None
+    assert rows[raw_session].continuity_abandonment_scope == "session_header"
+    assert rows[selection_key].account_id == replacement.id
+    assert rows[selection_key].continuity_abandoned_at is None
+
+
+@pytest.mark.asyncio
+async def test_backend_responses_goal_restart_keeps_authority_for_same_request_reconnect(
+    async_client,
+    monkeypatch,
+):
+    _install_bridge_settings(monkeypatch, enabled=True)
+    owner_id = await _import_account(
+        async_client,
+        "acc_backend_bridge_reconnect_restart_owner",
+        "backend-bridge-reconnect-restart-owner@example.com",
+    )
+    replacement_id = await _import_account(
+        async_client,
+        "acc_backend_bridge_reconnect_restart_replacement",
+        "backend-bridge-reconnect-restart-replacement@example.com",
+    )
+    owner = await _get_account(owner_id)
+    replacement = await _get_account(replacement_id)
+    owner_chatgpt_account_id = cast(str, owner.chatgpt_account_id)
+    replacement_chatgpt_account_id = cast(str, replacement.chatgpt_account_id)
+    raw_session = "backend-bridge-reconnect-restart-session"
+    selection_key = _codex_session_selection_key(raw_session)
+    async with SessionLocal() as session:
+        await StickySessionsRepository(session).upsert(
+            raw_session,
+            owner.id,
+            kind=proxy_module.StickySessionKind.CODEX_SESSION,
+        )
+
+    class _OwnerBecomesUnavailableBeforeResponse(_FakeBridgeUpstreamWebSocket):
+        async def send_text(self, text: str) -> None:
+            self.sent_text.append(text)
+            async with SessionLocal() as session:
+                await session.execute(
+                    update(Account).where(Account.id == owner.id).values(status=AccountStatus.QUOTA_EXCEEDED)
+                )
+                await session.commit()
+            await self._messages.put(_FakeUpstreamMessage("close", close_code=1000))
+
+    owner_upstream = _OwnerBecomesUnavailableBeforeResponse("resp_bridge_reconnect_restart_owner")
+    replacement_upstream = _FakeBridgeUpstreamWebSocket("resp_bridge_reconnect_restart_replacement")
+    connected_account_ids: list[str] = []
+
+    async def fake_ensure_fresh_with_budget(self, target, *, force=False, timeout_seconds):
+        del self, force, timeout_seconds
+        return target
+
+    async def fake_connect_responses_websocket(
+        headers,
+        access_token,
+        account_id_header,
+        *,
+        base_url=None,
+        session=None,
+    ):
+        del headers, access_token, base_url, session
+        connected_account_ids.append(account_id_header)
+        if account_id_header == owner_chatgpt_account_id:
+            return owner_upstream
+        assert account_id_header == replacement_chatgpt_account_id
+        return replacement_upstream
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
+    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+
+    restart_events = await _collect_sse_events(
+        async_client,
+        "/backend-api/codex/responses",
+        headers={"session_id": raw_session},
+        json_body={
+            "model": "gpt-5.1",
+            "instructions": "Continue the existing task.",
+            "input": [
+                {
+                    "role": "developer",
+                    "content": (
+                        '<codex_internal_context source="goal">\nContinue working toward the active thread goal.'
+                    ),
+                },
+                {"role": "user", "content": [{"type": "input_text", "text": "continue"}]},
+            ],
+            "stream": True,
+        },
+    )
+
+    assert restart_events[-1]["response"]["id"] == "resp_bridge_reconnect_restart_replacement_1"
+    assert connected_account_ids == [owner_chatgpt_account_id, replacement_chatgpt_account_id]
+    assert len(owner_upstream.sent_text) == 1
+    assert len(replacement_upstream.sent_text) == 1
+    async with SessionLocal() as session:
+        rows = {
+            row.key: row
+            for row in (
+                await session.execute(
+                    select(StickySession).where(
+                        StickySession.key.in_((raw_session, selection_key)),
+                        StickySession.kind == proxy_module.StickySessionKind.CODEX_SESSION,
+                    )
+                )
+            ).scalars()
+        }
+    assert rows[raw_session].account_id == owner.id
+    assert rows[raw_session].continuity_abandoned_at is None
+    assert rows[raw_session].continuity_abandonment_scope == "session_header"
+    assert rows[selection_key].account_id == replacement.id
+
+
+@pytest.mark.asyncio
+async def test_backend_responses_goal_restart_authority_does_not_leak_to_reused_bridge(
+    async_client,
+    app_instance,
+    monkeypatch,
+):
+    _install_bridge_settings(monkeypatch, enabled=True)
+    owner_id = await _import_account(
+        async_client,
+        "acc_backend_bridge_one_shot_restart_owner",
+        "backend-bridge-one-shot-restart-owner@example.com",
+    )
+    replacement_id = await _import_account(
+        async_client,
+        "acc_backend_bridge_one_shot_restart_replacement",
+        "backend-bridge-one-shot-restart-replacement@example.com",
+    )
+    owner = await _get_account(owner_id)
+    replacement = await _get_account(replacement_id)
+    owner_chatgpt_account_id = cast(str, owner.chatgpt_account_id)
+    replacement_chatgpt_account_id = cast(str, replacement.chatgpt_account_id)
+    raw_session = "backend-bridge-one-shot-restart-session"
+    async with SessionLocal() as session:
+        await StickySessionsRepository(session).upsert(
+            raw_session,
+            owner.id,
+            kind=proxy_module.StickySessionKind.CODEX_SESSION,
+        )
+
+    owner_upstream = _CompleteThenPrecreatedCloseUpstreamWebSocket("resp_bridge_one_shot_owner")
+    replacement_upstream = _FakeBridgeUpstreamWebSocket("resp_bridge_one_shot_replacement")
+    connected_account_ids: list[str] = []
+
+    async def fake_ensure_fresh_with_budget(self, target, *, force=False, timeout_seconds):
+        del self, force, timeout_seconds
+        return target
+
+    async def fake_connect_responses_websocket(
+        headers,
+        access_token,
+        account_id_header,
+        *,
+        base_url=None,
+        session=None,
+    ):
+        del headers, access_token, base_url, session
+        connected_account_ids.append(account_id_header)
+        if account_id_header == owner_chatgpt_account_id:
+            return owner_upstream
+        assert account_id_header == replacement_chatgpt_account_id
+        return replacement_upstream
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
+    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+
+    headers = {"session_id": raw_session}
+    restart_events = await _collect_sse_events(
+        async_client,
+        "/backend-api/codex/responses",
+        headers=headers,
+        json_body={
+            "model": "gpt-5.1",
+            "instructions": "Continue the existing task.",
+            "input": [
+                {
+                    "role": "developer",
+                    "content": (
+                        '<codex_internal_context source="goal">\nContinue working toward the active thread goal.'
+                    ),
+                },
+                {"role": "user", "content": [{"type": "input_text", "text": "continue"}]},
+            ],
+            "stream": True,
+        },
+    )
+    assert restart_events[-1]["response"]["id"] == "resp_bridge_one_shot_owner_1"
+
+    service = get_proxy_service_for_app(app_instance)
+    bridge_key = proxy_module._HTTPBridgeSessionKey("session_header", raw_session, None)
+    async with service._http_bridge_lock:
+        bridge = service._http_bridge_sessions[bridge_key]
+    assert bridge.affinity.abandon_unavailable_legacy_owner is False
+
+    async with SessionLocal() as session:
+        await session.execute(update(Account).where(Account.id == owner.id).values(status=AccountStatus.QUOTA_EXCEEDED))
+        await session.commit()
+
+    ordinary_response = await asyncio.wait_for(
+        async_client.post(
+            "/backend-api/codex/responses",
+            headers=headers,
+            json={
+                "model": "gpt-5.1",
+                "instructions": "Return exactly OK.",
+                "input": "ordinary follow-up without restart authority",
+                "stream": True,
+            },
+        ),
+        timeout=_TEST_SYNC_TIMEOUT_SECONDS,
+    )
+
+    assert ordinary_response.status_code == 502
+    assert ordinary_response.json()["error"]["code"] == "upstream_unavailable"
+    assert connected_account_ids == [owner_chatgpt_account_id]
+    assert len(owner_upstream.sent_text) == 2
+    assert replacement_upstream.sent_text == []
+    async with SessionLocal() as session:
+        raw_mapping = await StickySessionsRepository(session).get_account_id_and_abandonment(
+            raw_session,
+            kind=proxy_module.StickySessionKind.CODEX_SESSION,
+        )
+    assert raw_mapping.account_id == owner.id
+    assert raw_mapping.continuity_abandoned is False
+
+
+@pytest.mark.asyncio
 async def test_backend_responses_http_bridge_file_owner_overrides_soft_locality(
     async_client,
     monkeypatch,
@@ -6621,6 +7218,59 @@ async def test_v1_responses_http_bridge_kill_switch_falls_back_to_legacy_path(as
 
 
 @pytest.mark.asyncio
+async def test_v1_responses_always_http_policy_bypasses_enabled_bridge(async_client, monkeypatch):
+    app_settings = _make_app_settings(enabled=True)
+    dashboard_settings = _make_dashboard_settings()
+    dashboard_settings.http_downstream_transport_policy = "always_http"
+    _install_proxy_settings(
+        monkeypatch,
+        app_settings=app_settings,
+        dashboard_settings=dashboard_settings,
+    )
+    await _import_account(async_client, "acc_http_policy_fallback", "http-policy-fallback@example.com")
+    seen = {"http": 0}
+
+    async def fake_http_stream(
+        payload,
+        headers,
+        access_token,
+        account_id,
+        base_url=None,
+        raise_for_status=False,
+        **kwargs,
+    ):
+        del payload, headers, access_token, account_id, base_url, raise_for_status
+        assert kwargs["upstream_stream_transport_override"] == "http"
+        seen["http"] += 1
+        yield (
+            'data: {"type":"response.completed","response":{"id":"resp_policy_http",'
+            '"object":"response","status":"completed",'
+            '"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2,'
+            '"input_tokens_details":{"cached_tokens":0},"output_tokens_details":{"reasoning_tokens":0}}}}\n\n'
+        )
+
+    async def fail_connect(*args, **kwargs):
+        raise AssertionError("always_http must bypass the enabled websocket bridge")
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_http_stream)
+    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fail_connect)
+
+    response = await async_client.post(
+        "/v1/responses",
+        json={
+            "model": "gpt-5.1",
+            "input": "hi",
+            "prompt_cache_key": "sticky-but-always-http",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["id"] == "resp_policy_http"
+    assert "x-codex-turn-state" not in response.headers
+    assert seen["http"] == 1
+
+
+@pytest.mark.asyncio
 async def test_backend_responses_http_bridge_kill_switch_falls_back_to_legacy_path(async_client, monkeypatch):
     _install_bridge_settings(monkeypatch, enabled=False)
     await _import_account(async_client, "acc_backend_http_bridge_fallback", "backend-http-bridge-fallback@example.com")
@@ -7061,7 +7711,11 @@ async def test_v1_responses_http_bridge_does_not_register_turn_state_alias_befor
 
 @pytest.mark.asyncio
 async def test_v1_responses_http_bridge_reconnects_after_clean_upstream_close(async_client, monkeypatch):
-    _install_bridge_settings(monkeypatch, enabled=True)
+    # The app lifespan registers the process hostname in the durable bridge
+    # ring before this test installs its settings. Keep the test on that same
+    # instance so the startup heartbeat cannot make the reconnect path look
+    # like a cross-replica ownership conflict.
+    _install_bridge_settings_with_limits(monkeypatch, enabled=True, instance_id=socket.gethostname())
     account_id = await _import_account(async_client, "acc_http_bridge_reconnect", "http-bridge-reconnect@example.com")
     account = await _get_account(account_id)
     first_upstream = _ClosingBridgeUpstreamWebSocket()
@@ -7137,7 +7791,10 @@ async def test_v1_responses_http_bridge_reconnects_after_clean_upstream_close(as
         "model": "gpt-5.1",
         "instructions": "Return exactly OK.",
         "input": "hello",
-        "prompt_cache_key": "http-bridge-reconnect-thread-1",
+        # Scope the soft-affinity key to this test's account so a parallel or
+        # ordered integration run cannot inherit another instance's durable
+        # owner and turn the reconnect assertion into a 409 race.
+        "prompt_cache_key": f"http-bridge-reconnect-thread-{account_id}",
     }
     first = await asyncio.wait_for(async_client.post("/v1/responses", json=payload), timeout=_TEST_SYNC_TIMEOUT_SECONDS)
     second = await asyncio.wait_for(
@@ -7291,6 +7948,7 @@ async def test_v1_responses_http_bridge_opens_fresh_session_for_previous_respons
 @pytest.mark.asyncio
 async def test_v1_responses_http_bridge_classifies_responses_lite_developer_interleaved_full_resend(
     async_client,
+    app_instance,
     monkeypatch,
     developer_message_extra,
     fresh_developer_message,
@@ -7308,6 +7966,24 @@ async def test_v1_responses_http_bridge_classifies_responses_lite_developer_inte
     replay_upstream = _FakeBridgeUpstreamWebSocket("resp_preserve_replay")
     upstreams = [first_upstream, replay_upstream]
     connect_headers: list[dict[str, str]] = []
+    service = get_proxy_service_for_app(app_instance)
+    predecessor_release_started = asyncio.Event()
+    allow_predecessor_release = asyncio.Event()
+    replacement_claimed = asyncio.Event()
+    original_release_live_session = service._durable_bridge.release_live_session
+    original_claim_live_session = service._durable_bridge.claim_live_session
+
+    async def delay_predecessor_release(**kwargs):
+        if kwargs["owner_epoch"] == 1 and not predecessor_release_started.is_set():
+            predecessor_release_started.set()
+            await allow_predecessor_release.wait()
+        return await original_release_live_session(**kwargs)
+
+    async def observe_replacement_claim(**kwargs):
+        lookup = await original_claim_live_session(**kwargs)
+        if lookup.owner_epoch > 1:
+            replacement_claimed.set()
+        return lookup
 
     async def fake_select_account_with_budget(self, deadline, **kwargs):
         del self, deadline, kwargs
@@ -7332,6 +8008,8 @@ async def test_v1_responses_http_bridge_classifies_responses_lite_developer_inte
     monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
     monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
     monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+    monkeypatch.setattr(service._durable_bridge, "release_live_session", delay_predecessor_release)
+    monkeypatch.setattr(service._durable_bridge, "claim_live_session", observe_replacement_claim)
 
     session_headers = {"x-codex-session-id": "fresh-reattach-full-resend"}
     historical_input = [
@@ -7380,6 +8058,7 @@ async def test_v1_responses_http_bridge_classifies_responses_lite_developer_inte
         timeout=_TEST_SYNC_TIMEOUT_SECONDS,
     )
     assert first.status_code == 200, first.text
+    await asyncio.wait_for(predecessor_release_started.wait(), timeout=_TEST_SYNC_TIMEOUT_SECONDS)
 
     full_resend = [
         *historical_input,
@@ -7396,7 +8075,7 @@ async def test_v1_responses_http_bridge_classifies_responses_lite_developer_inte
             "output": "/workspace",
         },
     ]
-    second = await asyncio.wait_for(
+    second_task = asyncio.create_task(
         async_client.post(
             "/v1/responses",
             json={
@@ -7405,9 +8084,20 @@ async def test_v1_responses_http_bridge_classifies_responses_lite_developer_inte
                 "input": full_resend,
             },
             headers=session_headers,
-        ),
-        timeout=_TEST_SYNC_TIMEOUT_SECONDS,
+        )
     )
+    try:
+        await asyncio.wait_for(replacement_claimed.wait(), timeout=_TEST_SYNC_TIMEOUT_SECONDS)
+    except BaseException:
+        allow_predecessor_release.set()
+        second_task.cancel()
+        try:
+            await second_task
+        except asyncio.CancelledError:
+            pass
+        raise
+    allow_predecessor_release.set()
+    second = await asyncio.wait_for(second_task, timeout=_TEST_SYNC_TIMEOUT_SECONDS)
 
     assert second.status_code == 200, second.text
     assert second.json()["id"] == "resp_preserve_replay_1"
@@ -8906,6 +9596,109 @@ async def test_v1_responses_http_bridge_retries_once_when_upstream_closes_before
 
 
 @pytest.mark.asyncio
+async def test_v1_responses_http_bridge_retries_unanchored_request_when_upstream_never_acknowledges_response_create(
+    async_client,
+    monkeypatch,
+):
+    _install_bridge_settings_with_limits(
+        monkeypatch,
+        enabled=True,
+    )
+    proxy_module.get_settings().http_responses_session_bridge_stuck_gate_retire_after_seconds = 0.01
+    account_id = await _import_account(
+        async_client,
+        "acc_http_bridge_missing_created_retry",
+        "http-bridge-missing-created-retry@example.com",
+    )
+    account = await _get_account(account_id)
+    silent_upstream = _SilentUpstreamWebSocket()
+    recovered_upstream = _FakeBridgeUpstreamWebSocket()
+    upstreams = [silent_upstream, recovered_upstream]
+    connect_count = 0
+
+    async def fake_select_account_with_budget(
+        self,
+        deadline,
+        *,
+        request_id,
+        kind,
+        request_stage="first_turn",
+        sticky_key,
+        sticky_kind,
+        reallocate_sticky,
+        sticky_max_age_seconds,
+        prefer_earlier_reset_accounts,
+        routing_strategy,
+        model,
+        exclude_account_ids=None,
+        additional_limit_name=None,
+        api_key=None,
+        preferred_account_id=None,
+    ):
+        del preferred_account_id
+        del (
+            self,
+            deadline,
+            request_id,
+            kind,
+            request_stage,
+            sticky_key,
+            sticky_kind,
+            reallocate_sticky,
+            sticky_max_age_seconds,
+            prefer_earlier_reset_accounts,
+            routing_strategy,
+            model,
+            exclude_account_ids,
+            additional_limit_name,
+            api_key,
+        )
+        return AccountSelection(account=account, error_message=None, error_code=None)
+
+    async def fake_ensure_fresh_with_budget(self, target, *, force=False, timeout_seconds):
+        del self, force, timeout_seconds
+        return target
+
+    async def fake_connect_responses_websocket(
+        headers,
+        access_token,
+        account_id_header,
+        *,
+        base_url=None,
+        session=None,
+    ):
+        del headers, access_token, account_id_header, base_url, session
+        nonlocal connect_count
+        upstream = upstreams[connect_count]
+        connect_count += 1
+        return upstream
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
+    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+
+    response = await asyncio.wait_for(
+        async_client.post(
+            "/v1/responses",
+            json={
+                "model": "gpt-5.1",
+                "instructions": "Return exactly OK.",
+                "input": "retry missing response.created",
+                "prompt_cache_key": "missing-created-retry-key",
+            },
+        ),
+        timeout=_TEST_SYNC_TIMEOUT_SECONDS,
+    )
+
+    assert response.status_code == 200
+    assert connect_count == 2
+    assert silent_upstream.closed is True
+    assert len(silent_upstream.sent_text) == 1
+    assert len(recovered_upstream.sent_text) == 1
+    assert silent_upstream.sent_text == recovered_upstream.sent_text
+
+
+@pytest.mark.asyncio
 async def test_backend_responses_http_bridge_retries_precreated_server_overload(async_client, monkeypatch):
     _install_bridge_settings(monkeypatch, enabled=True)
     account_id = await _import_account(
@@ -9965,6 +10758,11 @@ async def test_codex_responses_http_bridge_replaces_retired_gate_without_client_
         enabled=True,
         admission_wait_timeout_seconds=0.001,
     )
+    # Native Codex HTTP stays HTTP under auto policy. This bridge-specific
+    # recovery test opts into WebSocket explicitly, whose precedence remains
+    # authoritative.
+    dashboard_settings = await proxy_module.get_settings_cache().get()
+    dashboard_settings.upstream_stream_transport = "websocket"
     proxy_module.get_settings().http_responses_session_bridge_stuck_gate_retire_after_seconds = 0.01
     account_id = await _import_account(
         async_client,
@@ -10250,6 +11048,7 @@ async def test_v1_responses_http_bridge_creates_different_session_keys_in_parall
         preferred_account_id=None,
         require_preferred_account=False,
         fallback_on_preferred_account_unavailable=True,
+        **_kwargs,
     ):
         del (
             self,
@@ -10351,6 +11150,7 @@ async def test_v1_responses_http_bridge_singleflights_same_session_key_during_cr
         preferred_account_id=None,
         require_preferred_account=False,
         fallback_on_preferred_account_unavailable=True,
+        **_kwargs,
     ):
         del (
             self,
@@ -10480,6 +11280,7 @@ async def test_v1_responses_http_bridge_inflight_waiter_rejects_service_tier_pro
         preferred_account_id=None,
         require_preferred_account=False,
         fallback_on_preferred_account_unavailable=True,
+        **_kwargs,
     ):
         del (
             self,
@@ -10600,6 +11401,7 @@ async def test_v1_responses_http_bridge_waits_for_inflight_capacity_before_rate_
         preferred_account_id=None,
         require_preferred_account=False,
         fallback_on_preferred_account_unavailable=True,
+        **_kwargs,
     ):
         del (
             self,
@@ -10701,6 +11503,7 @@ async def test_v1_responses_http_bridge_forks_parallel_unanchored_session_reques
         preferred_account_id=None,
         require_preferred_account=False,
         fallback_on_preferred_account_unavailable=True,
+        **_kwargs,
     ):
         del (
             self,
@@ -10724,6 +11527,7 @@ async def test_v1_responses_http_bridge_forks_parallel_unanchored_session_reques
         *,
         allow_takeover,
         force_owner_epoch_advance=False,
+        record_restart_takeover=False,
     ):
         del self, session, allow_takeover, force_owner_epoch_advance
 
@@ -11047,6 +11851,7 @@ async def test_v1_responses_http_bridge_request_key_follower_isolates_different_
         preferred_account_id=None,
         require_preferred_account=False,
         fallback_on_preferred_account_unavailable=True,
+        **_kwargs,
     ):
         del (
             self,
@@ -11160,6 +11965,7 @@ async def test_v1_responses_http_bridge_forks_follower_when_account_assignment_c
         preferred_account_id=None,
         require_preferred_account=False,
         fallback_on_preferred_account_unavailable=True,
+        **_kwargs,
     ):
         del (
             self,
@@ -11193,6 +11999,7 @@ async def test_v1_responses_http_bridge_forks_follower_when_account_assignment_c
         *,
         allow_takeover,
         force_owner_epoch_advance=False,
+        record_restart_takeover=False,
     ):
         del self, allow_takeover
         durable_claims.append((session.account.id, force_owner_epoch_advance))
@@ -11292,6 +12099,7 @@ async def test_v1_responses_http_bridge_singleflights_stale_session_replacement(
         preferred_account_id=None,
         require_preferred_account=False,
         fallback_on_preferred_account_unavailable=True,
+        **_kwargs,
     ):
         del (
             self,
@@ -11384,6 +12192,7 @@ async def test_v1_responses_http_bridge_cleans_up_cancelled_singleflight_creator
         preferred_account_id=None,
         require_preferred_account=False,
         fallback_on_preferred_account_unavailable=True,
+        **_kwargs,
     ):
         del (
             self,
@@ -11479,6 +12288,7 @@ async def test_v1_responses_http_bridge_cleans_up_cancelled_singleflight_creator
         preferred_account_id=None,
         require_preferred_account=False,
         fallback_on_preferred_account_unavailable=True,
+        **_kwargs,
     ):
         del (
             self,
@@ -11574,6 +12384,7 @@ async def test_v1_responses_http_bridge_waits_for_inflight_session_before_contin
         preferred_account_id=None,
         require_preferred_account=False,
         fallback_on_preferred_account_unavailable=True,
+        **_kwargs,
     ):
         del (
             self,
@@ -11671,6 +12482,7 @@ async def test_v1_responses_http_bridge_prunes_idle_session_before_reuse(app_ins
         preferred_account_id=None,
         require_preferred_account=False,
         fallback_on_preferred_account_unavailable=True,
+        **_kwargs,
     ):
         del (
             self,
@@ -12661,6 +13473,89 @@ async def test_v1_responses_http_bridge_idle_recovery_hands_reader_to_replacemen
 
 
 @pytest.mark.asyncio
+async def test_backend_responses_http_bridge_idle_retirement_does_not_open_retry_circuit_on_next_failure(
+    async_client,
+    app_instance,
+    monkeypatch,
+):
+    _install_bridge_settings(monkeypatch, enabled=True)
+    account_id = await _import_account(
+        async_client,
+        "acc_backend_idle_retirement_circuit",
+        "backend-idle-retirement-circuit@example.com",
+    )
+    account = await _get_account(account_id)
+    upstream = _FakeBridgeUpstreamWebSocket("resp_idle_retirement_circuit")
+
+    async def fake_select_account_with_budget(self, deadline, **kwargs):
+        del self, deadline, kwargs
+        return AccountSelection(account=account, error_message=None, error_code=None)
+
+    async def fake_ensure_fresh_with_budget(self, target, *, force=False, timeout_seconds):
+        del self, force, timeout_seconds
+        return target
+
+    async def fake_connect_responses_websocket(
+        headers,
+        access_token,
+        account_id_header,
+        *,
+        base_url=None,
+        session=None,
+    ):
+        del headers, access_token, account_id_header, base_url, session
+        return upstream
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
+    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+
+    session_id = "backend-idle-retirement-circuit-session"
+    prompt_cache_key = "backend-idle-retirement-circuit-thread"
+    headers = {"session_id": session_id}
+    bridge_key = _make_http_bridge_session_header_fallback_key(
+        headers=headers,
+        api_key=None,
+        explicit_prompt_cache_key=prompt_cache_key,
+    )
+    assert bridge_key is not None
+    service = get_proxy_service_for_app(app_instance)
+
+    # Reproduce the live ordering without waiting for production-scale
+    # watchdogs: an idle no-pending retirement, then one genuine pre-response
+    # request failure on the same hard key. Only the latter may be a strike.
+    idle_session = _make_dummy_bridge_session(bridge_key)
+    await service._retire_stale_pending_http_bridge_session(
+        idle_session,
+        detail="stream_incomplete",
+        response_events_seen=0,
+    )
+    failed_request_session = _make_dummy_bridge_session(bridge_key)
+    failures = await service._record_http_bridge_retry_circuit_failure(
+        failed_request_session,
+        detail="missing_response_created_timeout",
+    )
+    assert failures == 1
+    assert await service._http_bridge_precreated_retry_allowed(failed_request_session) is True
+
+    events = await _collect_sse_events(
+        async_client,
+        "/backend-api/codex/responses",
+        json_body={
+            "model": "gpt-5.1",
+            "instructions": "Return exactly OK.",
+            "input": "continue after one real timeout",
+            "prompt_cache_key": prompt_cache_key,
+            "stream": True,
+        },
+        headers=headers,
+    )
+
+    _assert_created_text_delta_completed(events)
+    assert events[-1]["response"]["id"] == "resp_idle_retirement_circuit_1"
+
+
+@pytest.mark.asyncio
 async def test_retry_http_bridge_precreated_request_releases_pending_lock_before_reconnect(app_instance, monkeypatch):
     service = get_proxy_service_for_app(app_instance)
     session = proxy_module._HTTPBridgeSession(
@@ -12906,7 +13801,12 @@ async def test_v1_responses_http_bridge_send_failure_returns_upstream_unavailabl
     )
 
     assert second.status_code == 502
-    assert second.json()["error"]["code"] in ("upstream_unavailable", "stream_incomplete", "bridge_owner_unreachable")
+    assert second.json()["error"]["code"] in (
+        "upstream_unavailable",
+        "stream_incomplete",
+        "bridge_owner_unreachable",
+        "bridge_continuity_persistence_failed",
+    )
     assert "previous_response_not_found" not in second.json()["error"].get("code", "")
     assert connect_count == 1
 
@@ -13141,6 +14041,550 @@ async def test_v1_responses_http_bridge_rebinds_after_upstream_previous_response
     assert connect_count == 2
 
 
+@pytest.mark.parametrize(
+    "replay_case",
+    [
+        "account-neutral",
+        "forwarded-account-neutral",
+        "owner-bound-tool-history",
+        "forwarded-owner-bound-tool-history",
+        "missing-prior-output",
+        "transport-only",
+        "operation-fence-unavailable",
+        "spool-reset-unavailable",
+        "spool-reset-raises",
+        "spool-reset-falsy",
+        "local-rebind-spool-reset-raises",
+        "local-rebind-spool-reset-falsy",
+        "prior-replay-ambiguous",
+        "inactive-unknown-journal",
+        "pending-tool-manifest",
+        "inactive-unknown-owner-bound-journal",
+        "newer-circuit-before-submit",
+        "account-neutral-newer-circuit-before-submit",
+        "circuit-advances-during-admission",
+        "prior-replay-ambiguous-after-event",
+        "stale-rejection-after-event-first-attempt",
+    ],
+)
+@pytest.mark.asyncio
+async def test_backend_responses_http_bridge_replays_verified_full_resend_after_stale_owner(
+    async_client,
+    app_instance,
+    monkeypatch,
+    replay_case,
+):
+    _install_bridge_settings(monkeypatch, enabled=True)
+    account_neutral = replay_case in {
+        "account-neutral",
+        "forwarded-account-neutral",
+        "pending-tool-manifest",
+        "account-neutral-newer-circuit-before-submit",
+        "spool-reset-raises",
+        "spool-reset-falsy",
+    }
+    forwarded_receiver = replay_case.startswith("forwarded-")
+    operation_fence_unavailable = replay_case == "operation-fence-unavailable"
+    spool_reset_unavailable = replay_case == "spool-reset-unavailable"
+    # Required stale-anchor replay must fail closed when the durable reset
+    # raises or returns false; ordinary anchored local rebind keeps this
+    # cleanup best effort because it does not remove the anchor.
+    spool_reset_raises = replay_case in {"spool-reset-raises", "local-rebind-spool-reset-raises"}
+    spool_reset_falsy = replay_case in {"spool-reset-falsy", "local-rebind-spool-reset-falsy"}
+    local_rebind_spool_reset_raises = replay_case == "local-rebind-spool-reset-raises"
+    local_rebind_spool_reset_falsy = replay_case == "local-rebind-spool-reset-falsy"
+    spool_reset_fail_closed = (spool_reset_raises or spool_reset_falsy) and not (
+        local_rebind_spool_reset_raises or local_rebind_spool_reset_falsy
+    )
+    raising_reset_operation_event_spool = AsyncMock(
+        side_effect=RuntimeError("durable operation spool reset is unavailable")
+    )
+    falsy_reset_operation_event_spool = AsyncMock(return_value=False)
+    prior_replay_ambiguous = replay_case == "prior-replay-ambiguous"
+    prior_replay_ambiguous_after_event = replay_case == "prior-replay-ambiguous-after-event"
+    stale_rejection_after_event_first_attempt = replay_case == "stale-rejection-after-event-first-attempt"
+    inactive_unknown_journal = replay_case in {
+        "inactive-unknown-journal",
+        "inactive-unknown-owner-bound-journal",
+    }
+    pending_tool_manifest = replay_case == "pending-tool-manifest"
+    newer_circuit_before_submit = replay_case in {
+        "newer-circuit-before-submit",
+        "account-neutral-newer-circuit-before-submit",
+    }
+    circuit_advances_during_admission = replay_case == "circuit-advances-during-admission"
+    transport_only = replay_case == "transport-only"
+    owner_bound_replay = replay_case in {
+        "owner-bound-tool-history",
+        "forwarded-owner-bound-tool-history",
+        "newer-circuit-before-submit",
+        "inactive-unknown-owner-bound-journal",
+        "circuit-advances-during-admission",
+    }
+    case = replay_case.replace("-", "_")
+    owner_account_id = await _import_account(
+        async_client,
+        f"acc_backend_stale_owner_{case}",
+        f"backend-stale-owner-{case}@example.com",
+    )
+    alternate_account_id = await _import_account(
+        async_client,
+        f"acc_backend_stale_alternate_{case}",
+        f"backend-stale-alternate-{case}@example.com",
+    )
+    owner_account = await _get_account(owner_account_id)
+    alternate_account = await _get_account(alternate_account_id)
+    owner_chatgpt_account_id = cast(str, owner_account.chatgpt_account_id)
+    alternate_chatgpt_account_id = cast(str, alternate_account.chatgpt_account_id)
+    owner_upstream = _FakeBridgeUpstreamWebSocket("resp_stale_owner")
+    if transport_only:
+        rejecting_upstream = _PrecreatedCloseUpstreamWebSocket("resp_transport_only")
+    elif prior_replay_ambiguous_after_event or stale_rejection_after_event_first_attempt:
+        rejecting_upstream = _PreviousResponseNotFoundAfterOutputUpstreamWebSocket()
+    else:
+        rejecting_upstream = _PreviousResponseNotFoundUpstreamWebSocket()
+    alternate_upstream = _FakeBridgeUpstreamWebSocket("resp_stale_alternate")
+    selection_calls: list[dict[str, object]] = []
+    connected_account_ids: list[str] = []
+    connect_headers_by_account: dict[str, dict[str, str]] = {}
+
+    async def fake_select_account_with_budget(self, deadline, **kwargs):
+        del self, deadline
+        selection_calls.append(dict(kwargs))
+        preferred_account_id = cast(str | None, kwargs.get("preferred_account_id"))
+        excluded_account_ids = cast(set[str], kwargs.get("exclude_account_ids") or set())
+        if owner_account.id in excluded_account_ids or preferred_account_id == alternate_account.id:
+            return AccountSelection(account=alternate_account, error_message=None, error_code=None)
+        return AccountSelection(account=owner_account, error_message=None, error_code=None)
+
+    async def fake_ensure_fresh_with_budget(self, target, *, force=False, timeout_seconds):
+        del self, force, timeout_seconds
+        return target
+
+    async def fake_connect_responses_websocket(
+        headers,
+        access_token,
+        account_id_header,
+        *,
+        base_url=None,
+        session=None,
+    ):
+        del access_token, base_url, session
+        connected_account_ids.append(account_id_header)
+        connect_headers_by_account[account_id_header] = dict(headers)
+        if account_id_header == owner_chatgpt_account_id:
+            return owner_upstream
+        assert account_id_header == alternate_chatgpt_account_id
+        return alternate_upstream
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
+    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+
+    session_headers = {
+        "x-codex-session-id": f"backend-stale-owner-session-{case}",
+        "x-request-trace": "keep-me",
+    }
+    historical_input = [
+        {
+            "role": "user",
+            "content": [{"type": "input_text", "text": "first question"}],
+        }
+    ]
+    first_events = await _collect_sse_events(
+        async_client,
+        "/backend-api/codex/responses",
+        json_body={
+            "model": "gpt-5.1",
+            "instructions": "Return exactly OK.",
+            "input": historical_input,
+            "stream": True,
+        },
+        headers=session_headers,
+    )
+    first_response_id = cast(str, first_events[-1]["response"]["id"])
+
+    service = get_proxy_service_for_app(app_instance)
+    async with service._http_bridge_lock:
+        session = next(iter(service._http_bridge_sessions.values()))
+        original_durable_session_id = session.durable_session_id
+        original_durable_owner_epoch = session.durable_owner_epoch
+        assert original_durable_session_id is not None
+        assert original_durable_owner_epoch is not None
+        if owner_bound_replay or newer_circuit_before_submit or circuit_advances_during_admission:
+            cast(Any, service)._http_bridge_retry_circuits[session.key] = (
+                http_bridge_retry_circuit_module._HTTPBridgeRetryCircuitState(
+                    consecutive_failures=2,
+                    cooldown_until=time.monotonic() + 60.0,
+                    last_detail="stream_incomplete",
+                    last_touched_monotonic=time.monotonic(),
+                    # This fixture injects an in-memory circuit directly;
+                    # no matching durable row was persisted.
+                    persisted_updated_at_epoch=0.0,
+                )
+            )
+            monkeypatch.setattr(service, "_load_http_bridge_retry_circuit", AsyncMock(return_value=True))
+        if operation_fence_unavailable:
+            monkeypatch.setattr(
+                http_bridge_streaming_module,
+                "_http_bridge_verified_stale_anchor_replay_is_operation_fenced",
+                lambda _session, _request_state: False,
+            )
+        if spool_reset_unavailable:
+            monkeypatch.setattr(service._durable_bridge, "reset_operation_event_spool", None)
+        if spool_reset_raises:
+            monkeypatch.setattr(
+                service._durable_bridge,
+                "reset_operation_event_spool",
+                raising_reset_operation_event_spool,
+            )
+        if spool_reset_falsy:
+            monkeypatch.setattr(
+                service._durable_bridge,
+                "reset_operation_event_spool",
+                falsy_reset_operation_event_spool,
+            )
+        if prior_replay_ambiguous or prior_replay_ambiguous_after_event:
+            original_prepare_http_bridge_request = service._prepare_http_bridge_request
+
+            def prepare_with_consumed_replay(*args, **kwargs):
+                prepared_state, prepared_text = original_prepare_http_bridge_request(*args, **kwargs)
+                prepared_payload = args[0]
+                if prepared_payload.previous_response_id is not None:
+                    prepared_state.replay_count = 1
+                return prepared_state, prepared_text
+
+            monkeypatch.setattr(service, "_prepare_http_bridge_request", prepare_with_consumed_replay)
+        if newer_circuit_before_submit:
+            original_reset_http_bridge_session = service._reset_http_bridge_session_after_local_terminal_error
+
+            async def reset_then_advance_circuit(*args, **kwargs):
+                await original_reset_http_bridge_session(*args, **kwargs)
+                state = cast(Any, service)._http_bridge_retry_circuits[session.key]
+                state.persisted_updated_at_epoch += 1.0
+                state.last_failure_monotonic = time.monotonic() + 1.0
+
+            monkeypatch.setattr(
+                service,
+                "_reset_http_bridge_session_after_local_terminal_error",
+                reset_then_advance_circuit,
+            )
+        if circuit_advances_during_admission:
+            original_acquire_admission = service._acquire_request_state_response_create_admission
+
+            async def acquire_then_advance_circuit(*args, **kwargs):
+                await original_acquire_admission(*args, **kwargs)
+                state = cast(Any, service)._http_bridge_retry_circuits[session.key]
+                state.consecutive_failures += 1
+                state.last_failure_monotonic = time.monotonic() + 1.0
+
+            monkeypatch.setattr(
+                service,
+                "_acquire_request_state_response_create_admission",
+                acquire_then_advance_circuit,
+            )
+        await _replace_http_bridge_upstream_reader(
+            service,
+            session,
+            cast(proxy_module.UpstreamWebSocket, rejecting_upstream),
+        )
+    durable_clear_retry_circuit = AsyncMock(return_value=True)
+    clear_http_bridge_quarantine = Mock()
+    monkeypatch.setattr(service._durable_bridge, "clear_retry_circuit", durable_clear_retry_circuit)
+    monkeypatch.setattr(
+        http_bridge_upstream_events_module,
+        "_clear_http_bridge_quarantine",
+        clear_http_bridge_quarantine,
+    )
+    if inactive_unknown_journal:
+        original_lookup_request_targets = service._durable_bridge.lookup_request_targets
+
+        async def lookup_inactive_unknown_target(**kwargs):
+            lookup = await original_lookup_request_targets(**kwargs)
+            assert lookup is not None
+            return replace(
+                lookup,
+                state=HttpBridgeSessionState.CLOSED,
+                lease_expires_at=datetime.now(timezone.utc),
+            )
+
+        monkeypatch.setattr(service._durable_bridge, "lookup_request_targets", lookup_inactive_unknown_target)
+        monkeypatch.setattr(
+            service._durable_bridge,
+            "lookup_recovery_attempt",
+            AsyncMock(return_value=SimpleNamespace()),
+        )
+        claim_live_session = AsyncMock(side_effect=AssertionError("inactive UNKNOWN journal must not be claimed"))
+        mark_recovery_attempt_replayed = AsyncMock(
+            side_effect=AssertionError("inactive UNKNOWN journal must not be replayed")
+        )
+        monkeypatch.setattr(service._durable_bridge, "claim_live_session", claim_live_session)
+        monkeypatch.setattr(
+            service._durable_bridge,
+            "mark_recovery_attempt_replayed",
+            mark_recovery_attempt_replayed,
+        )
+    elif pending_tool_manifest:
+        original_lookup_request_targets = service._durable_bridge.lookup_request_targets
+
+        async def lookup_pending_tool_manifest(**kwargs):
+            lookup = await original_lookup_request_targets(**kwargs)
+            assert lookup is not None
+            return replace(
+                lookup,
+                latest_pending_tool_calls={"call_owner_bound": "function_call"},
+            )
+
+        monkeypatch.setattr(service._durable_bridge, "lookup_request_targets", lookup_pending_tool_manifest)
+
+    full_resend = [
+        *historical_input,
+        *(
+            []
+            if not owner_bound_replay
+            else [
+                {
+                    "type": "function_call",
+                    "namespace": "collaboration",
+                    "call_id": "call_owner_bound",
+                    "name": "spawn_agent",
+                    "arguments": "{}",
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_owner_bound",
+                    "output": "completed",
+                },
+            ]
+        ),
+        *(
+            []
+            if replay_case
+            in {
+                "missing-prior-output",
+                "pending-tool-manifest",
+                "local-rebind-spool-reset-raises",
+                "local-rebind-spool-reset-falsy",
+            }
+            else [
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [{"type": "output_text", "text": "first answer"}],
+                }
+            ]
+        ),
+        {
+            "role": "user",
+            "content": [{"type": "input_text", "text": "second question"}],
+        },
+    ]
+    if prior_replay_ambiguous or prior_replay_ambiguous_after_event:
+        full_resend = [
+            {
+                "role": "user",
+                "content": [{"type": "input_text", "text": "second question"}],
+            }
+        ]
+    elif pending_tool_manifest:
+        full_resend = [
+            *historical_input,
+            {
+                "type": "function_call",
+                "call_id": "call_owner_bound",
+                "name": "lookup",
+                "arguments": "{}",
+            },
+            {
+                "type": "function_call_output",
+                "call_id": "call_owner_bound",
+                "output": "completed",
+            },
+        ]
+    second_payload = {
+        "model": "gpt-5.1",
+        "instructions": "Return exactly OK.",
+        "input": full_resend,
+        "previous_response_id": first_response_id,
+        "stream": True,
+    }
+    expected_replay_input = proxy_module.ResponsesRequest.model_validate(second_payload).to_payload()["input"]
+    if inactive_unknown_journal:
+        failed_response = await async_client.post(
+            "/backend-api/codex/responses",
+            json=second_payload,
+            headers={**session_headers, "x-codex-turn-state": f"http_turn_stale_{case}"},
+        )
+        assert failed_response.status_code == 502
+        assert failed_response.json()["error"]["code"] == "bridge_continuity_persistence_failed"
+        assert connected_account_ids == [owner_chatgpt_account_id]
+        assert len(owner_upstream.sent_text) == 1
+        assert rejecting_upstream.sent_text == []
+        assert alternate_upstream.sent_text == []
+        claim_live_session.assert_not_awaited()
+        mark_recovery_attempt_replayed.assert_not_awaited()
+        return
+    if account_neutral and newer_circuit_before_submit:
+        failed_response = await async_client.post(
+            "/backend-api/codex/responses",
+            json=second_payload,
+            headers={**session_headers, "x-codex-turn-state": f"http_turn_stale_{case}"},
+        )
+        assert failed_response.status_code == 503
+        assert failed_response.json()["error"]["code"] == "upstream_request_timeout"
+        assert connected_account_ids == (
+            [owner_chatgpt_account_id, alternate_chatgpt_account_id]
+            if account_neutral
+            else [owner_chatgpt_account_id, owner_chatgpt_account_id]
+        )
+        assert len(owner_upstream.sent_text) == 1
+        assert alternate_upstream.sent_text == []
+        return
+    if operation_fence_unavailable or spool_reset_unavailable or prior_replay_ambiguous or spool_reset_fail_closed:
+        failed_response = await async_client.post(
+            "/backend-api/codex/responses",
+            json=second_payload,
+            headers={**session_headers, "x-codex-turn-state": f"http_turn_stale_{case}"},
+        )
+        assert failed_response.status_code == 502
+        assert failed_response.json()["error"]["code"] == "bridge_continuity_persistence_failed"
+        assert connected_account_ids == [owner_chatgpt_account_id]
+        assert len(owner_upstream.sent_text) == 1
+        assert alternate_upstream.sent_text == []
+        if spool_reset_raises:
+            raising_reset_operation_event_spool.assert_awaited()
+        if spool_reset_falsy:
+            falsy_reset_operation_event_spool.assert_awaited()
+        if spool_reset_raises or spool_reset_falsy:
+            reset_operation_event_spool = (
+                raising_reset_operation_event_spool if spool_reset_raises else falsy_reset_operation_event_spool
+            )
+            reset_call = reset_operation_event_spool.await_args
+            assert reset_call is not None
+            assert reset_call.kwargs["session_id"] == original_durable_session_id
+            assert reset_call.kwargs["owner_epoch"] == original_durable_owner_epoch
+        return
+    if prior_replay_ambiguous_after_event or stale_rejection_after_event_first_attempt:
+        failed_events = await _collect_sse_events(
+            async_client,
+            "/backend-api/codex/responses",
+            json_body=second_payload,
+            headers={**session_headers, "x-codex-turn-state": f"http_turn_stale_{case}"},
+        )
+        # The stream already emitted output, so the HTTP surface normalizes
+        # the fail-closed exception to stream_incomplete. The safety contract
+        # is that no anchored or unanchored replacement is dispatched.
+        assert failed_events[-1]["response"]["error"]["code"] == "stream_incomplete"
+        assert connected_account_ids == [owner_chatgpt_account_id]
+        assert len(owner_upstream.sent_text) == 1
+        assert alternate_upstream.sent_text == []
+        return
+    if forwarded_receiver:
+        forwarded_chunks = [
+            chunk
+            async for chunk in service.stream_http_responses(
+                proxy_module.ResponsesRequest.model_validate(second_payload),
+                {**session_headers, "x-codex-turn-state": f"http_turn_stale_{case}"},
+                codex_session_affinity=True,
+                propagate_http_errors=True,
+                forwarded_request=True,
+                forwarded_affinity_kind="session_header",
+                forwarded_affinity_key=session_headers["x-codex-session-id"],
+            )
+        ]
+        second_events = [
+            event
+            for line in "".join(forwarded_chunks).splitlines()
+            if line.startswith("data: ") and line[6:] != "[DONE]"
+            if (event := json.loads(line[6:])).get("type") != "codex.keepalive"
+        ]
+    else:
+        second_events = await _collect_sse_events(
+            async_client,
+            "/backend-api/codex/responses",
+            json_body=second_payload,
+            headers={**session_headers, "x-codex-turn-state": f"http_turn_stale_{case}"},
+        )
+
+    assert len(rejecting_upstream.sent_text) == 1
+    if transport_only:
+        assert second_events[-1]["response"]["error"]["code"] == "stream_incomplete"
+        assert connected_account_ids == [owner_chatgpt_account_id]
+        assert len(owner_upstream.sent_text) == 1
+        assert alternate_upstream.sent_text == []
+        return
+    if account_neutral:
+        assert second_events[-1]["response"]["id"] == "resp_stale_alternate_1"
+        assert connected_account_ids == [owner_chatgpt_account_id, alternate_chatgpt_account_id]
+        assert len(alternate_upstream.sent_text) == 1
+        replay_payload = json.loads(alternate_upstream.sent_text[0])
+        replay_connect_headers = {
+            key.lower(): value for key, value in connect_headers_by_account[alternate_chatgpt_account_id].items()
+        }
+        assert not {"x-codex-session-id", "x-codex-turn-state"} & replay_connect_headers.keys()
+        replay_selection = next(
+            call
+            for call in selection_calls
+            if owner_account.id in cast(set[str], call.get("exclude_account_ids") or set())
+        )
+        assert replay_selection.get("preferred_account_id") is None
+    elif owner_bound_replay:
+        assert second_events[-1]["response"]["id"] == "resp_stale_owner_2"
+        assert connected_account_ids == [owner_chatgpt_account_id, owner_chatgpt_account_id]
+        assert alternate_upstream.sent_text == []
+        replay_payload = json.loads(owner_upstream.sent_text[-1])
+        replay_connect_headers = {
+            key.lower(): value for key, value in connect_headers_by_account[owner_chatgpt_account_id].items()
+        }
+        assert replay_connect_headers["x-codex-session-id"] == session_headers["x-codex-session-id"]
+        replay_selection = next(
+            call for call in selection_calls if call.get("preferred_account_id") == owner_account.id
+        )
+        assert owner_account.id not in cast(set[str], replay_selection.get("exclude_account_ids") or set())
+        assert "previous_response_id" not in replay_payload
+        assert replay_payload["input"] == expected_replay_input
+        retained_circuit = cast(Any, service)._http_bridge_retry_circuits[session.key]
+        if circuit_advances_during_admission:
+            assert retained_circuit.consecutive_failures >= 3
+        else:
+            assert retained_circuit.consecutive_failures == 2
+        assert retained_circuit.cooldown_until > time.monotonic()
+        durable_clear_retry_circuit.assert_not_awaited()
+        clear_http_bridge_quarantine.assert_called_once()
+    else:
+        assert second_events[-1]["response"]["id"] == "resp_stale_owner_2"
+        assert connected_account_ids == [owner_chatgpt_account_id, owner_chatgpt_account_id]
+        assert alternate_upstream.sent_text == []
+        replay_payload = json.loads(owner_upstream.sent_text[-1])
+        replay_connect_headers = {
+            key.lower(): value for key, value in connect_headers_by_account[owner_chatgpt_account_id].items()
+        }
+        assert replay_payload["previous_response_id"] == first_response_id
+        if local_rebind_spool_reset_raises:
+            # The anchored rebind keeps its anchor, so best-effort spool
+            # cleanup must not turn a recoverable local error into a 502.
+            raising_reset_operation_event_spool.assert_awaited()
+        if local_rebind_spool_reset_falsy:
+            # A refused best-effort reset must not remove the anchor or abort
+            # the fenced local rebind.
+            falsy_reset_operation_event_spool.assert_awaited()
+        if local_rebind_spool_reset_raises or local_rebind_spool_reset_falsy:
+            reset_operation_event_spool = (
+                raising_reset_operation_event_spool
+                if local_rebind_spool_reset_raises
+                else falsy_reset_operation_event_spool
+            )
+            reset_call = reset_operation_event_spool.await_args
+            assert reset_call is not None
+            assert reset_call.kwargs["session_id"] == original_durable_session_id
+            assert reset_call.kwargs["owner_epoch"] == original_durable_owner_epoch
+    if account_neutral:
+        assert "previous_response_id" not in replay_payload
+        assert replay_payload["input"] == expected_replay_input
+    assert replay_connect_headers["x-request-trace"] == "keep-me"
+
+
 @pytest.mark.asyncio
 async def test_v1_responses_http_bridge_rebinds_after_upstream_invalid_request_previous_response_not_found_param(
     async_client,
@@ -13263,7 +14707,8 @@ async def test_v1_responses_http_bridge_masks_anonymous_previous_response_not_fo
     monkeypatch,
 ):
     _install_bridge_settings(monkeypatch, enabled=True)
-    upstream = _AnonymousPreviousResponseNotFoundWithInflightUpstreamWebSocket()
+    service = get_proxy_service_for_app(app_instance)
+    upstream = _TwoSameAnchorFollowupsPreviousResponseNotFoundUpstreamWebSocket()
     connect_count = 0
 
     async def fake_select_account_with_budget(
@@ -13331,6 +14776,8 @@ async def test_v1_responses_http_bridge_masks_anonymous_previous_response_not_fo
             AsyncClient(transport=ASGITransport(app=app_instance), base_url="http://testserver") as admin_client,
             AsyncClient(transport=ASGITransport(app=app_instance), base_url="http://testserver") as first_client,
             AsyncClient(transport=ASGITransport(app=app_instance), base_url="http://testserver") as second_client,
+            AsyncClient(transport=ASGITransport(app=app_instance), base_url="http://testserver") as third_client,
+            AsyncClient(transport=ASGITransport(app=app_instance), base_url="http://testserver") as fourth_client,
         ):
             account_id = await _import_account(
                 admin_client,
@@ -13339,28 +14786,39 @@ async def test_v1_responses_http_bridge_masks_anonymous_previous_response_not_fo
             )
             account = await _get_account(account_id)
 
-            first = asyncio.create_task(
-                first_client.post(
-                    "/v1/responses",
-                    json={
-                        "model": "gpt-5.1",
-                        "instructions": "Return exactly OK.",
-                        "input": "hello",
-                        "prompt_cache_key": "previous-response-inflight-mixed",
-                    },
-                )
+            anchor_response = await first_client.post(
+                "/v1/responses",
+                json={
+                    "model": "gpt-5.1",
+                    "instructions": "Return exactly OK.",
+                    "input": "hello-seed",
+                    "prompt_cache_key": "previous-response-anchor-seed",
+                },
             )
-            await _wait_for_event(upstream.first_request_created)
 
-            second = asyncio.create_task(
+            first = asyncio.create_task(
                 second_client.post(
                     "/v1/responses",
                     json={
                         "model": "gpt-5.1",
                         "instructions": "Return exactly OK.",
-                        "input": "hello-again",
-                        "prompt_cache_key": "previous-response-inflight-mixed",
-                        "previous_response_id": "resp_bridge_prev_anchor",
+                        "input": "hello-a",
+                        "prompt_cache_key": "previous-response-inflight-origin",
+                        "previous_response_id": anchor_response.json()["id"],
+                    },
+                )
+            )
+            await _wait_for_event(upstream.first_followup_created)
+
+            second = asyncio.create_task(
+                third_client.post(
+                    "/v1/responses",
+                    json={
+                        "model": "gpt-5.1",
+                        "instructions": "Return exactly OK.",
+                        "input": "hello-b",
+                        "prompt_cache_key": "previous-response-inflight-anchor",
+                        "previous_response_id": anchor_response.json()["id"],
                     },
                 )
             )
@@ -13370,13 +14828,31 @@ async def test_v1_responses_http_bridge_masks_anonymous_previous_response_not_fo
                 timeout=_TEST_SYNC_TIMEOUT_SECONDS,
             )
 
-    assert first_response.status_code == 200
-    assert first_response.json()["output"][0]["content"][0]["text"] == "OK"
+            third_response = await fourth_client.post(
+                "/v1/responses",
+                json={
+                    "model": "gpt-5.1",
+                    "instructions": "Return exactly OK.",
+                    "input": "hello-on-anchor-again",
+                    "prompt_cache_key": "previous-response-after-error",
+                },
+            )
+
+            assert not any(not future.done() for future in service._http_bridge_inflight_sessions.values())
+
+    assert anchor_response.status_code == 200
+    assert anchor_response.json()["output"][0]["content"][0]["text"] == "OK"
+    assert first_response.status_code >= 400
+    assert first_response.json()["error"]["code"] == "stream_incomplete"
     assert second_response.status_code >= 400
     assert second_response.json()["error"]["code"] == "stream_incomplete"
+    assert "previous_response_not_found" not in first_response.json()["error"].get("code", "")
+    assert "previous_response_not_found" not in first_response.json()["error"].get("message", "")
     assert "previous_response_not_found" not in second_response.json()["error"].get("code", "")
     assert "previous_response_not_found" not in second_response.json()["error"].get("message", "")
-    assert connect_count == 1
+    assert third_response.status_code == 200
+    assert third_response.json()["output"][0]["content"][0]["text"] == "OK"
+    assert connect_count == 2
 
 
 @pytest.mark.asyncio
@@ -14418,7 +15894,7 @@ async def test_v1_responses_http_bridge_quarantines_reattach_that_streams_withou
     ``response.created`` must quarantine the session so the next request does
     not rebuild the identical anchored reattach and instead completes on the
     fresh no-anchor path."""
-    _install_bridge_settings(monkeypatch, enabled=True)
+    _install_bridge_settings_with_limits(monkeypatch, enabled=True, instance_id=socket.gethostname())
     account_id = await _import_account(
         async_client,
         "acc_http_bridge_quarantine_silent",
@@ -14587,7 +16063,7 @@ async def test_v1_responses_http_bridge_quarantined_unsafe_full_resend_dispatche
     hydration restored ``last_completed_response_id`` and the session-level
     injection re-added the same anchor and trimmed the prefix — rebuilding the
     wedge despite the ``fresh_reattach_anchor_skipped_quarantined`` log."""
-    _install_bridge_settings(monkeypatch, enabled=True)
+    _install_bridge_settings_with_limits(monkeypatch, enabled=True, instance_id=socket.gethostname())
     account_id = await _import_account(
         async_client,
         "acc_http_bridge_quarantine_unsafe_suffix",
@@ -14747,3 +16223,238 @@ async def test_v1_responses_http_bridge_quarantined_unsafe_full_resend_dispatche
     fresh_payload = json.loads(fresh_upstream.sent_text[0])
     assert "previous_response_id" not in fresh_payload
     assert fresh_payload["input"] == unsafe_suffix_resend
+
+
+@pytest.mark.asyncio
+async def test_v1_responses_http_bridge_successor_claim_fences_the_retiring_release(
+    async_client, app_instance, monkeypatch
+):
+    """Deterministic route-level regression for issue #1695.
+
+    The retiring session's teardown releases its durable row concurrently with
+    the next request's successor claim. Here the predecessor's release is held
+    captive until the successor's claim (and its 200) have completed, then let
+    loose — on the pre-fix code the release still matched the fence (the
+    same-owner claim kept the epoch) and closed the row out from under the
+    live successor; the claim must advance the epoch so the late release
+    no-ops and a third turn keeps working.
+    """
+    _install_bridge_settings_with_limits(monkeypatch, enabled=True, instance_id=socket.gethostname())
+    account_id = await _import_account(async_client, "acc_http_bridge_fence", "http-bridge-fence@example.com")
+    account = await _get_account(account_id)
+    upstreams = [_ClosingBridgeUpstreamWebSocket(), _FakeBridgeUpstreamWebSocket(), _FakeBridgeUpstreamWebSocket()]
+    connect_count = 0
+
+    async def fake_select_account_with_budget(self, deadline, **kwargs):
+        del self, deadline, kwargs
+        return AccountSelection(account=account, error_message=None, error_code=None)
+
+    async def fake_ensure_fresh_with_budget(self, target, *, force=False, timeout_seconds):
+        del self, force, timeout_seconds
+        return target
+
+    async def fake_connect_responses_websocket(
+        headers, access_token, account_id_header, *, base_url=None, session=None
+    ):
+        del headers, access_token, account_id_header, base_url, session
+        nonlocal connect_count
+        upstream = upstreams[connect_count]
+        connect_count += 1
+        return upstream
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
+    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+
+    service = get_proxy_service_for_app(app_instance)
+    coordinator = service._durable_bridge
+    real_release = coordinator.release_live_session
+    release_gate = asyncio.Event()
+    captive_releases: list[dict] = []
+
+    async def captive_release_live_session(**kwargs):
+        if not release_gate.is_set():
+            captive_releases.append(kwargs)
+            return None
+        return await real_release(**kwargs)
+
+    monkeypatch.setattr(coordinator, "release_live_session", captive_release_live_session)
+
+    payload = {
+        "model": "gpt-5.1",
+        "instructions": "Return exactly OK.",
+        "input": "hello",
+        "prompt_cache_key": f"http-bridge-fence-thread-{account_id}",
+    }
+    first = await asyncio.wait_for(async_client.post("/v1/responses", json=payload), timeout=_TEST_SYNC_TIMEOUT_SECONDS)
+    assert first.status_code == 200
+    # The successor claims while the predecessor's release is still captive —
+    # the ordering the CI flake hits nondeterministically.
+    second = await asyncio.wait_for(
+        async_client.post("/v1/responses", json=payload), timeout=_TEST_SYNC_TIMEOUT_SECONDS
+    )
+    assert second.status_code == 200, second.text
+    assert captive_releases, "the retiring session must have attempted its durable release"
+
+    # Let the predecessor's release land late, fenced on its old epoch.
+    release_gate.set()
+    for kwargs in captive_releases:
+        await real_release(**kwargs)
+
+    # The late release must not have closed the successor's row: a third turn
+    # on the same key keeps working instead of failing with 409.
+    third = await asyncio.wait_for(async_client.post("/v1/responses", json=payload), timeout=_TEST_SYNC_TIMEOUT_SECONDS)
+    assert third.status_code == 200, third.text
+
+
+class _DeniesAnchoredTurnUpstreamWebSocket(_FakeBridgeUpstreamWebSocket):
+    """Completes unanchored turns and denies any turn that arrives with an anchor."""
+
+    async def send_text(self, text: str) -> None:
+        payload = json.loads(text)
+        previous_response_id = payload.get("previous_response_id")
+        if previous_response_id is None:
+            await super().send_text(text)
+            return
+        self.sent_text.append(text)
+        await self._messages.put(
+            _FakeUpstreamMessage(
+                "text",
+                text=json.dumps(
+                    {
+                        "type": "error",
+                        "status": 400,
+                        "error": {
+                            "type": "invalid_request_error",
+                            "code": "previous_response_not_found",
+                            "message": f"Previous response with id '{previous_response_id}' not found.",
+                            "param": "previous_response_id",
+                        },
+                    },
+                    separators=(",", ":"),
+                ),
+            )
+        )
+
+
+@pytest.mark.asyncio
+async def test_v1_responses_http_bridge_stops_reinjecting_an_anchor_upstream_denied(
+    async_client,
+    app_instance,
+    monkeypatch,
+    caplog,
+):
+    """A denied proxy-injected anchor must not be re-injected into the next turn.
+
+    Regression for the amplification in issue #1852: the denial leaves the dead
+    anchor in the session, the next full resend is trimmed against its stored
+    prefix, and upstream then receives a suffix of the conversation behind an id
+    it has already refused.
+    """
+    _install_bridge_settings(monkeypatch, enabled=True)
+    account_id = await _import_account(
+        async_client,
+        "acc_http_bridge_denied_anchor",
+        "http-bridge-denied-anchor@example.com",
+    )
+    account = await _get_account(account_id)
+    upstream = _DeniesAnchoredTurnUpstreamWebSocket()
+
+    async def fake_select_account_with_budget(
+        self,
+        deadline,
+        *,
+        request_id,
+        kind,
+        request_stage="first_turn",
+        sticky_key,
+        sticky_kind,
+        reallocate_sticky,
+        sticky_max_age_seconds,
+        prefer_earlier_reset_accounts,
+        routing_strategy,
+        model,
+        exclude_account_ids=None,
+        additional_limit_name=None,
+        api_key=None,
+        preferred_account_id=None,
+    ):
+        del self, deadline, request_id, kind, request_stage, sticky_key, sticky_kind
+        del reallocate_sticky, sticky_max_age_seconds, prefer_earlier_reset_accounts
+        del routing_strategy, model, exclude_account_ids, additional_limit_name
+        del api_key, preferred_account_id
+        return AccountSelection(account=account, error_message=None, error_code=None)
+
+    async def fake_ensure_fresh_with_budget(self, target, *, force=False, timeout_seconds):
+        del self, force, timeout_seconds
+        return target
+
+    async def fake_connect_responses_websocket(
+        headers,
+        access_token,
+        account_id_header,
+        *,
+        base_url=None,
+        session=None,
+    ):
+        del headers, access_token, account_id_header, base_url, session
+        return upstream
+
+    monkeypatch.setattr(proxy_module.ProxyService, "_select_account_with_budget", fake_select_account_with_budget)
+    monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh_with_budget)
+    monkeypatch.setattr(proxy_module, "connect_responses_websocket", fake_connect_responses_websocket)
+
+    headers = {"session_id": "http-bridge-denied-anchor-session"}
+
+    def _user_item(text: str) -> dict[str, Any]:
+        return {"role": "user", "content": [{"type": "input_text", "text": text}]}
+
+    turn_one_input = [_user_item("turn one")]
+    turn_two_input = [*turn_one_input, _user_item("turn two")]
+    turn_three_input = [*turn_two_input, _user_item("turn three")]
+
+    caplog.set_level(logging.WARNING, logger="app.modules.proxy.service")
+
+    first = await async_client.post(
+        "/backend-api/codex/responses",
+        json={"model": "gpt-5.1", "instructions": "Return exactly OK.", "input": turn_one_input},
+        headers=headers,
+    )
+    assert first.status_code == 200
+
+    second = await async_client.post(
+        "/backend-api/codex/responses",
+        json={"model": "gpt-5.1", "instructions": "Return exactly OK.", "input": turn_two_input},
+        headers=headers,
+    )
+    assert second.status_code == 502
+    assert second.json()["error"]["code"] == "stream_incomplete"
+
+    third = await async_client.post(
+        "/backend-api/codex/responses",
+        json={"model": "gpt-5.1", "instructions": "Return exactly OK.", "input": turn_three_input},
+        headers=headers,
+    )
+    assert third.status_code == 200
+
+    dispatched = [json.loads(text) for text in upstream.sent_text]
+    anchored = [frame for frame in dispatched if frame.get("previous_response_id") is not None]
+    assert anchored, "expected the proxy to inject an anchor on the second turn"
+
+    final = dispatched[-1]
+    assert final.get("previous_response_id") is None, (
+        f"the denied anchor was re-injected into a later turn: {final.get('previous_response_id')}"
+    )
+    assert len(final["input"]) == len(turn_three_input), (
+        "the later turn was trimmed against the denied anchor's stored prefix"
+    )
+
+    # No client supplied an anchor in this test, so every anchor the diagnostics
+    # describe must be attributed to the proxy that injected it.
+    continuity_diagnostics = [
+        record.getMessage() for record in caplog.records if "continuity_fail_closed" in record.getMessage()
+    ]
+    assert continuity_diagnostics, "expected the denial to be recorded"
+    assert not [line for line in continuity_diagnostics if "previous_response_source=client_supplied" in line], (
+        "an anchored recovery retry reported a proxy-injected anchor as client-supplied"
+    )

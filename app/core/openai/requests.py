@@ -6,7 +6,16 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from typing import cast
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    PrivateAttr,
+    SerializeAsAny,
+    SkipValidation,
+    field_validator,
+    model_validator,
+)
 
 from app.core.openai.exceptions import ClientPayloadError
 from app.core.openai.tool_call_safety import is_downstream_side_effect_tool_call_item
@@ -14,6 +23,26 @@ from app.core.types import JsonObject, JsonValue
 from app.core.utils.json_guards import is_json_list, is_json_mapping
 
 type MutableJsonObject = dict[str, JsonValue]
+
+# Passthrough request fields (``input``, ``tools``, ``messages``, ``schema``)
+# arrive from ``json.loads`` and are forwarded upstream as-is, so validating
+# every node against the recursive ``JsonValue`` union only burns CPU (a
+# Python-level ``Mapping`` ABC ``isinstance`` per dict node) and copies the
+# tree. ``SkipValidation`` keeps the client's objects; ``SerializeAsAny``
+# (inner) serializes them by runtime type instead of through a wrap
+# serializer, which keeps ``model_dump(mode="json")`` byte-identical and
+# faster. Field validators still run, so shape checks live there. The
+# subscript form expands to ``Annotated[T, SerializeAsAny(), SkipValidation()]``
+# (``SerializeAsAny`` inner, ``SkipValidation`` outermost) and type-checks as ``T``.
+type PassthroughJsonValue = SkipValidation[SerializeAsAny[JsonValue]]
+type PassthroughJsonList = SkipValidation[SerializeAsAny[list[JsonValue]]]
+
+# pydantic-core's serializer refuses container nesting deeper than ~250 levels
+# (a 500 from ``model_dump`` long after validation); deep validation used to
+# reject such bodies first (``recursion_loop`` -> 400), so the passthrough
+# validators keep that contract with an explicit, cheaper depth check.
+PASSTHROUGH_MAX_DEPTH = 200
+_JSON_CONTAINER_TYPES = (dict, list)
 
 _RESPONSES_INCLUDE_ALLOWLIST = {
     "code_interpreter_call.outputs",
@@ -89,7 +118,29 @@ def normalize_tool_choice(choice: JsonValue | None) -> JsonValue | None:
     return choice
 
 
+def validate_passthrough_depth(value: object, *, limit: int = PASSTHROUGH_MAX_DEPTH) -> None:
+    """Reject JSON nested deeper than ``limit`` container levels (iterative walk over
+    ``dict``/``list`` nodes; ``isinstance`` because the WebSocket parser yields ``dict`` subclasses)."""
+    if not isinstance(value, _JSON_CONTAINER_TYPES):
+        return
+    frontier: list[object] = [value]
+    depth = 0
+    while frontier:
+        depth += 1
+        if depth > limit:
+            raise ValueError(f"nesting exceeds {limit} levels")
+        next_frontier: list[object] = []
+        for node in frontier:
+            children: Iterable[object] = node.values() if isinstance(node, dict) else cast(list[object], node)
+            next_frontier.extend([child for child in children if isinstance(child, _JSON_CONTAINER_TYPES)])
+        frontier = next_frontier
+
+
 def validate_tool_types(tools: list[JsonValue], *, allow_builtin_tools: bool = False) -> list[JsonValue]:
+    # ``tools`` skips pydantic's ``list`` validation, so the array check that
+    # used to yield ``list_type`` lives here (same ``param``: ``tools``).
+    if not isinstance(tools, list):
+        raise ValueError("tools must be an array")
     normalized_tools: list[JsonValue] = []
     for tool in tools:
         if not is_json_mapping(tool):
@@ -599,8 +650,14 @@ class ResponsesTextFormat(BaseModel):
 
     type: str | None = None
     strict: bool | None = None
-    schema_: JsonValue | None = Field(default=None, alias="schema")
+    schema_: PassthroughJsonValue = Field(default=None, alias="schema")
     name: str | None = None
+
+    @field_validator("schema_")
+    @classmethod
+    def _validate_schema_depth(cls, value: JsonValue) -> JsonValue:
+        validate_passthrough_depth(value)
+        return value
 
 
 class ResponsesTextControls(BaseModel):
@@ -612,6 +669,8 @@ class ResponsesTextControls(BaseModel):
 
 class ResponsesRequest(BaseModel):
     model_config = ConfigDict(extra="allow")
+    _codex_lb_client_reasoning_effort: str | None = PrivateAttr(default=None)
+    _codex_lb_provider_reasoning_effort_materialized: bool = PrivateAttr(default=False)
 
     @model_validator(mode="before")
     @classmethod
@@ -620,8 +679,8 @@ class ResponsesRequest(BaseModel):
 
     model: str = Field(min_length=1)
     instructions: str
-    input: JsonValue
-    tools: list[JsonValue] = Field(default_factory=list)
+    input: PassthroughJsonValue
+    tools: PassthroughJsonList = Field(default_factory=list)
     tool_choice: str | JsonObject | None = None
     parallel_tool_calls: bool | None = None
     reasoning: ResponsesReasoning | None = None
@@ -647,8 +706,8 @@ class ResponsesRequest(BaseModel):
             normalized = _normalize_input_text(value)
             return _sanitize_input_items(normalized)
         if is_json_list(value):
-            input_items = value
-            return _sanitize_input_items(input_items)
+            validate_passthrough_depth(value)
+            return _sanitize_input_items(value)
         raise ValueError("input must be a string or array")
 
     @field_validator("include")
@@ -684,7 +743,9 @@ class ResponsesRequest(BaseModel):
     @field_validator("tools")
     @classmethod
     def _validate_tools(cls, value: list[JsonValue]) -> list[JsonValue]:
-        return validate_tool_types(value, allow_builtin_tools=True)
+        validated = validate_tool_types(value, allow_builtin_tools=True)
+        validate_passthrough_depth(validated)
+        return validated
 
     @field_validator("tool_choice")
     @classmethod
@@ -731,7 +792,9 @@ class ResponsesRequest(BaseModel):
         return payload
 
     def to_payload(self) -> JsonObject:
-        return _strip_unsupported_fields(self.model_dump_for_forwarding())
+        payload = _strip_unsupported_fields(self.model_dump_for_forwarding())
+        _normalize_compaction_trigger_singleton(payload)
+        return payload
 
     def to_replay_safety_payload(self) -> JsonObject:
         return _strip_unsupported_fields(self.model_dump_for_forwarding(), strip_replayed_tool_call_namespaces=False)
@@ -739,6 +802,7 @@ class ResponsesRequest(BaseModel):
 
 class ResponsesCompactRequest(BaseModel):
     model_config = ConfigDict(extra="allow")
+    _codex_lb_client_reasoning_effort: str | None = PrivateAttr(default=None)
 
     @model_validator(mode="before")
     @classmethod
@@ -747,7 +811,7 @@ class ResponsesCompactRequest(BaseModel):
 
     model: str = Field(min_length=1)
     instructions: str
-    input: JsonValue
+    input: PassthroughJsonValue
     reasoning: ResponsesReasoning | None = None
     store: bool = False
     service_tier: str | None = None
@@ -762,8 +826,8 @@ class ResponsesCompactRequest(BaseModel):
             normalized = _normalize_input_text(value)
             return _sanitize_input_items(normalized)
         if is_json_list(value):
-            input_items = value
-            return _sanitize_input_items(input_items)
+            validate_passthrough_depth(value)
+            return _sanitize_input_items(value)
         raise ValueError("input must be a string or array")
 
     @model_validator(mode="before")
@@ -983,6 +1047,7 @@ def _strip_compact_unsupported_fields(payload: MutableJsonObject) -> MutableJson
     if is_json_mapping(normalized_payload):
         payload = dict(normalized_payload)
     _trim_compact_input_for_upstream(payload)
+    _normalize_compaction_trigger_singleton(payload)
     payload.pop("store", None)
     payload.pop("text", None)
     payload.pop("tools", None)
@@ -990,6 +1055,21 @@ def _strip_compact_unsupported_fields(payload: MutableJsonObject) -> MutableJson
     payload.pop("client_metadata", None)
     payload["parallel_tool_calls"] = False
     return payload
+
+
+def _normalize_compaction_trigger_singleton(payload: MutableJsonObject) -> None:
+    input_value = payload.get("input")
+    if not is_json_list(input_value) or not input_value:
+        return
+
+    trigger_items = [item for item in input_value if is_json_mapping(item) and item.get("type") == "compaction_trigger"]
+    if not trigger_items:
+        return
+
+    payload["input"] = [
+        item for item in input_value if not (is_json_mapping(item) and item.get("type") == "compaction_trigger")
+    ]
+    cast(list[JsonValue], payload["input"]).append({"type": "compaction_trigger"})
 
 
 def _trim_compact_input_for_upstream(payload: MutableJsonObject) -> None:
@@ -1197,6 +1277,12 @@ def _compact_discard_consumed_continuity_output_pairs(
     latest_index = len(input_value) - 1
     latest_mapping = _json_mapping_or_none(input_value[latest_index])
     latest_type = latest_mapping.get("type") if latest_mapping is not None else None
+    if latest_type == "compaction_trigger":
+        if latest_index == 0:
+            return
+        latest_index -= 1
+        latest_mapping = _json_mapping_or_none(input_value[latest_index])
+        latest_type = latest_mapping.get("type") if latest_mapping is not None else None
     if (
         latest_mapping is None
         or not isinstance(latest_type, str)
@@ -1230,33 +1316,55 @@ def _compact_terminal_required_indices(
     latest_index = len(input_value) - 1
     latest_mapping = _json_mapping_or_none(input_value[latest_index])
     latest_type = latest_mapping.get("type") if latest_mapping is not None else None
+    terminal_trigger_indices: set[int] = set()
+    if latest_type == "compaction_trigger":
+        terminal_trigger_indices.add(latest_index)
+        if latest_index == 0:
+            return terminal_trigger_indices, True, False
+        latest_index -= 1
+        latest_mapping = _json_mapping_or_none(input_value[latest_index])
+        latest_type = latest_mapping.get("type") if latest_mapping is not None else None
+
+    def with_terminal_trigger(indices: set[int]) -> set[int]:
+        return indices | terminal_trigger_indices
+
     if latest_type not in _COMPACT_TOOL_CALL_ITEM_TYPES | _COMPACT_TOOL_CALL_OUTPUT_ITEM_TYPES:
-        return {latest_index}, True, False
+        return with_terminal_trigger({latest_index}), True, False
     if latest_mapping is not None and _compact_item_is_state_anchor(latest_mapping):
-        return _compact_required_terminal_indices(input_value, latest_index, token_counts), True, True
+        terminal_indices = _compact_required_terminal_indices(input_value, latest_index, token_counts)
+        return with_terminal_trigger(terminal_indices), True, True
     if latest_mapping is not None and _compact_item_has_elidable_inline_image(latest_mapping):
-        return _compact_required_terminal_indices(input_value, latest_index, token_counts), True, True
+        terminal_indices = _compact_required_terminal_indices(input_value, latest_index, token_counts)
+        return with_terminal_trigger(terminal_indices), True, True
     matching_call_index = _compact_matching_tool_call_index(input_value, latest_index)
     if latest_mapping is not None and _compact_terminal_item_is_side_effect(
         input_value,
         latest_index,
         matching_call_index=matching_call_index,
     ):
-        return _compact_required_terminal_indices(input_value, latest_index, token_counts), True, True
+        terminal_indices = _compact_required_terminal_indices(input_value, latest_index, token_counts)
+        return with_terminal_trigger(terminal_indices), True, True
     if latest_type in _COMPACT_TOOL_CALL_OUTPUT_ITEM_TYPES and has_continuity_anchor and matching_call_index is None:
-        return {latest_index}, True, False
+        return with_terminal_trigger({latest_index}), True, False
     if latest_type in _COMPACT_TOOL_CALL_ITEM_TYPES:
-        return _compact_required_terminal_indices(input_value, latest_index, token_counts), True, True
+        terminal_indices = _compact_required_terminal_indices(input_value, latest_index, token_counts)
+        return with_terminal_trigger(terminal_indices), True, True
+
+    if terminal_trigger_indices:
+        # The trigger is the only mandatory suffix sentinel. An ordinary
+        # matched tool pair immediately before it remains best-effort context
+        # and may be dropped when other anchors consume the wire budget.
+        return terminal_trigger_indices, True, False
 
     paired_tail = _compact_reconciled_tool_call_indices(
         input_value,
-        {latest_index},
+        with_terminal_trigger({latest_index}),
         token_counts=token_counts,
         token_budget=_MAX_COMPACT_UPSTREAM_ESTIMATED_TOKENS,
     )
     if latest_index in paired_tail:
         return paired_tail, False, False
-    return set(), False, False
+    return terminal_trigger_indices, bool(terminal_trigger_indices), False
 
 
 def _compact_item_has_elidable_inline_image(item: JsonValue) -> bool:
@@ -1642,6 +1750,36 @@ def _compact_item_texts(item: Mapping[str, JsonValue]) -> list[str]:
     return texts
 
 
+def responses_input_contains_goal_continuation_context(input_value: JsonValue) -> bool:
+    """Return whether Responses input carries Codex's goal-continuation marker."""
+
+    if not is_json_list(input_value):
+        return False
+    for item in input_value:
+        if not is_json_mapping(item):
+            continue
+        for text in _compact_item_texts(item):
+            if text.lstrip().startswith(_GOAL_CONTINUATION_CONTEXT_PREFIX):
+                return True
+    return False
+
+
+def responses_request_contains_goal_continuation_context(payload: ResponsesRequest) -> bool:
+    """Return whether a normalized request carries Codex's goal restart marker."""
+
+    # ResponsesRequest normalization lifts developer/system input messages into
+    # ``instructions``. The marker can therefore disappear from ``input`` and
+    # follow pre-existing instruction text by the time affinity is classified.
+    # Keep both locations in this check or a harmless parser refactor can
+    # silently break restart recovery while marker-preservation tests still pass.
+    instructions = payload.instructions
+    if isinstance(instructions, str) and any(
+        line.lstrip().startswith(_GOAL_CONTINUATION_CONTEXT_PREFIX) for line in instructions.splitlines()
+    ):
+        return True
+    return responses_input_contains_goal_continuation_context(payload.input)
+
+
 def _compact_trimmed_input_with_markers(
     input_value: list[JsonValue], token_counts: list[int], selected_indices: set[int]
 ) -> list[JsonValue]:
@@ -1739,6 +1877,7 @@ def _sanitize_interleaved_reasoning_input(payload: MutableJsonObject) -> None:
 
 def normalize_reasoning_aliases(payload: MutableJsonObject) -> None:
     reasoning_effort = payload.pop("reasoningEffort", None)
+    snake_case_reasoning_effort = payload.pop("reasoning_effort", None)
     reasoning_summary = payload.pop("reasoningSummary", None)
     provider_thinking = payload.pop("thinking", None)
     provider_enable_thinking = payload.pop("enable_thinking", None)
@@ -1749,8 +1888,20 @@ def normalize_reasoning_aliases(payload: MutableJsonObject) -> None:
     else:
         reasoning_map = {}
 
-    if isinstance(reasoning_effort, str) and "effort" not in reasoning_map:
-        reasoning_map["effort"] = reasoning_effort
+    existing_effort = reasoning_map.get("effort")
+    if isinstance(existing_effort, str) and not existing_effort.strip():
+        reasoning_map.pop("effort")
+
+    alias_effort = next(
+        (
+            candidate.strip()
+            for candidate in (reasoning_effort, snake_case_reasoning_effort)
+            if isinstance(candidate, str) and candidate.strip()
+        ),
+        None,
+    )
+    if alias_effort is not None and "effort" not in reasoning_map:
+        reasoning_map["effort"] = alias_effort
     if isinstance(reasoning_summary, str) and "summary" not in reasoning_map:
         reasoning_map["summary"] = reasoning_summary
 
@@ -1774,15 +1925,14 @@ def _normalize_thinking_alias(
     enable_thinking: JsonValue,
 ) -> MutableJsonObject | None:
     if isinstance(thinking, bool):
-        return {"effort": "medium"} if thinking else None
+        if thinking:
+            return {"effort": "medium"}
     if isinstance(thinking, str):
         normalized = thinking.strip().lower()
-        if normalized in {"low", "medium", "high", "xhigh", "max", "ultra"}:
+        if normalized in {"minimal", "low", "medium", "high", "xhigh", "max", "ultra"}:
             return {"effort": normalized}
         if normalized in {"enabled", "true", "on"}:
             return {"effort": "medium"}
-        if normalized in {"disabled", "false", "off"}:
-            return None
     thinking_mapping = _json_mapping_or_none(thinking)
     if thinking_mapping is not None:
         normalized: MutableJsonObject = {}
@@ -1792,19 +1942,19 @@ def _normalize_thinking_alias(
             normalized["effort"] = effort.strip().lower()
         if isinstance(summary, str) and summary.strip():
             normalized["summary"] = summary.strip()
+        thinking_type = thinking_mapping.get("type")
+        if "effort" not in normalized and isinstance(thinking_type, str) and thinking_type.strip().lower() == "enabled":
+            normalized["effort"] = "medium"
+        enabled = thinking_mapping.get("enabled")
+        if "effort" not in normalized and enabled is True:
+            normalized["effort"] = "medium"
+        if "effort" not in normalized and enable_thinking is True:
+            normalized["effort"] = "medium"
         if normalized:
             return normalized
-        thinking_type = thinking_mapping.get("type")
-        if isinstance(thinking_type, str):
-            normalized_type = thinking_type.strip().lower()
-            if normalized_type == "enabled":
-                return {"effort": "medium"}
-            if normalized_type == "disabled":
-                return None
-        enabled = thinking_mapping.get("enabled")
-        if isinstance(enabled, bool):
-            return {"effort": "medium"} if enabled else None
 
+    # Disabled `thinking` spellings are inactive, not authoritative: a
+    # separate enabled alias must still participate in policy evaluation.
     if isinstance(enable_thinking, bool):
         return {"effort": "medium"} if enable_thinking else None
     return None

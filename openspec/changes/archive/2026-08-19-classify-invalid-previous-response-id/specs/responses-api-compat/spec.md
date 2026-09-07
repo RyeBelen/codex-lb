@@ -1,17 +1,31 @@
 ## ADDED Requirements
 
-### Requirement: Invalid previous-response shorthand uses stale-anchor recovery
+### Requirement: Parameterless invalid previous-response errors use continuity recovery
 
-Responses WebSocket handling MUST classify an upstream `invalid_request_error` whose message is exactly `Invalid \`previous_response_id\`.` as previous-response continuity loss when the envelope omits both `code` and `param`. It MUST apply the same replay or sanitized continuity-failure behavior used for canonical `previous_response_not_found` errors instead of forwarding the raw 400 error.
+When an upstream Responses WebSocket rejects an anchored request with `type = "invalid_request_error"`, no `code` or `param`, and the normalized message ``Invalid `previous_response_id``` with or without one trailing period, the service MUST classify the frame as a previous-response continuity miss. It MUST apply the same replay, masking, ownership, and account-health rules as the canonical `previous_response_not_found` error and MUST NOT relay the raw invalid-request frame downstream. A different named parameter or any other trailing punctuation MUST NOT match this error shape.
 
-#### Scenario: Codex-native stale anchor uses shorthand error envelope
+#### Scenario: Codex-native delta continuation receives the canonical recovery signal
 
-- **WHEN** a Codex-native Responses WebSocket follow-up carries `previous_response_id`
-- **AND** upstream returns `type=invalid_request_error` with message `Invalid \`previous_response_id\`.` and no `code` or `param`
-- **THEN** codex-lb applies its existing stale-anchor recovery behavior
-- **AND** the client does not receive the raw upstream 400 error
+- **GIVEN** a Codex-native `/backend-api/codex/responses` request carries `previous_response_id` and delta-only tool output that cannot be replayed safely without its anchor
+- **WHEN** upstream returns the parameterless ``Invalid `previous_response_id`.`` error before `response.created`
+- **THEN** the downstream client receives a sanitized error with `code = "previous_response_not_found"`
+- **AND** the raw upstream envelope and previous response id are not exposed
 
-#### Scenario: Unrelated invalid requests remain unchanged
+#### Scenario: Self-contained full resend is replayed without the rejected anchor
 
-- **WHEN** upstream returns an `invalid_request_error` whose message does not exactly identify an invalid `previous_response_id`
-- **THEN** codex-lb does not classify it as previous-response continuity loss solely because `code` and `param` are absent
+- **GIVEN** an anchored direct WebSocket request retains a self-contained full-resend body that is safe to replay without `previous_response_id`
+- **WHEN** upstream returns the parameterless ``Invalid `previous_response_id`.`` error before `response.created`
+- **THEN** the service reconnects and replays the retained body without `previous_response_id`
+- **AND** the raw upstream error is not sent downstream
+
+#### Scenario: Public WebSocket retains generic continuity masking
+
+- **GIVEN** a public `/v1/responses` WebSocket request carries `previous_response_id` but cannot be replayed safely without its anchor
+- **WHEN** upstream returns the parameterless ``Invalid `previous_response_id`.`` error
+- **THEN** the downstream client receives the existing sanitized `stream_incomplete` continuity failure
+- **AND** neither `previous_response_not_found` nor the raw upstream envelope is exposed
+
+#### Scenario: Unrelated invalid requests retain their original classification
+
+- **WHEN** upstream returns `invalid_request_error` with a different message or names a parameter other than `previous_response_id`
+- **THEN** the service MUST NOT classify that error as a previous-response continuity miss

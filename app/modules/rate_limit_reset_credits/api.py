@@ -41,6 +41,7 @@ from app.core.exceptions import (
     DashboardServiceUnavailableError,
 )
 from app.core.upstream_proxy import ResolvedUpstreamRoute, UpstreamProxyRouteError
+from app.core.utils.shared_future import _await_cleanup_deferring_cancellation
 from app.db.models import Account, AccountStatus
 from app.dependencies import AccountsContext, get_accounts_context
 from app.modules.accounts.auth_manager import AuthManager
@@ -132,7 +133,8 @@ async def get_rate_limit_reset_credits(
 ) -> RateLimitResetCreditsSnapshotResponse | None:
     store = get_rate_limit_reset_credits_store()
     account = await context.repository.get_by_id(account_id)
-    if account is None:
+    # A pending-deletion account is gone from the operator's point of view.
+    if account is None or account.delete_requested_at is not None:
         await store.invalidate(account_id)
         return None
     if account.status in _NON_REDEEMABLE_STATUSES or not account.chatgpt_account_id:
@@ -158,7 +160,9 @@ async def consume_rate_limit_reset_credit(
     context: AccountsContext = Depends(get_accounts_context),
 ) -> ConsumeResetCreditResponseSchema:
     account = await context.repository.get_by_id(account_id)
-    if account is None:
+    # A pending-deletion account is gone from the operator's point of view:
+    # the synchronous delete 404'd here once the row was removed.
+    if account is None or account.delete_requested_at is not None:
         raise DashboardNotFoundError("Account not found", code="account_not_found")
 
     store = get_rate_limit_reset_credits_store()
@@ -277,10 +281,16 @@ async def serialize_reset_credit_redeem(
             try:
                 yield
             finally:
-                heartbeat.cancel()
-                with suppress(asyncio.CancelledError):
-                    await heartbeat
-                await release_redeem_claim(account_id, holder_id)
+
+                async def cleanup_redeem_claim() -> None:
+                    heartbeat.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await heartbeat
+                    await release_redeem_claim(account_id, holder_id)
+
+                cancellation = await _await_cleanup_deferring_cancellation(cleanup_redeem_claim())
+                if cancellation is not None:
+                    raise cancellation
             return
 
     # Direct callers without a DB session keep the in-process lock.

@@ -22,6 +22,18 @@ const DEFAULT_FILTER_STATE: FilterState = {
   offset: 0,
 };
 
+export function requestLogFiltersApplied(filters: FilterState): boolean {
+  return (
+    filters.search.trim() !== "" ||
+    filters.timeframe !== DEFAULT_FILTER_STATE.timeframe ||
+    filters.accountIds.length > 0 ||
+    filters.apiKeyIds.length > 0 ||
+    filters.modelOptions.length > 0 ||
+    filters.statuses.length > 0 ||
+    Boolean(filters.conversationId)
+  );
+}
+
 const REQUEST_LOG_PARAM_KEYS = [
   "search",
   "timeframe",
@@ -92,19 +104,6 @@ function writeFilterState(state: FilterState, base?: URLSearchParams): URLSearch
   return params;
 }
 
-function timeframeToSinceIso(timeframe: FilterState["timeframe"]): string | undefined {
-  if (timeframe === "all") {
-    return undefined;
-  }
-  const now = Date.now();
-  const lookup: Record<Exclude<FilterState["timeframe"], "all">, number> = {
-    "1h": 60 * 60 * 1000,
-    "24h": 24 * 60 * 60 * 1000,
-    "7d": 7 * 24 * 60 * 60 * 1000,
-  };
-  return new Date(now - lookup[timeframe]).toISOString();
-}
-
 export type UseRequestLogsOptions = {
   enabled?: boolean;
 };
@@ -114,7 +113,8 @@ export function useRequestLogs(options: UseRequestLogsOptions = {}) {
   const [searchParams, setSearchParams] = useSearchParams();
 
   const filters = useMemo(() => parseFilterState(searchParams), [searchParams]);
-  const since = useMemo(() => timeframeToSinceIso(filters.timeframe), [filters.timeframe]);
+  const filtersApplied = requestLogFiltersApplied(filters);
+  const timeframe = filters.timeframe === "all" ? undefined : filters.timeframe;
   const listFilters = useMemo<RequestLogsListFilters>(
     () => ({
       search: filters.search || undefined,
@@ -124,44 +124,52 @@ export function useRequestLogs(options: UseRequestLogsOptions = {}) {
       apiKeyIds: filters.apiKeyIds,
       statuses: filters.statuses,
       modelOptions: filters.modelOptions,
-      since,
+      timeframe,
       conversationId: filters.conversationId ?? undefined,
     }),
-    [filters, since],
+    [filters, timeframe],
   );
   const facetFilters = useMemo<RequestLogFacetFilters>(
     () => ({
-      since,
+      timeframe,
       accountIds: filters.accountIds,
       apiKeyIds: filters.apiKeyIds,
       modelOptions: filters.modelOptions,
     }),
-    [filters.accountIds, filters.apiKeyIds, filters.modelOptions, since],
+    [filters.accountIds, filters.apiKeyIds, filters.modelOptions, timeframe],
   );
 
   const {
-    data: logsData,
+    data: logsResult,
     error: logsError,
     isFetching: logsIsFetching,
     isLoading: logsIsLoading,
     isPending: logsIsPending,
+    isPlaceholderData: logsIsPlaceholderData,
     isSuccess: logsIsSuccess,
     refetch: refetchLogs,
   } = useQuery({
     queryKey: ["dashboard", "request-logs", listFilters],
-    queryFn: () => getRequestLogs(listFilters),
+    queryFn: async () => ({
+      page: await getRequestLogs(listFilters),
+      filtersApplied,
+    }),
     enabled,
     refetchInterval: 30_000,
     refetchIntervalInBackground: false,
     refetchOnWindowFocus: true,
     placeholderData: keepPreviousData,
   });
+  const logsData = logsResult?.page;
+  const emptyStateFiltersApplied =
+    filtersApplied || (logsIsPlaceholderData && Boolean(logsResult?.filtersApplied));
   const logsQuery = {
     data: logsData,
     error: logsError,
     isFetching: logsIsFetching,
     isLoading: logsIsLoading,
     isPending: logsIsPending,
+    isPlaceholderData: logsIsPlaceholderData,
     isSuccess: logsIsSuccess,
     refetch: refetchLogs,
   };
@@ -204,6 +212,7 @@ export function useRequestLogs(options: UseRequestLogsOptions = {}) {
     filters,
     listFilters,
     facetFilters,
+    emptyStateFiltersApplied,
     logsQuery,
     optionsQuery,
     updateFilters,

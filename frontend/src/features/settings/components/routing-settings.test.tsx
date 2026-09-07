@@ -46,6 +46,11 @@ describe("RoutingSettings", () => {
     const onSave = vi.fn().mockResolvedValue(undefined);
     render(<RoutingSettings settings={BASE_SETTINGS} busy={false} onSave={onSave} />);
 
+    expect(screen.getByRole("spinbutton", { name: "Response-create limit" })).toHaveValue(4);
+    expect(screen.getByRole("spinbutton", { name: "Stream limit" })).toHaveValue(8);
+    expect(screen.getByRole("spinbutton", { name: "Stream recovery reserve" })).toHaveValue(1);
+    expect(screen.getByRole("spinbutton", { name: "API key fair-share threshold (%)" })).toHaveValue(0);
+
     await user.clear(screen.getByRole("spinbutton", { name: "Response-create limit" }));
     await user.type(screen.getByRole("spinbutton", { name: "Response-create limit" }), "0");
     await user.clear(screen.getByRole("spinbutton", { name: "Stream limit" }));
@@ -63,6 +68,96 @@ describe("RoutingSettings", () => {
       proxyAccountStreamRecoveryReserve: 2,
       proxyApiKeyFairShareCongestionThresholdPct: 80,
     });
+  });
+
+  it("renders inherited capacity values as empty inputs with effective hints", () => {
+    render(
+      <RoutingSettings
+        settings={{
+          ...BASE_SETTINGS,
+          proxyAccountResponseCreateLimitOverride: null,
+          proxyAccountStreamLimitOverride: null,
+          proxyAccountStreamRecoveryReserveOverride: null,
+          proxyApiKeyFairShareCongestionThresholdPctOverride: null,
+        }}
+        busy={false}
+        onSave={vi.fn().mockResolvedValue(undefined)}
+      />,
+    );
+
+    expect(screen.getByRole("spinbutton", { name: "Response-create limit" })).toHaveValue(null);
+    expect(screen.getByRole("spinbutton", { name: "Stream limit" })).toHaveValue(null);
+    expect(screen.getByRole("spinbutton", { name: "Stream recovery reserve" })).toHaveValue(null);
+    expect(screen.getByRole("spinbutton", { name: "API key fair-share threshold (%)" })).toHaveValue(null);
+    expect(screen.getAllByText(/Inherited effective value:/)).toHaveLength(4);
+  });
+
+  it.each([
+    ["Response-create limit", "proxyAccountResponseCreateLimit"],
+    ["Stream limit", "proxyAccountStreamLimit"],
+    ["Stream recovery reserve", "proxyAccountStreamRecoveryReserve"],
+    ["API key fair-share threshold (%)", "proxyApiKeyFairShareCongestionThresholdPct"],
+  ] as const)("sends only an explicit null when clearing %s", async (label, field) => {
+    const user = userEvent.setup();
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    render(<RoutingSettings settings={BASE_SETTINGS} busy={false} onSave={onSave} />);
+
+    await user.clear(screen.getByRole("spinbutton", { name: label }));
+    await user.click(screen.getByRole("button", { name: "Save capacity limits" }));
+
+    expect(onSave).toHaveBeenCalledWith({
+      ...BASE_UPDATE_PAYLOAD,
+      [field]: null,
+    });
+  });
+
+  it("does not pin unedited capacity values when clearing an inherited field", async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    const inheritedSettings = {
+      ...BASE_SETTINGS,
+      proxyAccountResponseCreateLimitOverride: null,
+      proxyAccountStreamLimitOverride: null,
+      proxyAccountStreamRecoveryReserveOverride: null,
+      proxyApiKeyFairShareCongestionThresholdPctOverride: null,
+    };
+    render(<RoutingSettings settings={inheritedSettings} busy={false} onSave={onSave} />);
+
+    await user.type(screen.getByRole("spinbutton", { name: "Stream limit" }), "12");
+    await user.click(screen.getByRole("button", { name: "Save capacity limits" }));
+
+    expect(onSave).toHaveBeenCalledWith({
+      ...buildSettingsUpdateRequest(inheritedSettings, {}),
+      proxyAccountStreamLimit: 12,
+    });
+    const payload = onSave.mock.calls[0]?.[0];
+    expect(payload).not.toHaveProperty("proxyAccountResponseCreateLimit");
+    expect(payload).not.toHaveProperty("proxyAccountStreamRecoveryReserve");
+    expect(payload).not.toHaveProperty("proxyApiKeyFairShareCongestionThresholdPct");
+  });
+
+  it("validates a cleared stream limit against its inherited environment value", async () => {
+    const user = userEvent.setup();
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    render(
+      <RoutingSettings
+        settings={{
+          ...BASE_SETTINGS,
+          proxyAccountStreamLimit: 24,
+          proxyAccountStreamLimitEnvironmentValue: 2,
+          proxyAccountStreamLimitOverride: 24,
+          proxyAccountStreamRecoveryReserve: 3,
+          proxyAccountStreamRecoveryReserveOverride: 3,
+        }}
+        busy={false}
+        onSave={onSave}
+      />,
+    );
+
+    await user.clear(screen.getByRole("spinbutton", { name: "Stream limit" }));
+
+    expect(screen.getByRole("button", { name: "Save capacity limits" })).toBeDisabled();
+    expect(onSave).not.toHaveBeenCalled();
   });
 
   it("rejects invalid account capacity limits before saving", async () => {
@@ -608,6 +703,65 @@ describe("RoutingSettings", () => {
 
     expect(screen.getByText(/Good default for compliant mixed-account pools/i)).toBeInTheDocument();
     expect(screen.getByText(/No strategy can guarantee account-safety outcomes/i)).toBeInTheDocument();
+  });
+
+  it("explains soft sticky routing versus hard Codex continuation affinity", () => {
+    render(<RoutingSettings settings={BASE_SETTINGS} busy={false} onSave={vi.fn().mockResolvedValue(undefined)} />);
+
+    expect(
+      screen.getByText(/does not disable hard Codex continuation affinity/i),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/soft preference, not a guarantee/i)).toBeInTheDocument();
+  });
+
+  it("explains primary versus secondary quota windows and threshold units", () => {
+    render(<RoutingSettings settings={BASE_SETTINGS} busy={false} onSave={vi.fn().mockResolvedValue(undefined)} />);
+
+    expect(screen.getByText("Primary vs secondary quota")).toBeInTheDocument();
+    expect(
+      screen.getByText(/Primary quota is the short 5-hour usage window/i),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/5-hour \(primary\) window has been used/i),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/secondary window \(weekly, or monthly on monthly-only plans\) has been used/i),
+    ).toBeInTheDocument();
+  });
+
+  it("shows the remaining-percent equivalent for sticky thresholds", async () => {
+    const user = userEvent.setup();
+    render(<RoutingSettings settings={BASE_SETTINGS} busy={false} onSave={vi.fn().mockResolvedValue(undefined)} />);
+
+    // Defaults: primary 95% used, secondary 100% used.
+    expect(screen.getByText("95% used · 5% remaining in quota terms")).toBeInTheDocument();
+    expect(screen.getByText("100% used · 0% remaining in quota terms")).toBeInTheDocument();
+
+    const secondary = screen.getByRole("spinbutton", { name: "Sticky secondary threshold" });
+    await user.clear(secondary);
+    await user.type(secondary, "70");
+
+    expect(screen.getByText("70% used · 30% remaining in quota terms")).toBeInTheDocument();
+
+    // Decimal thresholds keep the two displayed values complementary.
+    await user.clear(secondary);
+    await user.type(secondary, "12.5");
+
+    expect(screen.getByText("12.5% used · 87.5% remaining in quota terms")).toBeInTheDocument();
+  });
+
+  it("describes prefer-earlier-reset selection behavior", () => {
+    render(<RoutingSettings settings={BASE_SETTINGS} busy={false} onSave={vi.fn().mockResolvedValue(undefined)} />);
+
+    expect(
+      screen.getByText(/prefer those whose selected quota window resets sooner/i),
+    ).toBeInTheDocument();
+  });
+
+  it("describes what limit warm-up sends and that probes consume quota", () => {
+    render(<RoutingSettings settings={BASE_SETTINGS} busy={false} onSave={vi.fn().mockResolvedValue(undefined)} />);
+
+    expect(screen.getByText(/consume a small amount of quota/i)).toBeInTheDocument();
   });
 
   it("saves staggered idle warm-up when limit warm-up is enabled", async () => {
