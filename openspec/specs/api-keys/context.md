@@ -37,3 +37,11 @@ serialized output and not inside a string literal that the length shortcuts
 (`instructions` >= 8192 chars, or a single chunk that alone covers the
 remaining budget) prove the cap without encoding. Surrogates skipped that way
 yield the 8192 cap like any other large payload.
+
+## GPT-6 Astra permission
+
+Use **APIs > Edit API key > Allow GPT-6 Astra** to enable access for selected keys. New and existing keys default to off after migration. For example, enable the personal key and leave a shared key disabled to reserve Astra access for the personal key.
+
+The permission is independent of Allowed models and Apply to codex /model. An enabled key still needs Astra in its allowlist when one is configured, an eligible account or model source, and quota. Enforcing Astra as the model does not grant permission. Calls without an authenticated key are denied Astra, even with proxy authentication disabled.
+
+Permission updates use the existing authorization-cache invalidation interval across workers; in-flight requests are not canceled. The migration adds a false default for historical rows, so enable intended keys after upgrading. Reverting this feature restores the previous unrestricted policy.

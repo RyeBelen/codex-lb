@@ -13,6 +13,21 @@ import { ApiKeyEditDialog } from "./api-key-edit-dialog";
 import { hasLimitRuleChanges } from "./limit-rules-utils";
 
 describe("ApiKeyEditDialog", () => {
+  it("saves explicit Astra permission", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    renderWithProviders(
+      <ApiKeyEditDialog open busy={false} apiKey={createApiKey({ allowGpt6Astra: true })} onOpenChange={vi.fn()} onSubmit={onSubmit} />,
+    );
+    const toggle = screen.getByRole("switch", { name: "Allow GPT-6 Astra" });
+    expect(toggle).toBeChecked();
+    await user.click(toggle);
+
+    await user.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+    expect(onSubmit.mock.calls[0][0].allowGpt6Astra).toBe(false);
+  });
+
   function ControlledApiKeyEditDialog({
     apiKey = createApiKey({ allowedModels: [] }),
   }: {

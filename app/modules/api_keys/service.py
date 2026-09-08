@@ -90,6 +90,7 @@ class ApiKeysRepositoryProtocol(Protocol):
         name: str | _Unset = ...,
         allowed_models: str | None | _Unset = ...,
         apply_to_codex_model: bool | _Unset = ...,
+        allow_gpt6_astra: bool | _Unset = ...,
         enforced_model: str | None | _Unset = ...,
         enforced_reasoning_effort: str | None | _Unset = ...,
         allowed_reasoning_efforts: str | None | _Unset = ...,
@@ -288,6 +289,7 @@ class ApiKeyCreateData:
     name: str
     allowed_models: list[str] | None
     apply_to_codex_model: bool = False
+    allow_gpt6_astra: bool = False
     enforced_model: str | None = None
     enforced_reasoning_effort: str | None = None
     allowed_reasoning_efforts: list[str] | None = None
@@ -308,7 +310,9 @@ class ApiKeyUpdateData:
     allowed_models: list[str] | None = None
     allowed_models_set: bool = False
     apply_to_codex_model: bool | None = None
+    allow_gpt6_astra: bool | None = None
     apply_to_codex_model_set: bool = False
+    allow_gpt6_astra_set: bool = False
     enforced_model: str | None = None
     enforced_model_set: bool = False
     enforced_reasoning_effort: str | None = None
@@ -351,6 +355,7 @@ class ApiKeyData:
     last_used_at: datetime | None
     allowed_reasoning_efforts: list[str] | None = None
     apply_to_codex_model: bool = False
+    allow_gpt6_astra: bool = False
     traffic_class: str = TRAFFIC_CLASS_FOREGROUND
     transport_policy_override: str | None = None
     usage_sections: str = "upstream_limits,account_pool_usage"
@@ -508,6 +513,7 @@ class ApiKeysService:
             key_prefix=plain_key[:15],
             allowed_models=_serialize_allowed_models(normalized_allowed_models),
             apply_to_codex_model=bool(payload.apply_to_codex_model),
+            allow_gpt6_astra=bool(payload.allow_gpt6_astra),
             enforced_model=enforced_model,
             enforced_reasoning_effort=enforced_reasoning_effort,
             allowed_reasoning_efforts=_serialize_allowed_reasoning_efforts(allowed_reasoning_efforts),
@@ -640,6 +646,14 @@ class ApiKeysService:
                 apply_to_codex_model = payload.apply_to_codex_model
         else:
             apply_to_codex_model = _UNSET
+        allow_gpt6_astra: bool | _Unset
+        if payload.allow_gpt6_astra_set:
+            if payload.allow_gpt6_astra is None:
+                allow_gpt6_astra = _UNSET
+            else:
+                allow_gpt6_astra = payload.allow_gpt6_astra
+        else:
+            allow_gpt6_astra = _UNSET
 
         if payload.enforced_reasoning_effort_set:
             enforced_reasoning_effort = _normalize_reasoning_effort(payload.enforced_reasoning_effort)
@@ -718,6 +732,7 @@ class ApiKeysService:
                 name=_normalize_name(payload.name or "") if payload.name_set else _UNSET,
                 allowed_models=_serialize_allowed_models(allowed_models) if payload.allowed_models_set else _UNSET,
                 apply_to_codex_model=apply_to_codex_model,
+                allow_gpt6_astra=allow_gpt6_astra,
                 enforced_model=enforced_model if payload.enforced_model_set else _UNSET,
                 enforced_reasoning_effort=(
                     enforced_reasoning_effort if payload.enforced_reasoning_effort_set else _UNSET
@@ -775,6 +790,7 @@ class ApiKeysService:
             or payload.name_set
             or payload.allowed_models_set
             or payload.apply_to_codex_model_set
+            or payload.allow_gpt6_astra_set
             or payload.enforced_model_set
             or payload.enforced_reasoning_effort_set
             or payload.allowed_reasoning_efforts_set
@@ -1850,6 +1866,7 @@ def _to_created_data(data: ApiKeyData, key: str) -> ApiKeyCreatedData:
         key_prefix=data.key_prefix,
         allowed_models=data.allowed_models,
         apply_to_codex_model=data.apply_to_codex_model,
+        allow_gpt6_astra=data.allow_gpt6_astra,
         enforced_model=data.enforced_model,
         enforced_reasoning_effort=data.enforced_reasoning_effort,
         allowed_reasoning_efforts=data.allowed_reasoning_efforts,
@@ -1886,6 +1903,7 @@ def _to_api_key_data(
         key_prefix=row.key_prefix,
         allowed_models=_deserialize_allowed_models(row.allowed_models),
         apply_to_codex_model=getattr(row, "apply_to_codex_model", False),
+        allow_gpt6_astra=bool(row.allow_gpt6_astra),
         enforced_model=_normalize_model_slug(row.enforced_model),
         enforced_reasoning_effort=_normalize_reasoning_effort_lenient(row.enforced_reasoning_effort),
         allowed_reasoning_efforts=_deserialize_allowed_reasoning_efforts(

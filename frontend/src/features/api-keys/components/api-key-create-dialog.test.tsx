@@ -19,6 +19,21 @@ describe("ApiKeyCreateDialog", () => {
     expect(screen.getByRole("button", { name: "Allowed efforts: All efforts" })).toBeInTheDocument();
   });
 
+  it("saves explicit Astra permission", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    renderWithProviders(
+      <ApiKeyCreateDialog open busy={false}  onOpenChange={vi.fn()} onSubmit={onSubmit} />,
+    );
+    const toggle = screen.getByRole("switch", { name: "Allow GPT-6 Astra" });
+    expect(toggle).not.toBeChecked();
+    await user.click(toggle);
+    await user.type(screen.getByLabelText("Name"), "Astra key");
+    await user.click(screen.getByRole("button", { name: "Create" }));
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+    expect(onSubmit.mock.calls[0][0].allowGpt6Astra).toBe(true);
+  });
+
   it("shows the codex /model checkbox unchecked by default", () => {
     renderWithProviders(
       <ApiKeyCreateDialog
