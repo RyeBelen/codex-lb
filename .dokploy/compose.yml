@@ -2,7 +2,7 @@ services:
   codex-lb:
     image: codex-lb-api-daily-graphs:production
     build:
-      context: ..
+      context: .
       dockerfile: Dockerfile
     restart: unless-stopped
     expose:
