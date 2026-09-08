@@ -609,22 +609,22 @@ class ModelRegistry:
         return tier_plans.get(normalized_service_tier, frozenset())
 
     def account_ids_for_model_service_tier(self, slug: str, service_tier: str | None) -> frozenset[str] | None:
-        if service_tier is None or self._snapshot is None:
-            return None
-        if not self._snapshot.account_catalogs_authoritative:
+        if service_tier is None:
             return None
         normalized_slug = slug.strip().lower()
         normalized_service_tier = canonical_service_tier_value(service_tier)
         if not normalized_slug or not normalized_service_tier:
             return None
+        if self.account_ids_for_model(slug) is None:
+            return None
+        if self._snapshot is None:
+            return frozenset()
 
         tier_accounts = self._snapshot.model_service_tier_accounts.get(
             slug
         ) or self._snapshot.model_service_tier_accounts.get(normalized_slug)
         if tier_accounts is None:
-            if self._snapshot.account_catalogs_authoritative:
-                return frozenset()
-            return None
+            return frozenset()
         return tier_accounts.get(normalized_service_tier, frozenset())
 
     def model_advertises_service_tier(self, slug: str, service_tier: str | None) -> bool:
@@ -633,31 +633,20 @@ class ModelRegistry:
         This is deliberately distinct from "no account carries the tier": a model
         that never advertises the tier cannot be routed at it by any account, so
         an enforced tier must not be treated as an account-eligibility filter for
-        that model. Returns ``True`` whenever the answer is unknown (no snapshot,
-        non-authoritative catalogs, unusable slug/tier) so callers keep their
-        existing behavior until the catalog can actually answer.
+        that model. Returns ``True`` whenever the model identity is unknown so
+        operator-mapped models keep their existing behavior.
         """
-        if service_tier is None or self._snapshot is None:
-            return True
-        if not self._snapshot.account_catalogs_authoritative:
+        if service_tier is None:
             return True
         normalized_slug = slug.strip().lower()
         normalized_service_tier = canonical_service_tier_value(service_tier)
         if not normalized_slug or not normalized_service_tier:
             return True
 
-        model_is_known = (
-            slug in self._snapshot.model_plans
-            or normalized_slug in self._snapshot.model_plans
-            or slug in self._snapshot.model_accounts
-            or normalized_slug in self._snapshot.model_accounts
-        )
-        if not model_is_known:
-            # An authoritative subscription snapshot cannot describe the tier
-            # capabilities of an operator-mapped or source-routed model that it
-            # does not contain. Keep the enforced tier when model identity is
-            # unknown instead of broadening fallback beyond catalog evidence.
+        if self.account_ids_for_model(slug) is None:
             return True
+        if self._snapshot is None:
+            return False
 
         tier_accounts = self._snapshot.model_service_tier_accounts.get(
             slug
@@ -670,11 +659,22 @@ class ModelRegistry:
         return normalized_service_tier in (tier_accounts or {}) or normalized_service_tier in (tier_plans or {})
 
     def account_ids_for_model(self, slug: str) -> frozenset[str] | None:
-        """Return exact supporting accounts, or ``None`` while coverage is incomplete."""
-        if self._snapshot is None or not self._snapshot.account_catalogs_authoritative:
-            return None
+        """Return exact supporting accounts, or ``None`` for an unknown model."""
         normalized_slug = slug.strip().lower()
         if not normalized_slug:
+            return None
+        bootstrap_model = self._bootstrap_models.get(slug) or self._bootstrap_models.get(normalized_slug)
+        if self._snapshot is None:
+            return frozenset() if bootstrap_model is not None else None
+        model_is_known = (
+            slug in self._snapshot.model_plans
+            or normalized_slug in self._snapshot.model_plans
+            or slug in self._snapshot.model_accounts
+            or normalized_slug in self._snapshot.model_accounts
+            or normalized_slug in self._snapshot.suppressed_model_slugs
+            or (self._snapshot.bootstrap_floor_active and bootstrap_model is not None)
+        )
+        if not model_is_known:
             return None
         return self._snapshot.model_accounts.get(slug) or self._snapshot.model_accounts.get(
             normalized_slug, frozenset()
@@ -718,9 +718,9 @@ class ModelRegistry:
         tick, ``plan_types_for_model`` / ``get_models_with_fallback`` would report
         even canonical models as absent (because ``_snapshot`` is no longer
         ``None``), so ``_mapped_model_has_registry_entry`` would skip model/plan
-        filtering and let an unsupported plan be selected, and ``/v1/models`` would
-        stay empty until the timer fires. Bootstrap remains the discovery/gating
-        floor whenever there is no authoritative account coverage.
+        filtering, and ``/v1/models`` would stay empty until the timer fires.
+        Bootstrap remains the discovery and plan-gating floor; exact account
+        eligibility still waits for catalog evidence.
         """
         async with self._lock:
             self._snapshot = None

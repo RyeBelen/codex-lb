@@ -409,15 +409,18 @@ shadow the retained metadata.
 - **THEN** the model MUST remain absent from live availability indexes
 - **AND** its complete per-account live entry MUST refresh the metadata-only catalog
 
-### Requirement: Complete account catalogs constrain pooled routing
+### Requirement: Known account catalogs constrain pooled routing
 
 The system MUST retain the union of successfully refreshed account model
-catalogs for client discovery. When every active account has a current or
-retained last-known catalog, request selection MUST route a model or explicit
-non-default service tier only to accounts whose own catalog advertised that
-capability. Requests that omit a tier or use the omit-equivalent `auto` or
-`default` tiers MUST use model-only account filtering, including when reusing
-an HTTP bridge session.
+catalogs for client discovery. For any catalog-known subscription model,
+request selection MUST route a model or explicit non-default service tier only
+to accounts whose current or retained last-known catalog advertised that
+capability. This account-level evidence MUST be used even when another active
+or selectable account has no catalog evidence. Requests that omit a tier or
+use the omit-equivalent `auto` or `default` tiers MUST use model-only account
+filtering, including when reusing an HTTP bridge session. Operator-mapped model
+slugs that have never appeared in subscription catalog discovery MUST retain
+the existing plan-level fallback.
 
 A service tier imposed by an API key's enforced service tier is not an explicit
 request for that tier. When the requested tier originates from API key
@@ -439,7 +442,7 @@ MUST name that tier.
 
 - **GIVEN** two active accounts share a plan
 - **AND** only one account advertises a model
-- **WHEN** all active account catalogs are known
+- **WHEN** request selection evaluates that model
 - **THEN** the merged discovery catalog includes the model
 - **AND** requests for that model select only the advertising account
 
@@ -482,26 +485,24 @@ MUST name that tier.
 - **THEN** no account is selected
 - **AND** the selection error names the `priority` service tier
 
-### Requirement: Unknown account catalogs degrade without false exclusion
+### Requirement: Unknown account catalogs fail closed for known capabilities
 
 The system MUST distinguish an account catalog that successfully omitted a
-capability from an account catalog that could not be fetched. If any active
-account has neither a current nor retained last-known catalog, account-level
-capability indexes MUST NOT be treated as authoritative and selection MUST use
-the existing plan-level fallback. Operator-mapped model slugs MUST NOT be
+capability from an account catalog that could not be fetched. An account with
+neither a current nor retained last-known catalog MUST be excluded from
+catalog-known subscription models and service tiers until catalog evidence is
+available. A non-authoritative snapshot MAY still provide exact routing
+evidence for the accounts it covers. Operator-mapped model slugs MUST NOT be
 rejected solely because they are absent from subscription catalog discovery.
-An otherwise authoritative snapshot whose account set does not cover every
-currently selectable account MUST likewise degrade to plan-level routing until
-account catalog coverage catches up.
 
-When there is no authoritative account coverage — including partial refreshes
+When there is no complete account coverage — including partial refreshes
 after prior successful cycles and when every account is removed and live
 capability state is cleared — the static bootstrap catalog MUST remain the
 discovery and plan-gating floor. Clearing capability state MUST NOT publish an
 authoritative-empty catalog that reports canonical models as absent;
 otherwise, in the window after an account is added but before the next
-scheduled refresh, model/plan filtering would be skipped (an unsupported plan
-could be selected) and `/v1/models` would report no models.
+scheduled refresh, `/v1/models` would report no models. Bootstrap discovery
+alone MUST NOT qualify an account to receive a model.
 
 Carrying a plan's catalog forward when its refresh does not complete MUST NOT
 re-advertise a model that no currently-active account of that plan advertises,
@@ -528,7 +529,8 @@ an operator-mapped slug that has no catalog evidence at all.
 - **AND** one active account catalog refresh succeeds while another fails
 - **WHEN** selection evaluates a model or service tier
 - **THEN** the partial index is non-authoritative
-- **AND** the failed account is not classified as lacking every capability
+- **AND** the successful account's catalog is used as exact routing evidence
+- **AND** the failed account is excluded from catalog-known capabilities
 
 #### Scenario: No active accounts fall back to the bootstrap floor
 
@@ -536,7 +538,7 @@ an operator-mapped slug that has no catalog evidence at all.
 - **WHEN** an account is added before the next scheduled refresh completes
 - **THEN** canonical bootstrap models remain discoverable via `/v1/models`
 - **AND** those models remain plan-gated by the bootstrap catalog
-- **AND** an account whose plan does not support the model is not selected
+- **AND** no account is selected for them without catalog evidence
 
 #### Scenario: Failed refresh has last-known account data
 
@@ -572,15 +574,14 @@ an operator-mapped slug that has no catalog evidence at all.
 - **GIVEN** an authoritative registry snapshot covers the previously selectable accounts
 - **AND** a newly imported or reactivated account becomes selectable before the next catalog refresh
 - **WHEN** request selection evaluates model or service-tier support
-- **THEN** account-level indexes are treated as incomplete
-- **AND** selection degrades to plan-level routing
+- **THEN** the new account is excluded from catalog-known capabilities
+- **AND** covered accounts continue to use their exact catalog evidence
 
 #### Scenario: Bridge owner is newer than registry coverage
 
 - **GIVEN** an HTTP bridge session belongs to a selectable account absent from the registry snapshot
 - **WHEN** a compatible follow-up evaluates model or service-tier support
-- **THEN** stale account-level indexes do not detach the bridge owner
-- **AND** compatibility degrades to plan-level routing
+- **THEN** the bridge owner is not reused for a catalog-known capability
 
 #### Scenario: Failed refresh follows an account plan-type change
 
@@ -1116,4 +1117,3 @@ The system MUST treat `ultrafast` as an access-controlled service tier and MUST 
 
 - **WHEN** no live or retained account catalog advertises `ultrafast`
 - **THEN** bootstrap model metadata does not expose or grant that tier
-

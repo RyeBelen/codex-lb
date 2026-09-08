@@ -3227,9 +3227,11 @@ async def test_select_account_skips_plan_filter_when_registry_snapshot_lacks_mod
 
 
 @pytest.mark.asyncio
-async def test_select_account_filters_model_by_authoritative_account_catalog(monkeypatch) -> None:
+async def test_select_account_excludes_education_account_without_model_capability(monkeypatch) -> None:
     supported = _make_account("acc-model-supported", "supported@example.com")
     unsupported = _make_account("acc-model-unsupported", "unsupported@example.com")
+    supported.plan_type = "pro"
+    unsupported.plan_type = "education"
     now = utcnow()
     reset_at = int(now.replace(tzinfo=timezone.utc).timestamp()) + 300
     primary = {
@@ -3251,7 +3253,7 @@ async def test_select_account_filters_model_by_authoritative_account_catalog(mon
     monkeypatch.setattr(
         "app.modules.proxy.load_balancer.get_model_registry",
         lambda: SimpleNamespace(
-            plan_types_for_model=lambda _model: frozenset({"plus"}),
+            plan_types_for_model=lambda _model: frozenset({"pro", "education"}),
             account_ids_for_model=lambda _model: frozenset({supported.id}),
             account_ids_for_model_service_tier=lambda _model, _tier: None,
         ),
@@ -3265,7 +3267,7 @@ async def test_select_account_filters_model_by_authoritative_account_catalog(mon
 
 
 @pytest.mark.asyncio
-async def test_select_account_degrades_when_registry_omits_selectable_account(monkeypatch) -> None:
+async def test_select_account_rejects_selectable_account_missing_catalog_evidence(monkeypatch) -> None:
     stale_account = _make_account("acc-stale-registry", "stale-registry@example.com")
     new_account = _make_account("acc-new-selectable", "new-selectable@example.com")
     model = UpstreamModel(
@@ -3312,9 +3314,8 @@ async def test_select_account_degrades_when_registry_omits_selectable_account(mo
     balancer = LoadBalancer(lambda: _repo_factory(accounts_repo, usage_repo, sticky_repo))
     selection = await balancer.select_account(model=model.slug, service_tier="priority")
 
-    assert selection.account is not None
-    assert selection.account.id == new_account.id
-    assert selection.error_code is None
+    assert selection.account is None
+    assert selection.error_code is not None
 
 
 @pytest.mark.asyncio

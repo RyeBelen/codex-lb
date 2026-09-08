@@ -48,17 +48,8 @@ def _filter_accounts_for_model_with_catalog_evidence(
     service_tier: str | None = None,
     additional_quota_can_override_account_catalog: bool = False,
 ) -> _ModelAccountFilterResult:
-    account_indexes_cover_selection = True
-    get_snapshot = getattr(registry, "get_snapshot", None)
-    if callable(get_snapshot):
-        snapshot = get_snapshot()
-        account_indexes_cover_selection = snapshot is not None and all(
-            account.id in snapshot.account_plans for account in accounts
-        )
     account_ids_for_model = getattr(registry, "account_ids_for_model", None)
-    general_model_account_ids = (
-        account_ids_for_model(model) if callable(account_ids_for_model) and account_indexes_cover_selection else None
-    )
+    general_model_account_ids = account_ids_for_model(model) if callable(account_ids_for_model) else None
     if general_model_account_ids is None or additional_quota_can_override_account_catalog:
         model_accounts = accounts
     else:
@@ -67,11 +58,7 @@ def _filter_accounts_for_model_with_catalog_evidence(
     normalized_service_tier = service_tier.strip().lower() if service_tier is not None else None
     effective_service_tier = None if normalized_service_tier in {"auto", "default"} else service_tier
     if effective_service_tier is not None:
-        allowed_account_ids = (
-            registry.account_ids_for_model_service_tier(model, effective_service_tier)
-            if account_indexes_cover_selection
-            else None
-        )
+        allowed_account_ids = registry.account_ids_for_model_service_tier(model, effective_service_tier)
         if allowed_account_ids is not None:
             if additional_quota_can_override_account_catalog and general_model_account_ids is not None:
                 allowed_plans = registry.plan_types_for_model_service_tier(model, effective_service_tier)

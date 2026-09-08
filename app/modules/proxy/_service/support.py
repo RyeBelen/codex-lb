@@ -1427,22 +1427,16 @@ def _http_bridge_session_supports_service_tier(
         if callable(is_suppressed_model) and is_suppressed_model(request_model):
             return False
         return True
-    account_indexes_cover_owner = True
     current_account_plan: str | None = None
     current_account_plan_is_authoritative = False
     get_snapshot = getattr(registry, "get_snapshot", None)
     if callable(get_snapshot):
         snapshot = get_snapshot()
         current_account_plan_is_authoritative = snapshot is not None and session.account.id in snapshot.account_plans
-        account_indexes_cover_owner = current_account_plan_is_authoritative
         if current_account_plan_is_authoritative:
             current_account_plan = snapshot.account_plans[session.account.id]
     account_ids_for_model = getattr(registry, "account_ids_for_model", None)
-    model_account_ids = (
-        account_ids_for_model(request_model)
-        if callable(account_ids_for_model) and account_indexes_cover_owner
-        else None
-    )
+    model_account_ids = account_ids_for_model(request_model) if callable(account_ids_for_model) else None
     model_catalog_omits_account = model_account_ids is not None and session.account.id not in model_account_ids
     quota_admission_matches = (
         session.catalog_omission_quota_admission is not None
@@ -1460,11 +1454,7 @@ def _http_bridge_session_supports_service_tier(
     if normalized_service_tier in {None, "auto", "default"}:
         allowed_plans = model_allowed_plans
     else:
-        allowed_account_ids = (
-            registry.account_ids_for_model_service_tier(request_model, request_service_tier)
-            if account_indexes_cover_owner
-            else None
-        )
+        allowed_account_ids = registry.account_ids_for_model_service_tier(request_model, request_service_tier)
         if allowed_account_ids is not None and not model_catalog_omits_account:
             return session.account.id in allowed_account_ids
 

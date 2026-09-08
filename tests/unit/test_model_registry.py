@@ -509,11 +509,11 @@ async def test_account_ids_for_model_tracks_complete_account_catalogs():
 
     assert registry.account_ids_for_model("gpt-5.6-sol") == frozenset({"account-sol"})
     assert registry.account_ids_for_model("gpt-5.4") == frozenset({"account-sol", "account-default"})
-    assert registry.account_ids_for_model("unknown") == frozenset()
+    assert registry.account_ids_for_model("unknown") is None
 
 
 @pytest.mark.asyncio
-async def test_partial_first_refresh_degrades_account_capabilities_to_unknown():
+async def test_partial_first_refresh_exposes_known_account_capabilities():
     shared = _model("gpt-5.4")
     registry = ModelRegistry(ttl_seconds=60.0)
 
@@ -527,8 +527,8 @@ async def test_partial_first_refresh_degrades_account_capabilities_to_unknown():
     assert snapshot is not None
     assert snapshot.account_catalogs_authoritative is False
     assert snapshot.bootstrap_floor_active is True
-    assert registry.account_ids_for_model("gpt-5.4") is None
-    assert registry.account_ids_for_model_service_tier("gpt-5.4", "priority") is None
+    assert registry.account_ids_for_model("gpt-5.4") == frozenset({"account-known"})
+    assert registry.account_ids_for_model_service_tier("gpt-5.4", "priority") == frozenset()
     assert registry.plan_types_for_model_service_tier("gpt-5.4", "priority") == frozenset({"pro"})
     bootstrap_models = registry.get_models_with_fallback()
     assert "gpt-5.6-sol" in bootstrap_models
@@ -1032,7 +1032,7 @@ async def test_plan_change_drops_failed_account_stale_catalog() -> None:
     assert snapshot.account_catalogs_authoritative is False
     assert "account-changed" not in snapshot.account_plans
     assert "pro-only" not in snapshot.models
-    assert registry.account_ids_for_model("pro-only") is None
+    assert registry.account_ids_for_model("pro-only") == frozenset()
 
 
 @pytest.mark.asyncio
@@ -1121,8 +1121,8 @@ async def test_clear_falls_back_to_bootstrap_floor():
     # NOT publish an authoritative-empty snapshot that suppresses bootstrap. It must
     # reset to the bootstrap floor (as if never refreshed) so that when an account is
     # added before the next refresh tick, canonical models are still discoverable and
-    # still plan-gated (not treated as absent). Bootstrap is the floor whenever there
-    # is no authoritative account coverage.
+    # still plan-gated (not treated as absent). Exact account eligibility still waits
+    # for catalog evidence.
     registry = ModelRegistry(ttl_seconds=60.0)
     live_only_model = _model("live-only-after-clear")
     await registry.update({"plus": [_model("gpt-5.4"), live_only_model]})
@@ -1139,10 +1139,10 @@ async def test_clear_falls_back_to_bootstrap_floor():
     sol_plans = registry.plan_types_for_model("gpt-5.6-sol")
     assert sol_plans is not None and len(sol_plans) > 0
     assert "pro" in sol_plans
-    # Per-account coverage is unknown (not authoritatively empty), so routing falls
-    # back to plan-level gating instead of excluding every account.
-    assert registry.account_ids_for_model("gpt-5.6-sol") is None
-    assert registry.account_ids_for_model_service_tier("gpt-5.6-sol", "priority") is None
+    # Bootstrap discovery is not account-level capability evidence. Accounts wait
+    # for a successful catalog refresh before receiving this model.
+    assert registry.account_ids_for_model("gpt-5.6-sol") == frozenset()
+    assert registry.account_ids_for_model_service_tier("gpt-5.6-sol", "priority") == frozenset()
     assert "live-only-after-clear" not in registry.get_models_for_metadata()
 
 

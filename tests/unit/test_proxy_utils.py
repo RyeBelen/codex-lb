@@ -47662,7 +47662,7 @@ def test_filter_accounts_for_model_uses_authoritative_account_capabilities(monke
 
 
 @pytest.mark.asyncio
-async def test_cleared_registry_keeps_bootstrap_plan_gating_in_new_account_window(monkeypatch):
+async def test_cleared_registry_keeps_bootstrap_discovery_but_waits_for_account_evidence(monkeypatch):
     # Regression for the follow-on Codex P2: after the scheduler observes zero
     # active accounts and clears the registry, an account can be added before the
     # next refresh tick. In that window a canonical bootstrap model must still be
@@ -47682,9 +47682,7 @@ async def test_cleared_registry_keeps_bootstrap_plan_gating_in_new_account_windo
     unsupported = _make_account("acc_cleared_unsupported")
     unsupported.plan_type = "legacy_unlisted_plan"
 
-    # Plan gating still applies via the bootstrap catalog: the unsupported plan is
-    # excluded rather than selected during the pre-refresh window.
-    assert _filter_accounts_for_model([unsupported, supported], "gpt-5.6-sol") == [supported]
+    assert _filter_accounts_for_model([unsupported, supported], "gpt-5.6-sol") == []
 
 
 def test_suppressed_catalog_model_remains_an_account_selection_blocker(monkeypatch):
@@ -47891,7 +47889,7 @@ def test_http_bridge_session_rechecks_registry_plan_tier_for_catalog_omission_ad
     )
 
 
-def test_http_bridge_session_degrades_when_registry_omits_owner(monkeypatch):
+def test_http_bridge_session_rejects_owner_missing_catalog_evidence(monkeypatch):
     session = cast(
         proxy_service._HTTPBridgeSession,
         SimpleNamespace(
@@ -47909,10 +47907,12 @@ def test_http_bridge_session_degrades_when_registry_omits_owner(monkeypatch):
             return frozenset({"plus"})
 
         def account_ids_for_model(self, slug: str) -> frozenset[str] | None:
-            raise AssertionError(f"stale model-account index enforced for {slug}")
+            assert slug == "gpt-5.5"
+            return frozenset({"acc_stale_owner"})
 
         def account_ids_for_model_service_tier(self, slug: str, requested_tier: str) -> frozenset[str] | None:
-            raise AssertionError(f"stale tier-account index enforced for {slug}:{requested_tier}")
+            assert (slug, requested_tier) == ("gpt-5.5", "priority")
+            return frozenset({"acc_stale_owner"})
 
         def plan_types_for_model_service_tier(self, slug: str, requested_tier: str) -> frozenset[str] | None:
             assert (slug, requested_tier) == ("gpt-5.5", "priority")
@@ -47926,7 +47926,7 @@ def test_http_bridge_session_degrades_when_registry_omits_owner(monkeypatch):
             request_model="gpt-5.5",
             request_service_tier="priority",
         )
-        is True
+        is False
     )
 
 

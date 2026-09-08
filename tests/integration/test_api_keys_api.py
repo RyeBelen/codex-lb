@@ -108,7 +108,21 @@ async def _import_account(async_client, account_id: str, email: str) -> str:
     files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
     response = await async_client.post("/api/accounts/import", files=files)
     assert response.status_code == 200
-    return generate_unique_account_id(account_id, email)
+    imported_account_id = generate_unique_account_id(account_id, email)
+    registry = get_model_registry()
+    models = [
+        replace(model, raw={**model.raw, "service_tiers": [{"slug": "priority"}]})
+        for model in registry.get_models_with_fallback().values()
+    ]
+    snapshot = registry.get_snapshot()
+    active_account_plans = dict(snapshot.account_plans) if snapshot is not None else {}
+    active_account_plans[imported_account_id] = "plus"
+    await registry.update(
+        {"plus": models},
+        per_account_results={imported_account_id: ("plus", models)},
+        active_account_plans=active_account_plans,
+    )
+    return imported_account_id
 
 
 async def _create_model_source(
