@@ -215,6 +215,7 @@ class _FakeApiKeysRepository(ApiKeysRepositoryProtocol):
         *,
         name: str | _Unset = _UNSET,
         allowed_models: str | None | _Unset = _UNSET,
+        denied_models: str | None | _Unset = _UNSET,
         apply_to_codex_model: bool | _Unset = _UNSET,
         enforced_model: str | None | _Unset = _UNSET,
         enforced_reasoning_effort: str | None | _Unset = _UNSET,
@@ -238,6 +239,7 @@ class _FakeApiKeysRepository(ApiKeysRepositoryProtocol):
         for field, value in {
             "name": name,
             "allowed_models": allowed_models,
+            "denied_models": denied_models,
             "apply_to_codex_model": apply_to_codex_model,
             "enforced_model": enforced_model,
             "enforced_reasoning_effort": enforced_reasoning_effort,
@@ -764,6 +766,65 @@ async def test_create_key_rejects_enforced_model_outside_allowed_models() -> Non
                 allowed_models=["model-alpha"],
                 enforced_model="model-beta",
                 expires_at=None,
+            )
+        )
+
+
+@pytest.mark.asyncio
+async def test_create_key_persists_denied_models() -> None:
+    repo = _FakeApiKeysRepository()
+    service = ApiKeysService(repo)
+
+    created = await service.create_key(
+        ApiKeyCreateData(name="deny-astra", allowed_models=None, denied_models=["gpt-6-astra"])
+    )
+
+    assert created.allowed_models is None
+    assert created.denied_models == ["gpt-6-astra"]
+
+
+@pytest.mark.asyncio
+async def test_create_key_rejects_overlapping_model_policy() -> None:
+    repo = _FakeApiKeysRepository()
+    service = ApiKeysService(repo)
+
+    with pytest.raises(ValueError, match="allowed_models and denied_models"):
+        await service.create_key(
+            ApiKeyCreateData(
+                name="contradictory-policy",
+                allowed_models=["gpt-5.6-sol"],
+                denied_models=["gpt-5.6-sol"],
+            )
+        )
+
+
+@pytest.mark.asyncio
+async def test_update_key_rejects_denied_existing_allowed_model() -> None:
+    repo = _FakeApiKeysRepository()
+    service = ApiKeysService(repo)
+    created = await service.create_key(
+        ApiKeyCreateData(name="existing-policy", allowed_models=["gpt-5.6-sol"])
+    )
+
+    with pytest.raises(ValueError, match="allowed_models and denied_models"):
+        await service.update_key(
+            created.id,
+            ApiKeyUpdateData(denied_models=["gpt-5.6-sol"], denied_models_set=True),
+        )
+
+
+@pytest.mark.asyncio
+async def test_create_key_rejects_denied_enforced_model() -> None:
+    repo = _FakeApiKeysRepository()
+    service = ApiKeysService(repo)
+
+    with pytest.raises(ValueError, match="enforced_model cannot be present in denied_models"):
+        await service.create_key(
+            ApiKeyCreateData(
+                name="denied-enforced-model",
+                allowed_models=None,
+                denied_models=["gpt-5.6-sol"],
+                enforced_model="gpt-5.6-sol",
             )
         )
 

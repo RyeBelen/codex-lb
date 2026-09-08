@@ -46,6 +46,27 @@ describe("ApiKeyEditDialog", () => {
     ).toBeInTheDocument();
   });
 
+  it("loads and submits denied models", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+
+    renderWithProviders(
+      <ApiKeyEditDialog
+        open
+        busy={false}
+        apiKey={createApiKey({ allowedModels: null, deniedModels: ["gpt-5.1"] })}
+        onOpenChange={vi.fn()}
+        onSubmit={onSubmit}
+      />,
+    );
+
+    expect(screen.getByText("Denied models always take precedence.")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+    expect(onSubmit.mock.calls[0][0].deniedModels).toEqual(["gpt-5.1"]);
+  });
+
   it("omits limits from payload when only name changes", async () => {
     const user = userEvent.setup();
     const onSubmit = vi.fn().mockResolvedValue(undefined);

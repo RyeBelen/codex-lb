@@ -92,6 +92,7 @@ function hasSelectionChange(initialIds: string[], nextIds: string[]): boolean {
 
 type ApiKeyEditDraft = {
   selectedModels: string[];
+  deniedModels: string[];
   selectedAccountIds: string[];
   selectedSourceIds: string[];
   selectedReasoningEfforts: ReasoningEffortType[];
@@ -110,6 +111,7 @@ type ApiKeyEditDraft = {
 function createApiKeyEditDraft(apiKey: ApiKey): ApiKeyEditDraft {
   return {
     selectedModels: apiKey.allowedModels || [],
+    deniedModels: apiKey.deniedModels || [],
     selectedAccountIds: apiKey.assignedAccountIds,
     selectedSourceIds: apiKey.assignedSourceIds,
     selectedReasoningEfforts: apiKey.allowedReasoningEfforts || [],
@@ -167,6 +169,7 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
     const payload: ApiKeyUpdateRequest = {
       name: values.name,
       allowedModels: draft.selectedModels.length > 0 ? draft.selectedModels : null,
+      deniedModels: draft.deniedModels.length > 0 ? draft.deniedModels : null,
       applyToCodexModel: draft.applyToCodexModel,
       enforcedModel: draft.enforcedModel.trim() ? draft.enforcedModel.trim() : null,
       enforcedReasoningEffort:
@@ -223,7 +226,12 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
 
             <div className="space-y-1">
               <div className="text-sm font-medium">{t("apiKeys.form.allowedModels")}</div>
-              <ModelMultiSelect value={draft.selectedModels} onChange={(selectedModels) => updateDraft({ selectedModels })} />
+              <ModelMultiSelect
+                value={draft.selectedModels}
+                disabledValues={draft.deniedModels}
+                onChange={(selectedModels) => updateDraft({ selectedModels })}
+              />
+              <p className="text-xs text-muted-foreground">{t("apiKeys.form.allowedModelsHelp")}</p>
             </div>
 
             <div className="flex items-center gap-2 rounded-md border p-2 text-sm">
@@ -235,6 +243,17 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
               <label htmlFor="edit-api-key-apply-to-codex-model" className="cursor-pointer">
                 {t("apiKeys.form.applyToCodexModel")}
               </label>
+            </div>
+
+            <div className="space-y-1">
+              <div className="text-sm font-medium">{t("apiKeys.form.deniedModels")}</div>
+              <ModelMultiSelect
+                value={draft.deniedModels}
+                disabledValues={draft.selectedModels}
+                placeholder={t("apiKeys.modelSelect.noneDenied")}
+                onChange={(deniedModels) => updateDraft({ deniedModels })}
+              />
+              <p className="text-xs text-muted-foreground">{t("apiKeys.form.deniedModelsHelp")}</p>
             </div>
 
             <div className="space-y-1">

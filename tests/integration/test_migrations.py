@@ -1880,6 +1880,42 @@ async def test_quota_warmup_claim_expiry_migration_upgrade_and_downgrade(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_api_key_denied_models_migration_upgrade_and_downgrade(tmp_path):
+    from alembic import command
+    from sqlalchemy import inspect as sa_inspect
+
+    from app.db.migrate import _build_alembic_config
+
+    db_url = f"sqlite+aiosqlite:///{tmp_path / 'api-key-denied-models.sqlite'}"
+    parent_revision = "20260830_000000_add_quota_warmup_claim_expiry"
+    denied_models_revision = "20260908_000000_add_api_key_denied_models"
+
+    await to_thread.run_sync(lambda: run_upgrade(db_url, denied_models_revision, bootstrap_legacy=False))
+    engine = create_async_engine(db_url, future=True)
+    try:
+        async with engine.connect() as conn:
+            columns = await conn.run_sync(
+                lambda sync_conn: {
+                    column["name"]: column for column in sa_inspect(sync_conn).get_columns("api_keys")
+                }
+            )
+        assert columns["denied_models"]["nullable"] is True
+    finally:
+        await engine.dispose()
+
+    await to_thread.run_sync(lambda: command.downgrade(_build_alembic_config(db_url), parent_revision))
+    engine = create_async_engine(db_url, future=True)
+    try:
+        async with engine.connect() as conn:
+            column_names = await conn.run_sync(
+                lambda sync_conn: {column["name"] for column in sa_inspect(sync_conn).get_columns("api_keys")}
+            )
+        assert "denied_models" not in column_names
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_conversation_presence_rollup_migration_upgrade_and_downgrade(tmp_path):
     from alembic import command
     from sqlalchemy import inspect as sa_inspect

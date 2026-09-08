@@ -27,6 +27,20 @@ describe("ModelMultiSelect", () => {
     });
   });
 
+  it("disables models selected by the opposite policy", async () => {
+    const user = userEvent.setup();
+    renderWithProviders(
+      <ModelMultiSelect value={[]} disabledValues={["gpt-5.1"]} onChange={vi.fn()} />,
+    );
+
+    await user.click(await screen.findByRole("button", { name: "All models" }));
+
+    expect(screen.getByRole("menuitemcheckbox", { name: "gpt-5.1" })).toHaveAttribute(
+      "aria-disabled",
+      "true",
+    );
+  });
+
   it("shows count for single selected model", async () => {
     renderWithProviders(
       <ModelMultiSelect value={["gpt-5.1"]} onChange={vi.fn()} />,

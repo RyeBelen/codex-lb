@@ -94,6 +94,14 @@ function getLimitValue(apiKey: ApiKey, t: ReturnType<typeof useTranslation>["t"]
   return formatLimitSummary(apiKey.limits, t);
 }
 
+function getModelPolicyValue(apiKey: ApiKey, t: ReturnType<typeof useTranslation>["t"]): string {
+  const allowed = apiKey.allowedModels?.join(", ") || t("common.options.all");
+  if (!apiKey.deniedModels?.length) {
+    return allowed;
+  }
+  return `${allowed}; ${t("apiKeys.table.deniedModels", { models: apiKey.deniedModels.join(", ") })}`;
+}
+
 export type ApiKeyTableProps = {
   keys: ApiKey[];
   busy: boolean;
@@ -127,14 +135,14 @@ export function ApiKeyTable({ keys, busy, onEdit, onDelete, onRegenerate }: ApiK
       </TableHeader>
       <TableBody>
         {keys.map((apiKey) => {
-          const models = apiKey.allowedModels?.join(", ") || t("common.options.all");
+          const models = getModelPolicyValue(apiKey, t);
           const trafficClass = apiKey.trafficClass === "opportunistic" ? t("common.traffic.opportunistic") : t("common.traffic.foreground");
 
           return (
             <TableRow key={apiKey.id}>
               <TableCell className="pl-4 font-medium truncate">{apiKey.name}</TableCell>
               <TableCell className="truncate font-mono text-xs">{apiKey.keyPrefix}</TableCell>
-              <TableCell className="truncate">{models}</TableCell>
+              <TableCell className="truncate" title={models}>{models}</TableCell>
               <TableCell className="truncate text-xs tabular-nums">{trafficClass}</TableCell>
               <TableCell className="text-xs tabular-nums leading-tight whitespace-normal">{getUsageValue(apiKey, t)}</TableCell>
               <TableCell className="text-xs tabular-nums leading-tight whitespace-normal">{getLimitValue(apiKey, t)}</TableCell>

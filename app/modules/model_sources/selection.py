@@ -15,7 +15,7 @@ import logging
 from app.core.openai.model_registry import get_model_registry
 from app.db.models import ModelSource
 from app.db.session import detach_session_objects, get_background_session
-from app.modules.api_keys.service import ApiKeyData
+from app.modules.api_keys.service import ApiKeyData, api_key_allows_exact_model
 from app.modules.model_sources.repository import ModelSourcesRepository
 
 logger = logging.getLogger(__name__)
@@ -48,7 +48,6 @@ async def select_responses_model_source(
     two lookups from drifting apart the way the transports once did.
     """
     assigned_source_ids = allowed_source_ids_for_api_key(api_key)
-    exact_allowed_models = set(api_key.allowed_models) if api_key and api_key.allowed_models else None
     candidates = [candidate for candidate in (raw_model, model) if candidate]
     if not candidates:
         return None
@@ -57,7 +56,7 @@ async def select_responses_model_source(
     async with get_background_session() as session:
         repository = ModelSourcesRepository(session)
         for candidate in deduped_candidates:
-            if exact_allowed_models is not None and candidate not in exact_allowed_models:
+            if not api_key_allows_exact_model(api_key, candidate):
                 continue
             subscription_model = registry_models.get(candidate)
             if assigned_source_ids is None and subscription_model is not None:

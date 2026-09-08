@@ -363,6 +363,7 @@ class ApiKeysRepository:
         *,
         name: str | _Unset = _UNSET,
         allowed_models: str | None | _Unset = _UNSET,
+        denied_models: str | None | _Unset = _UNSET,
         apply_to_codex_model: bool | _Unset = _UNSET,
         enforced_model: str | None | _Unset = _UNSET,
         enforced_reasoning_effort: str | None | _Unset = _UNSET,
@@ -388,6 +389,9 @@ class ApiKeysRepository:
         if allowed_models is not _UNSET:
             assert allowed_models is None or isinstance(allowed_models, str)
             row.allowed_models = allowed_models
+        if denied_models is not _UNSET:
+            assert denied_models is None or isinstance(denied_models, str)
+            row.denied_models = denied_models
         if apply_to_codex_model is not _UNSET:
             assert isinstance(apply_to_codex_model, bool)
             row.apply_to_codex_model = apply_to_codex_model

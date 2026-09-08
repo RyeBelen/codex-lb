@@ -56,6 +56,25 @@ describe("ApiKeyCreateDialog", () => {
     expect(onSubmit.mock.calls[0][0].applyToCodexModel).toBe(true);
   });
 
+  it("submits selected denied models", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+
+    renderWithProviders(
+      <ApiKeyCreateDialog open busy={false} onOpenChange={vi.fn()} onSubmit={onSubmit} />,
+    );
+
+    await user.type(screen.getByLabelText("Name"), "Deny model key");
+    await user.click(await screen.findByRole("button", { name: "No denied models" }));
+    await user.click(screen.getByRole("menuitemcheckbox", { name: "gpt-5.1" }));
+    await user.keyboard("{Escape}");
+    await user.click(screen.getByRole("button", { name: "Create" }));
+
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+    expect(onSubmit.mock.calls[0][0].allowedModels).toBeUndefined();
+    expect(onSubmit.mock.calls[0][0].deniedModels).toEqual(["gpt-5.1"]);
+  });
+
   it("submits opportunistic traffic class", async () => {
     const user = userEvent.setup();
     const onSubmit = vi.fn().mockResolvedValue(undefined);

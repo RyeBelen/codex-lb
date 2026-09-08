@@ -80,6 +80,7 @@ describe("ApiKeyTable", () => {
       name: "Unrestricted key",
       keyPrefix: "sk-open",
       allowedModels: null,
+      deniedModels: ["gpt-6-astra"],
     });
 
     renderWithProviders(
@@ -93,7 +94,7 @@ describe("ApiKeyTable", () => {
     );
 
     expect(screen.getByText("gpt-5.1, gpt-4o-mini")).toBeInTheDocument();
-    expect(screen.getByText("All")).toBeInTheDocument();
+    expect(screen.getByText("All; Denied: gpt-6-astra")).toBeInTheDocument();
   });
 
   it("invokes onEdit / onRegenerate / onDelete with the selected key from the row menu", async () => {

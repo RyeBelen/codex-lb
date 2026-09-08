@@ -46,6 +46,7 @@ export const ApiKeySchema = z.object({
   name: z.string(),
   keyPrefix: z.string(),
   allowedModels: z.array(z.string()).nullable(),
+  deniedModels: z.array(z.string()).nullable().default(null),
   applyToCodexModel: z.boolean().default(false),
   enforcedModel: z.string().nullable().default(null),
   allowedReasoningEfforts: z.array(z.enum(REASONING_EFFORTS)).nullable().default(null),
@@ -85,6 +86,7 @@ export const USAGE_SECTION_LABELS: Record<UsageSection, string> = {
 export const ApiKeyCreateRequestSchema = z.object({
   name: z.string().min(1).max(128),
   allowedModels: z.array(z.string()).optional(),
+  deniedModels: z.array(z.string()).optional(),
   applyToCodexModel: z.boolean().optional(),
   trafficClass: z.enum(TRAFFIC_CLASSES).optional(),
   transportPolicyOverride: z.enum(TRANSPORT_POLICY_OVERRIDES).nullable().optional(),
@@ -110,6 +112,7 @@ export const ApiKeyCreateResponseSchema = ApiKeySchema.extend({
 export const ApiKeyUpdateRequestSchema = z.object({
   name: z.string().min(1).max(128).optional(),
   allowedModels: z.array(z.string()).nullable().optional(),
+  deniedModels: z.array(z.string()).nullable().optional(),
   applyToCodexModel: z.boolean().optional(),
   trafficClass: z.enum(TRAFFIC_CLASSES).optional(),
   transportPolicyOverride: z.enum(TRANSPORT_POLICY_OVERRIDES).nullable().optional(),

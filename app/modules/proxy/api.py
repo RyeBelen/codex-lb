@@ -191,6 +191,7 @@ from app.modules.api_keys.service import (
     ApiKeysService,
     ApiKeyUsageReservationData,
     _compute_pooled_credits,
+    api_key_allows_exact_model,
 )
 from app.modules.firewall.repository import FirewallRepository
 from app.modules.firewall.service import FirewallRepositoryPort, FirewallService
@@ -3781,7 +3782,9 @@ async def _build_codex_models_response_body(
 ) -> Response:
 
     allowed_models = _allowed_models_for_api_key(api_key)
+    denied_models = _denied_models_for_api_key(api_key)
     exact_source_allowed_models = _exact_source_allowed_models_for_api_key(api_key)
+    exact_source_denied_models = _exact_source_denied_models_for_api_key(api_key)
     visibility_allowed_models = _codex_model_visibility_allowed_models(api_key)
 
     registry = get_model_registry()
@@ -3794,11 +3797,13 @@ async def _build_codex_models_response_body(
     ]
     visible_source_models = []
     for source_model in source_models:
+        if source_model.slug in exact_source_denied_models:
+            continue
         if visibility_allowed_models is None:
             if exact_source_allowed_models is not None:
                 if source_model.slug not in exact_source_allowed_models:
                     continue
-            elif not is_public_model(source_model, allowed_models):
+            elif not is_public_model(source_model, allowed_models, denied_models):
                 continue
         visible_source_models.append(source_model)
     visible_source_models.sort(
@@ -3831,6 +3836,8 @@ async def _build_codex_models_response_body(
     for slug, model in models.items():
         if not _is_codex_backend_catalog_model(model):
             continue
+        if slug in denied_models:
+            continue
         if visibility_allowed_models is None:
             if allowed_models is not None and slug not in allowed_models:
                 continue
@@ -3850,6 +3857,8 @@ async def _build_codex_models_response_body(
             data.append(_to_model_list_item(slug, model, created=_model_list_created_at(model)))
     for slug, model in metadata_models.items():
         if slug in models or slug in source_model_slugs or not _is_codex_backend_catalog_model(model):
+            continue
+        if slug in denied_models:
             continue
         if visibility_allowed_models is None and allowed_models is not None and slug not in allowed_models:
             continue
@@ -3898,7 +3907,9 @@ async def _build_models_response_body(
 ) -> Response:
 
     allowed_models = _allowed_models_for_api_key(api_key)
+    denied_models = _denied_models_for_api_key(api_key)
     exact_source_allowed_models = _exact_source_allowed_models_for_api_key(api_key)
+    exact_source_denied_models = _exact_source_denied_models_for_api_key(api_key)
     created = int(time.time())
 
     registry = get_model_registry()
@@ -3911,17 +3922,19 @@ async def _build_models_response_body(
     items: list[ModelListItem] = []
     seen_slugs: set[str] = set()
     for slug, model in models.items():
-        if not is_public_model(model, allowed_models):
+        if not is_public_model(model, allowed_models, denied_models):
             continue
         items.append(_to_model_list_item(slug, model, created=created))
         seen_slugs.add(slug)
     for model in source_models:
         if model.slug in seen_slugs:
             continue
+        if model.slug in exact_source_denied_models:
+            continue
         if exact_source_allowed_models is not None:
             if model.slug not in exact_source_allowed_models:
                 continue
-        elif not is_public_model(model, allowed_models):
+        elif not is_public_model(model, allowed_models, denied_models):
             continue
         items.append(_to_model_list_item(model.slug, model, created=created))
         seen_slugs.add(model.slug)
@@ -3961,10 +3974,16 @@ def _dump_v1_models_response(response: ModelListResponse) -> dict[str, JsonValue
 
 def _allowed_models_for_api_key(api_key: ApiKeyData | None) -> set[str] | None:
     allowed_models = _canonical_model_set(api_key.allowed_models) if api_key and api_key.allowed_models else None
+    denied_models = _denied_models_for_api_key(api_key)
     if api_key and api_key.enforced_model:
         forced = {_canonical_model_slug(api_key.enforced_model)}
-        return forced if allowed_models is None else (allowed_models & forced)
-    return allowed_models
+        allowed_models = forced if allowed_models is None else (allowed_models & forced)
+    return allowed_models - denied_models if allowed_models is not None else None
+
+
+def _denied_models_for_api_key(api_key: ApiKeyData | None) -> set[str]:
+    denied_models = getattr(api_key, "denied_models", None) if api_key else None
+    return _canonical_model_set(denied_models) if denied_models else set()
 
 
 def _exact_source_allowed_models_for_api_key(api_key: ApiKeyData | None) -> set[str] | None:
@@ -3973,8 +3992,13 @@ def _exact_source_allowed_models_for_api_key(api_key: ApiKeyData | None) -> set[
     allowed_models = set(api_key.allowed_models) if api_key.allowed_models else None
     if api_key.enforced_model:
         forced = {api_key.enforced_model}
-        return forced if allowed_models is None else (allowed_models & forced)
-    return allowed_models
+        allowed_models = forced if allowed_models is None else (allowed_models & forced)
+    denied_models = _exact_source_denied_models_for_api_key(api_key)
+    return allowed_models - denied_models if allowed_models is not None else None
+
+
+def _exact_source_denied_models_for_api_key(api_key: ApiKeyData | None) -> set[str]:
+    return set(getattr(api_key, "denied_models", None) or ()) if api_key else set()
 
 
 def _canonical_model_set(models: Iterable[str]) -> set[str]:
@@ -4504,7 +4528,6 @@ async def _select_chat_model_source(
     switched off.
     """
     assigned_source_ids = _allowed_source_ids_for_api_key(api_key)
-    exact_allowed_models = set(api_key.allowed_models) if api_key and api_key.allowed_models else None
     candidates = [candidate for candidate in (raw_model, model) if candidate]
     if not candidates:
         return None
@@ -4513,7 +4536,7 @@ async def _select_chat_model_source(
     async with get_background_session() as session:
         repository = ModelSourcesRepository(session)
         for candidate in deduped_candidates:
-            if exact_allowed_models is not None and candidate not in exact_allowed_models:
+            if not api_key_allows_exact_model(api_key, candidate):
                 continue
             subscription_model = registry_models.get(candidate)
             if assigned_source_ids is None and subscription_model is not None:
@@ -4661,8 +4684,7 @@ async def _disabled_model_source_denial(
 
 async def _select_embeddings_model_source(model: str, api_key: ApiKeyData | None) -> ModelSource | None:
     assigned_source_ids = _allowed_source_ids_for_api_key(api_key)
-    exact_allowed_models = _exact_source_allowed_models_for_api_key(api_key)
-    if exact_allowed_models is not None and model not in exact_allowed_models:
+    if not api_key_allows_exact_model(api_key, model):
         return None
     async with get_background_session() as session:
         source = await ModelSourcesRepository(session).find_embeddings_source_for_model(
@@ -4675,8 +4697,7 @@ async def _select_embeddings_model_source(model: str, api_key: ApiKeyData | None
 
 async def _select_audio_transcriptions_model_source(model: str, api_key: ApiKeyData | None) -> ModelSource | None:
     assigned_source_ids = _allowed_source_ids_for_api_key(api_key)
-    exact_allowed_models = _exact_source_allowed_models_for_api_key(api_key)
-    if exact_allowed_models is not None and model not in exact_allowed_models:
+    if not api_key_allows_exact_model(api_key, model):
         return None
     if assigned_source_ids is None and model == _TRANSCRIPTION_MODEL:
         return None

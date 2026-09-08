@@ -318,6 +318,28 @@ def test_model_access_rejects_alias_when_canonical_model_not_allowed() -> None:
         validate_model_access(api_key, "gpt-5.5-extra")
 
 
+def test_model_access_allows_unlisted_model_when_only_denylist_is_configured() -> None:
+    api_key = cast(
+        ApiKeyData,
+        SimpleNamespace(allowed_models=None, denied_models=frozenset({"gpt-6-astra"})),
+    )
+
+    validate_model_access(api_key, "gpt-5.6-sol")
+
+
+def test_model_access_denylist_rejects_canonical_alias() -> None:
+    api_key = cast(
+        ApiKeyData,
+        SimpleNamespace(
+            allowed_models=frozenset({"gpt-5.6-sol"}),
+            denied_models=frozenset({"gpt-5.6-sol-extra-high-fast"}),
+        ),
+    )
+
+    with pytest.raises(ProxyModelNotAllowed):
+        validate_model_access(api_key, "gpt-5.6-sol")
+
+
 def test_reasoning_effort_allowlist_rejects_max_before_wire_normalization() -> None:
     request = ResponsesRequest.model_validate(
         {

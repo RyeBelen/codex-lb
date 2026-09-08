@@ -89,6 +89,7 @@ class ApiKeysRepositoryProtocol(Protocol):
         *,
         name: str | _Unset = ...,
         allowed_models: str | None | _Unset = ...,
+        denied_models: str | None | _Unset = ...,
         apply_to_codex_model: bool | _Unset = ...,
         enforced_model: str | None | _Unset = ...,
         enforced_reasoning_effort: str | None | _Unset = ...,
@@ -287,6 +288,7 @@ class LimitRuleInput:
 class ApiKeyCreateData:
     name: str
     allowed_models: list[str] | None
+    denied_models: list[str] | None = None
     apply_to_codex_model: bool = False
     enforced_model: str | None = None
     enforced_reasoning_effort: str | None = None
@@ -307,6 +309,8 @@ class ApiKeyUpdateData:
     name_set: bool = False
     allowed_models: list[str] | None = None
     allowed_models_set: bool = False
+    denied_models: list[str] | None = None
+    denied_models_set: bool = False
     apply_to_codex_model: bool | None = None
     apply_to_codex_model_set: bool = False
     enforced_model: str | None = None
@@ -349,6 +353,7 @@ class ApiKeyData:
     is_active: bool
     created_at: datetime
     last_used_at: datetime | None
+    denied_models: list[str] | None = None
     allowed_reasoning_efforts: list[str] | None = None
     apply_to_codex_model: bool = False
     traffic_class: str = TRAFFIC_CLASS_FOREGROUND
@@ -366,6 +371,14 @@ class ApiKeyData:
 @dataclass(frozen=True, slots=True)
 class ApiKeyCreatedData(ApiKeyData):
     key: str = ""
+
+
+def api_key_allows_exact_model(api_key: ApiKeyData | None, model: str) -> bool:
+    if api_key is None:
+        return True
+    if model in (getattr(api_key, "denied_models", None) or ()):
+        return False
+    return not api_key.allowed_models or model in api_key.allowed_models
 
 
 @dataclass(frozen=True, slots=True)
@@ -486,7 +499,8 @@ class ApiKeysService:
         now = utcnow()
         expires_at = _normalize_expires_at(payload.expires_at)
         plain_key = _generate_plain_key()
-        normalized_allowed_models = _normalize_allowed_models(payload.allowed_models)
+        normalized_allowed_models = _normalize_model_list(payload.allowed_models)
+        normalized_denied_models = _normalize_model_list(payload.denied_models)
         assigned_account_ids = await self._resolve_assigned_account_ids(payload.assigned_account_ids)
         assigned_source_ids = await self._resolve_assigned_source_ids(payload.assigned_source_ids)
         enforced_model = _normalize_model_slug(payload.enforced_model)
@@ -496,7 +510,11 @@ class ApiKeysService:
         traffic_class = _normalize_traffic_class(payload.traffic_class)
         transport_policy_override = _normalize_transport_policy_override(payload.transport_policy_override)
         usage_sections = _normalize_usage_sections(payload.usage_sections)
-        _validate_model_enforcement(enforced_model=enforced_model, allowed_models=normalized_allowed_models)
+        _validate_model_policy(
+            enforced_model=enforced_model,
+            allowed_models=normalized_allowed_models,
+            denied_models=normalized_denied_models,
+        )
         _validate_reasoning_effort_policy(
             enforced_reasoning_effort=enforced_reasoning_effort,
             allowed_reasoning_efforts=allowed_reasoning_efforts,
@@ -506,7 +524,8 @@ class ApiKeysService:
             name=_normalize_name(payload.name),
             key_hash=_hash_key(plain_key),
             key_prefix=plain_key[:15],
-            allowed_models=_serialize_allowed_models(normalized_allowed_models),
+            allowed_models=_serialize_model_list(normalized_allowed_models),
+            denied_models=_serialize_model_list(normalized_denied_models),
             apply_to_codex_model=bool(payload.apply_to_codex_model),
             enforced_model=enforced_model,
             enforced_reasoning_effort=enforced_reasoning_effort,
@@ -611,9 +630,13 @@ class ApiKeysService:
             raise ApiKeyNotFoundError(f"API key not found: {key_id}")
 
         if payload.allowed_models_set:
-            allowed_models = _normalize_allowed_models(payload.allowed_models)
+            allowed_models = _normalize_model_list(payload.allowed_models)
         else:
             allowed_models = None
+        if payload.denied_models_set:
+            denied_models = _normalize_model_list(payload.denied_models)
+        else:
+            denied_models = None
         if payload.assigned_account_ids_set:
             assigned_account_ids = await self._resolve_assigned_account_ids(payload.assigned_account_ids)
             account_assignment_scope_enabled: bool | _Unset = bool(assigned_account_ids)
@@ -666,16 +689,22 @@ class ApiKeysService:
         if payload.usage_sections_set:
             usage_sections = _normalize_usage_sections(payload.usage_sections)
 
-        if payload.allowed_models_set or payload.enforced_model_set:
+        if payload.allowed_models_set or payload.denied_models_set or payload.enforced_model_set:
             effective_allowed_models = (
-                allowed_models if payload.allowed_models_set else _deserialize_allowed_models(existing.allowed_models)
+                allowed_models if payload.allowed_models_set else _deserialize_model_list(existing.allowed_models)
+            )
+            effective_denied_models = (
+                denied_models
+                if payload.denied_models_set
+                else _deserialize_model_list(getattr(existing, "denied_models", None))
             )
             effective_enforced_model = (
                 enforced_model if payload.enforced_model_set else _normalize_model_slug(existing.enforced_model)
             )
-            _validate_model_enforcement(
+            _validate_model_policy(
                 enforced_model=effective_enforced_model,
                 allowed_models=effective_allowed_models,
+                denied_models=effective_denied_models,
             )
 
         if payload.enforced_reasoning_effort_set or payload.allowed_reasoning_efforts_set:
@@ -716,7 +745,8 @@ class ApiKeysService:
             row = await self._repository.update(
                 key_id,
                 name=_normalize_name(payload.name or "") if payload.name_set else _UNSET,
-                allowed_models=_serialize_allowed_models(allowed_models) if payload.allowed_models_set else _UNSET,
+                allowed_models=_serialize_model_list(allowed_models) if payload.allowed_models_set else _UNSET,
+                denied_models=_serialize_model_list(denied_models) if payload.denied_models_set else _UNSET,
                 apply_to_codex_model=apply_to_codex_model,
                 enforced_model=enforced_model if payload.enforced_model_set else _UNSET,
                 enforced_reasoning_effort=(
@@ -774,6 +804,7 @@ class ApiKeysService:
             or limit_rows is not None
             or payload.name_set
             or payload.allowed_models_set
+            or payload.denied_models_set
             or payload.apply_to_codex_model_set
             or payload.enforced_model_set
             or payload.enforced_reasoning_effort_set
@@ -1445,10 +1476,10 @@ def _hash_key(plain_key: str) -> str:
     return sha256(plain_key.encode("utf-8")).hexdigest()
 
 
-def _serialize_allowed_models(allowed_models: list[str] | None) -> str | None:
-    if allowed_models is None:
+def _serialize_model_list(models: list[str] | None) -> str | None:
+    if models is None:
         return None
-    return json.dumps(allowed_models)
+    return json.dumps(models)
 
 
 def _serialize_allowed_reasoning_efforts(allowed_reasoning_efforts: list[str] | None) -> str | None:
@@ -1457,7 +1488,7 @@ def _serialize_allowed_reasoning_efforts(allowed_reasoning_efforts: list[str] | 
     return json.dumps(allowed_reasoning_efforts)
 
 
-def _deserialize_allowed_models(payload: str | None) -> list[str] | None:
+def _deserialize_model_list(payload: str | None) -> list[str] | None:
     if payload is None:
         return None
     parsed = json.loads(payload)
@@ -1483,10 +1514,10 @@ def _is_reasoning_policy_constraint_error(exc: IntegrityError) -> bool:
     return _REASONING_POLICY_EXCLUSIVE_CONSTRAINT in str(exc).lower()
 
 
-def _normalize_allowed_models(allowed_models: list[str] | None) -> list[str] | None:
-    if allowed_models is None:
+def _normalize_model_list(models: list[str] | None) -> list[str] | None:
+    if models is None:
         return None
-    return [model.strip() for model in allowed_models if model and model.strip()]
+    return [model.strip() for model in models if model and model.strip()]
 
 
 def _normalize_assigned_account_ids(account_ids: list[str] | None) -> list[str]:
@@ -1642,6 +1673,20 @@ def _normalize_transport_policy_override_lenient(value: str | None) -> str | Non
 
 
 def _validate_model_enforcement(*, enforced_model: str | None, allowed_models: list[str] | None) -> None:
+    _validate_model_policy(enforced_model=enforced_model, allowed_models=allowed_models, denied_models=None)
+
+
+def _validate_model_policy(
+    *,
+    enforced_model: str | None,
+    allowed_models: list[str] | None,
+    denied_models: list[str] | None,
+) -> None:
+    overlap = set(allowed_models or ()) & set(denied_models or ())
+    if overlap:
+        raise ApiKeyValidationError("allowed_models and denied_models cannot contain the same model")
+    if enforced_model is not None and enforced_model in (denied_models or ()):
+        raise ApiKeyValidationError("enforced_model cannot be present in denied_models")
     if enforced_model is None or not allowed_models:
         return
     if enforced_model not in allowed_models:
@@ -1849,6 +1894,7 @@ def _to_created_data(data: ApiKeyData, key: str) -> ApiKeyCreatedData:
         name=data.name,
         key_prefix=data.key_prefix,
         allowed_models=data.allowed_models,
+        denied_models=data.denied_models,
         apply_to_codex_model=data.apply_to_codex_model,
         enforced_model=data.enforced_model,
         enforced_reasoning_effort=data.enforced_reasoning_effort,
@@ -1884,7 +1930,8 @@ def _to_api_key_data(
         id=row.id,
         name=row.name,
         key_prefix=row.key_prefix,
-        allowed_models=_deserialize_allowed_models(row.allowed_models),
+        allowed_models=_deserialize_model_list(row.allowed_models),
+        denied_models=_deserialize_model_list(getattr(row, "denied_models", None)),
         apply_to_codex_model=getattr(row, "apply_to_codex_model", False),
         enforced_model=_normalize_model_slug(row.enforced_model),
         enforced_reasoning_effort=_normalize_reasoning_effort_lenient(row.enforced_reasoning_effort),

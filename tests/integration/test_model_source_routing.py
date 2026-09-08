@@ -921,6 +921,20 @@ async def test_responses_source_raw_alias_lookup_requires_exact_allowlist(async_
         created_at=utcnow(),
         last_used_at=None,
     )
+    denied_key = ApiKeyData(
+        id="key_responses_denied_alias",
+        name="responses denied alias",
+        key_prefix="sk-test-resp-denied",
+        allowed_models=None,
+        denied_models=[model],
+        enforced_model=None,
+        enforced_reasoning_effort=None,
+        enforced_service_tier=None,
+        expires_at=None,
+        is_active=True,
+        created_at=utcnow(),
+        last_used_at=None,
+    )
 
     canonical_selection = await proxy_api._select_responses_model_source(
         "gpt-5",
@@ -932,8 +946,14 @@ async def test_responses_source_raw_alias_lookup_requires_exact_allowlist(async_
         exact_key,
         raw_model=model,
     )
+    denied_selection = await proxy_api._select_responses_model_source(
+        "gpt-5",
+        denied_key,
+        raw_model=model,
+    )
 
     assert canonical_selection is None
+    assert denied_selection is None
     assert exact_selection is not None
     source, selected_model = exact_selection
     assert source.name == "responses-alias-like-allowlist-source"

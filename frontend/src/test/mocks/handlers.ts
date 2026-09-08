@@ -64,6 +64,7 @@ const OauthStartPayloadSchema = z.looseObject({
 
 const ApiKeyCreatePayloadSchema = z.looseObject({
   name: z.string().optional(),
+  deniedModels: z.array(z.string()).optional(),
   trafficClass: z.enum(TRAFFIC_CLASSES).optional(),
   transportPolicyOverride: z.enum(["smart", "always_http", "always_websocket"]).nullable().optional(),
   assignedAccountIds: z.array(z.string()).optional(),
@@ -77,6 +78,7 @@ const FirewallIpCreatePayloadSchema = z.looseObject({
 const ApiKeyUpdatePayloadSchema = z.looseObject({
   name: z.string().optional(),
   allowedModels: z.array(z.string()).nullable().optional(),
+  deniedModels: z.array(z.string()).nullable().optional(),
   trafficClass: z.enum(TRAFFIC_CLASSES).optional(),
   transportPolicyOverride: z.enum(["smart", "always_http", "always_websocket"]).nullable().optional(),
   isActive: z.boolean().optional(),
@@ -2213,6 +2215,7 @@ export const handlers = [
           (payload?.assignedSourceIds?.length ?? 0) > 0,
         assignedAccountIds: payload?.assignedAccountIds ?? [],
         assignedSourceIds: payload?.assignedSourceIds ?? [],
+        deniedModels: payload?.deniedModels ?? null,
         trafficClass: payload?.trafficClass ?? "foreground",
       }),
       key: `sk-test-generated-${sequence}`,
@@ -2240,6 +2243,9 @@ export const handlers = [
       ...(payload.name !== undefined ? { name: payload.name } : {}),
       ...(payload.allowedModels !== undefined
         ? { allowedModels: payload.allowedModels }
+        : {}),
+      ...(payload.deniedModels !== undefined
+        ? { deniedModels: payload.deniedModels }
         : {}),
       ...(payload.isActive !== undefined ? { isActive: payload.isActive } : {}),
       ...(payload.trafficClass !== undefined

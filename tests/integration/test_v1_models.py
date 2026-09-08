@@ -1059,6 +1059,46 @@ async def test_backend_codex_models_filters_disallowed_models(async_client):
 
 
 @pytest.mark.asyncio
+async def test_model_catalogs_hide_denied_models_without_an_allowlist(async_client):
+    registry = get_model_registry()
+    models = [
+        _make_upstream_model("gpt-5.6-sol", base_instructions="visible"),
+        _make_upstream_model("gpt-6-astra", base_instructions="denied"),
+    ]
+    await registry.update({"plus": models, "pro": models})
+
+    enable = await async_client.put(
+        "/api/settings",
+        json={
+            "stickyThreadsEnabled": False,
+            "preferEarlierResetAccounts": False,
+            "totpRequiredOnLogin": False,
+            "apiKeyAuthEnabled": True,
+        },
+    )
+    assert enable.status_code == 200
+
+    created = await async_client.post(
+        "/api/api-keys/",
+        json={"name": "deny-astra", "deniedModels": ["gpt-6-astra"]},
+    )
+    assert created.status_code == 200
+    assert created.json()["deniedModels"] == ["gpt-6-astra"]
+    headers = {"Authorization": f"Bearer {created.json()['key']}"}
+
+    v1_response = await async_client.get("/v1/models", headers=headers)
+    codex_response = await async_client.get("/backend-api/codex/models", headers=headers)
+
+    assert v1_response.status_code == 200
+    assert codex_response.status_code == 200
+    assert {model["id"] for model in v1_response.json()["data"]} == {"gpt-5.6-sol"}
+    codex_slugs = {model["slug"] for model in codex_response.json()["models"]}
+    assert "gpt-5.6-sol" in codex_slugs
+    assert "gpt-6-astra" not in codex_slugs
+    assert {model["id"] for model in codex_response.json()["data"]} == {"gpt-5.6-sol"}
+
+
+@pytest.mark.asyncio
 async def test_backend_codex_models_rewrites_visibility_when_opted_in(async_client):
     registry = get_model_registry()
     models = [

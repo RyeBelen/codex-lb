@@ -120,13 +120,14 @@ def resolve_wire_reasoning_effort(effort: str) -> str:
 
 
 def validate_model_access(api_key: ApiKeyData | None, model: str | None) -> None:
-    if api_key is None:
+    if api_key is None or model is None:
         return
-    if not api_key.allowed_models:
-        return
-    allowed_models = {resolve_model_alias(allowed_model) for allowed_model in api_key.allowed_models}
     effective_model = resolve_model_alias(model)
-    if model is None or effective_model in allowed_models:
+    denied_models = {
+        resolve_model_alias(denied_model) for denied_model in (getattr(api_key, "denied_models", None) or ())
+    }
+    allowed_models = {resolve_model_alias(allowed_model) for allowed_model in (api_key.allowed_models or ())}
+    if effective_model not in denied_models and (not allowed_models or effective_model in allowed_models):
         return
     raise ProxyModelNotAllowed(f"This API key does not have access to model '{model}'")
 

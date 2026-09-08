@@ -18,12 +18,14 @@ export type ModelMultiSelectProps = {
   value: string[];
   onChange: (value: string[]) => void;
   placeholder?: string;
+  disabledValues?: string[];
 };
 
 export function ModelMultiSelect({
   value,
   onChange,
   placeholder,
+  disabledValues = [],
 }: ModelMultiSelectProps) {
   const { t } = useTranslation();
   const placeholderLabel = placeholder ?? t("apiKeys.modelSelect.all");
@@ -39,6 +41,7 @@ export function ModelMultiSelect({
   }, [models, search]);
 
   const selectedSet = useMemo(() => new Set(value), [value]);
+  const disabledSet = useMemo(() => new Set(disabledValues), [disabledValues]);
 
   const toggle = useCallback(
     (modelId: string) => {
@@ -96,13 +99,14 @@ export function ModelMultiSelect({
             onCheckedChange={selectAll}
             onSelect={(e) => e.preventDefault()}
           >
-            {t("apiKeys.modelSelect.all")}
+            {placeholderLabel}
           </DropdownMenuCheckboxItem>
           <DropdownMenuSeparator />
           {filtered.map((model) => (
             <DropdownMenuCheckboxItem
               key={model.id}
               checked={selectedSet.has(model.id)}
+              disabled={disabledSet.has(model.id)}
               onCheckedChange={() => toggle(model.id)}
               onSelect={(e) => e.preventDefault()}
             >

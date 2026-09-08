@@ -18,6 +18,7 @@ describe("ApiKeySchema", () => {
       name: "Service Key",
       keyPrefix: "sk-live",
       allowedModels: ["gpt-4.1"],
+      deniedModels: ["gpt-6-astra"],
       applyToCodexModel: true,
       expiresAt: null,
       isActive: true,
@@ -38,6 +39,7 @@ describe("ApiKeySchema", () => {
 
     expect(parsed.id).toBe("key-1");
     expect(parsed.allowedModels).toEqual(["gpt-4.1"]);
+    expect(parsed.deniedModels).toEqual(["gpt-6-astra"]);
     expect(parsed.applyToCodexModel).toBe(true);
     expect(parsed.limits).toHaveLength(1);
     expect(parsed.limits[0].limitType).toBe("total_tokens");
@@ -231,6 +233,7 @@ describe("ApiKeyUpdateRequestSchema", () => {
     const parsed = ApiKeyUpdateRequestSchema.parse({
       name: "Updated Key",
       allowedModels: ["gpt-4.1-mini"],
+      deniedModels: ["gpt-6-astra"],
       applyToCodexModel: true,
       weeklyTokenLimit: 50000,
       expiresAt: ISO,
@@ -240,6 +243,7 @@ describe("ApiKeyUpdateRequestSchema", () => {
 
     expect(parsed.name).toBe("Updated Key");
     expect(parsed.applyToCodexModel).toBe(true);
+    expect(parsed.deniedModels).toEqual(["gpt-6-astra"]);
     expect(parsed.isActive).toBe(false);
     expect(parsed.usageSections).toBe("upstream_limits");
   });
