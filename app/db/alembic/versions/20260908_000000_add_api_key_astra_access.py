@@ -6,7 +6,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision = "20260908_000000_add_api_key_astra_access"
-down_revision = "20260824_000000_add_api_key_verbose_capture"
+down_revision = "20260901_000000_merge_production_and_verbose_capture_heads"
 branch_labels = None
 depends_on = None
 

@@ -13,7 +13,7 @@ pytestmark = pytest.mark.integration
 def test_astra_migration_preserves_existing_keys_and_roundtrips(tmp_path):
     path = tmp_path / "astra.db"
     url = f"sqlite+aiosqlite:///{path}"
-    parent = "20260824_000000_add_api_key_verbose_capture"
+    parent = "20260901_000000_merge_production_and_verbose_capture_heads"
     run_upgrade(url, parent, bootstrap_legacy=True)
     with sqlite3.connect(path) as connection:
         connection.execute(
