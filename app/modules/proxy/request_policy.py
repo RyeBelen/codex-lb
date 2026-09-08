@@ -113,7 +113,15 @@ def resolve_wire_reasoning_effort(effort: str) -> str:
     return _REASONING_EFFORT_WIRE_ALIASES.get(effort.strip().lower(), effort)
 
 
+def has_astra_model_access(api_key: ApiKeyData | None, model: str | None) -> bool:
+    effective_model = resolve_model_alias(model)
+    is_astra = effective_model is not None and effective_model.strip().lower() == "gpt-6-astra"
+    return not is_astra or (api_key is not None and api_key.allow_gpt6_astra)
+
+
 def validate_model_access(api_key: ApiKeyData | None, model: str | None) -> None:
+    if not has_astra_model_access(api_key, model):
+        raise ProxyModelNotAllowed("This API key does not have access to model 'gpt-6-astra'")
     if api_key is None:
         return
     if not api_key.allowed_models:

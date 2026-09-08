@@ -47,6 +47,7 @@ export const ApiKeySchema = z.object({
   keyPrefix: z.string(),
   allowedModels: z.array(z.string()).nullable(),
   applyToCodexModel: z.boolean().default(false),
+  allowGpt6Astra: z.boolean().default(false),
   enforcedModel: z.string().nullable().default(null),
   trafficClass: z
     .enum(TRAFFIC_CLASSES)
@@ -86,6 +87,7 @@ export const ApiKeyCreateRequestSchema = z.object({
   name: z.string().min(1).max(128),
   allowedModels: z.array(z.string()).optional(),
   applyToCodexModel: z.boolean().optional(),
+  allowGpt6Astra: z.boolean().optional(),
   trafficClass: z.enum(TRAFFIC_CLASSES).optional(),
   transportPolicyOverride: z.enum(TRANSPORT_POLICY_OVERRIDES).nullable().optional(),
   enforcedModel: z.string().min(1).nullable().optional(),
@@ -110,6 +112,7 @@ export const ApiKeyUpdateRequestSchema = z.object({
   name: z.string().min(1).max(128).optional(),
   allowedModels: z.array(z.string()).nullable().optional(),
   applyToCodexModel: z.boolean().optional(),
+  allowGpt6Astra: z.boolean().optional(),
   trafficClass: z.enum(TRAFFIC_CLASSES).optional(),
   transportPolicyOverride: z.enum(TRANSPORT_POLICY_OVERRIDES).nullable().optional(),
   enforcedModel: z.string().min(1).nullable().optional(),

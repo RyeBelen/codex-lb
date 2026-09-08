@@ -182,6 +182,7 @@ from app.modules.proxy.request_policy import (
     apply_api_key_enforcement_to_chat_payload,
     enforce_strict_function_tools_format,
     enforce_strict_text_format,
+    has_astra_model_access,
     model_alias_requests_fast_mode,
     normalize_responses_request_payload,
     openai_client_payload_error,
@@ -2727,6 +2728,8 @@ async def _build_codex_models_response(api_key: ApiKeyData | None) -> Response:
     ]
     visible_source_models = []
     for source_model in source_models:
+        if not has_astra_model_access(api_key, source_model.slug):
+            continue
         if visibility_allowed_models is None:
             if exact_source_allowed_models is not None:
                 if source_model.slug not in exact_source_allowed_models:
@@ -2763,6 +2766,8 @@ async def _build_codex_models_response(api_key: ApiKeyData | None) -> Response:
     data: list[ModelListItem] = []
     seen_slugs: set[str] = set()
     for slug, model in models.items():
+        if not has_astra_model_access(api_key, slug):
+            continue
         if not _is_codex_backend_catalog_model(model):
             continue
         if visibility_allowed_models is None:
@@ -2783,6 +2788,8 @@ async def _build_codex_models_response(api_key: ApiKeyData | None) -> Response:
         if model.supported_in_api and entry.visibility == "list":
             data.append(_to_model_list_item(slug, model, created=_model_list_created_at(model)))
     for slug, model in metadata_models.items():
+        if not has_astra_model_access(api_key, slug):
+            continue
         if slug in models or slug in source_model_slugs or not _is_codex_backend_catalog_model(model):
             continue
         if visibility_allowed_models is None and allowed_models is not None and slug not in allowed_models:
@@ -2837,11 +2844,15 @@ async def _build_models_response(api_key: ApiKeyData | None) -> Response:
     items: list[ModelListItem] = []
     seen_slugs: set[str] = set()
     for slug, model in models.items():
+        if not has_astra_model_access(api_key, slug):
+            continue
         if not is_public_model(model, allowed_models):
             continue
         items.append(_to_model_list_item(slug, model, created=created))
         seen_slugs.add(slug)
     for model in source_models:
+        if not has_astra_model_access(api_key, model.slug):
+            continue
         if model.slug in seen_slugs:
             continue
         if exact_source_allowed_models is not None:

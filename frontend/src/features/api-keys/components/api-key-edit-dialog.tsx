@@ -23,6 +23,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { ApiKeyAstraToggle } from "@/features/api-keys/components/api-key-astra-toggle";
 import { ExpiryPicker } from "@/features/api-keys/components/expiry-picker";
 import { LimitRulesEditor } from "@/features/api-keys/components/limit-rules-editor";
 import { AccountMultiSelect } from "@/features/api-keys/components/account-multi-select";
@@ -99,6 +100,7 @@ type ApiKeyEditDraft = {
   limitRules: LimitRuleCreate[];
   expiresAt: Date | null;
   applyToCodexModel: boolean;
+  allowGpt6Astra: boolean;
   enforcedModel: string;
   enforcedReasoningEffort: string;
   enforcedServiceTier: string;
@@ -116,6 +118,7 @@ function createApiKeyEditDraft(apiKey: ApiKey): ApiKeyEditDraft {
     limitRules: limitsToCreateRules(apiKey),
     expiresAt: parseDate(apiKey.expiresAt),
     applyToCodexModel: apiKey.applyToCodexModel,
+    allowGpt6Astra: apiKey.allowGpt6Astra,
     enforcedModel: apiKey.enforcedModel || "",
     enforcedReasoningEffort: apiKey.enforcedReasoningEffort || "none",
     enforcedServiceTier: apiKey.enforcedServiceTier || "none",
@@ -160,6 +163,7 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
       name: values.name,
       allowedModels: draft.selectedModels.length > 0 ? draft.selectedModels : null,
       applyToCodexModel: draft.applyToCodexModel,
+      allowGpt6Astra: draft.allowGpt6Astra,
       enforcedModel: draft.enforcedModel.trim() ? draft.enforcedModel.trim() : null,
       enforcedReasoningEffort:
         draft.enforcedReasoningEffort === "none" ? null : draft.enforcedReasoningEffort as ReasoningEffortType,
@@ -224,6 +228,12 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
                 Apply to codex /model
               </label>
             </div>
+
+            <ApiKeyAstraToggle
+              enabled={draft.allowGpt6Astra}
+              disabled={busy}
+              onChange={(allowGpt6Astra) => updateDraft({ allowGpt6Astra })}
+            />
 
             <div className="space-y-1">
               <div className="text-sm font-medium">Assigned accounts</div>
