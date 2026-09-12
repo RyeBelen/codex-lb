@@ -396,6 +396,7 @@ from app.modules.proxy._service.websocket.helpers import (
     _websocket_top_level_error_payload,  # noqa: F401
     _wrapped_websocket_error_event,  # noqa: F401
 )
+from app.modules.proxy.account_access import require_account_access
 from app.modules.proxy.affinity import (
     _owner_lookup_session_id_from_headers,
     _sticky_key_from_session_header,  # noqa: F401
@@ -569,6 +570,7 @@ class _StreamingMixin(_StreamingRetryMixin):
                 concurrency_caps=concurrency_caps or _facade().effective_account_concurrency_caps(),
             )
             response_create_lease = await proxy._get_work_admission().acquire_response_create()
+            await require_account_access(account.id, api_key)
             attempt_started_at = time.monotonic()
             latency_queue_ms = max(0, int((attempt_started_at - request_started_at) * 1000))
             stream_optional_kwargs: dict[str, object] = {

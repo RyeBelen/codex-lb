@@ -449,6 +449,7 @@ from app.modules.proxy._service.websocket.helpers import (
     _wrapped_websocket_error_event,
 )
 from app.modules.proxy._service.websocket.protocol import _WebSocketServiceProtocol
+from app.modules.proxy.account_access import require_account_access
 from app.modules.proxy.affinity import (
     _AffinityPolicy,
     _is_synthesized_turn_state,
@@ -2535,30 +2536,35 @@ class _WebSocketMixin:
                     upstream_requires_security_work_authorized = request_state.require_security_work_authorized
                     upstream_turn_state = _facade()._upstream_turn_state_from_socket(upstream) or upstream_turn_state
                     upstream_control = _WebSocketUpstreamControl()
-                    upstream_reader = asyncio.create_task(
-                        proxy._relay_upstream_websocket_messages(
-                            websocket,
-                            upstream,
-                            account=account,
-                            account_id_value=account.id,
-                            pending_requests=pending_requests,
-                            pending_lock=pending_lock,
-                            client_send_lock=client_send_lock,
-                            api_key=api_key,
-                            upstream_control=upstream_control,
-                            response_create_gate=response_create_gate,
-                            continuity_state=continuity_state,
-                            proxy_request_budget_seconds=_facade()._stream_request_budget_seconds(
-                                runtime_settings,
-                                request_transport="websocket",
-                            ),
-                            stream_idle_timeout_seconds=runtime_settings.stream_idle_timeout_seconds,
-                            downstream_activity=downstream_activity,
-                            codex_session_affinity=codex_session_affinity,
-                        )
-                    )
+
 
                 try:
+                    if upstream_reader is None and account is not None:
+                        await require_account_access(
+                            account.id, request_state.api_key if request_state is not None else api_key
+                        )
+                        upstream_reader = asyncio.create_task(
+                            proxy._relay_upstream_websocket_messages(
+                                websocket,
+                                upstream,
+                                account=account,
+                                account_id_value=account.id,
+                                pending_requests=pending_requests,
+                                pending_lock=pending_lock,
+                                client_send_lock=client_send_lock,
+                                api_key=api_key,
+                                upstream_control=upstream_control,
+                                response_create_gate=response_create_gate,
+                                continuity_state=continuity_state,
+                                proxy_request_budget_seconds=_facade()._stream_request_budget_seconds(
+                                    runtime_settings,
+                                    request_transport="websocket",
+                                ),
+                                stream_idle_timeout_seconds=runtime_settings.stream_idle_timeout_seconds,
+                                downstream_activity=downstream_activity,
+                                codex_session_affinity=codex_session_affinity,
+                            )
+                        )
                     if (
                         text_data is not None
                         and request_state is not None
@@ -2679,6 +2685,10 @@ class _WebSocketMixin:
                         await release_current_account_lease()
                         account = None
                         continue
+                    if account is not None:
+                        await require_account_access(
+                            account.id, request_state.api_key if request_state is not None else api_key
+                        )
                     if text_data is not None:
                         archive_request_id = None if request_state is None else request_state.archive_request_id
                         if request_state is not None and payload is not None and _is_websocket_response_create(payload):

@@ -39,6 +39,7 @@ from app.core.usage.models import UsagePayload
 from app.core.utils.time import naive_utc_to_epoch, to_utc_naive, utcnow
 from app.db.models import Account, AccountStatus, DashboardSettings
 from app.db.session import get_background_session
+from app.modules.accounts.access_repository import AccountAccessPolicy, AccountAccessRepository
 from app.modules.accounts.auth_manager import AuthManager
 from app.modules.accounts.deletion import request_account_deletion_run
 from app.modules.accounts.mappers import build_account_summaries, build_account_usage_trends
@@ -132,6 +133,15 @@ class AccountsService:
         self._usage_updater = UsageUpdater(usage_repo, repo, additional_usage_repo) if usage_repo else None
         self._encryptor = TokenEncryptor()
         self._auth_manager = auth_manager
+
+    async def get_access_policy(self, account_id: str) -> AccountAccessPolicy | None:
+        return await AccountAccessRepository(self._repo.session).get(account_id)
+
+    async def set_access_policy(self, account_id: str, policy: AccountAccessPolicy) -> bool:
+        updated = await AccountAccessRepository(self._repo.session).replace(account_id, policy)
+        if updated:
+            get_account_selection_cache().invalidate()
+        return updated
 
     async def list_accounts(self, *, account_ids: list[str] | None = None) -> list[AccountSummary]:
         accounts = (

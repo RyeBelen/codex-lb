@@ -3,6 +3,10 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MemoryRouter } from "react-router-dom";
 
+vi.mock("@/features/accounts/components/account-access", () => ({
+  AccountAccess: () => <section aria-label="Account API key access" />,
+}));
+
 import { AccountsPage } from "@/features/accounts/components/accounts-page";
 import { useAccountQuotaDisplayStore } from "@/hooks/use-account-quota-display";
 import type { AccountSummary } from "@/features/accounts/schemas";

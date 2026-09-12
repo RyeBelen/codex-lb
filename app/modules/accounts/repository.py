@@ -20,6 +20,7 @@ from app.core.utils.time import utcnow
 from app.db.account_identity_lock import advisory_lock_key, lock_postgresql_account_identities
 from app.db.models import (
     Account,
+    AccountApiKeyGrant,
     AccountLimitWarmup,
     AccountStatus,
     AccountUsageRollup,
@@ -1097,6 +1098,9 @@ class AccountsRepository:
                 await self._close_http_bridge_sessions_for_account(account_id)
                 await self._session.execute(
                     delete(ApiKeyAccountAssignment).where(ApiKeyAccountAssignment.account_id == account_id)
+                )
+                await self._session.execute(
+                    delete(AccountApiKeyGrant).where(AccountApiKeyGrant.account_id == account_id)
                 )
             await self._session.commit()
             return updated_id is not None

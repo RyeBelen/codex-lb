@@ -1,6 +1,7 @@
 import { del, get, patch, post, put } from "@/lib/api-client";
 
 import {
+  AccountAccessSchema,
   AccountActionResponseSchema,
   AccountAliasRequestSchema,
   AccountAliasResponseSchema,
@@ -36,6 +37,16 @@ import type {
 
 const ACCOUNTS_BASE_PATH = "/api/accounts";
 const OAUTH_BASE_PATH = "/api/oauth";
+
+export function getAccountAccess(accountId: string) {
+  return get(`${ACCOUNTS_BASE_PATH}/${encodeURIComponent(accountId)}/api-key-access`, AccountAccessSchema);
+}
+
+export function setAccountAccess(accountId: string, restricted: boolean, apiKeyIds: string[]) {
+  return put(`${ACCOUNTS_BASE_PATH}/${encodeURIComponent(accountId)}/api-key-access`, AccountAccessSchema, {
+    body: { restricted, apiKeyIds },
+  });
+}
 
 export function listAccounts() {
   return get(ACCOUNTS_BASE_PATH, AccountsResponseSchema);

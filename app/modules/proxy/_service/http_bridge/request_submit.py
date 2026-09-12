@@ -206,6 +206,7 @@ from app.modules.proxy._service.warmup import (
 from app.modules.proxy._service.warmup import (
     _WarmupUsageSnapshot as _WarmupUsageSnapshot,
 )
+from app.modules.proxy.account_access import require_account_access
 from app.modules.proxy.affinity import (
     _AffinityPolicy,
     _extract_model_class,
@@ -434,6 +435,7 @@ async def _send_http_bridge_request_text_with_archive_id(
     # the exact frame that will cross the websocket so the metadata cannot
     # push an otherwise-valid response.create over the upstream limit.
     _enforce_http_bridge_response_create_text_size(request_state, text_data)
+    await require_account_access(session.account.id, request_state.api_key)
     if on_send_started is not None:
         on_send_started()
     token = set_request_id(request_state.archive_request_id)
@@ -2600,6 +2602,7 @@ class _HTTPBridgeRequestSubmitMixin:
             prewarm_started_at = _service_time().monotonic()
             warmup_state = _WebSocketRequestState(
                 request_id=f"http_prewarm_{uuid4().hex}",
+                api_key=request_state.api_key,
                 model=request_state.model,
                 service_tier=request_state.service_tier,
                 reasoning_effort=request_state.reasoning_effort,

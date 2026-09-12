@@ -845,6 +845,10 @@ export const handlers = [
     return HttpResponse.json(details);
   }),
 
+  http.get("/api/accounts/:accountId/api-key-access", ({ params }) => {
+    return HttpResponse.json({ accountId: params.accountId, restricted: false, apiKeyIds: [] });
+  }),
+
   http.get("/api/accounts", () => {
     return HttpResponse.json({ accounts: state.accounts });
   }),

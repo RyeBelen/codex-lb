@@ -33,6 +33,7 @@ from app.core.utils.request_id import ensure_request_id, get_request_id
 from app.db.models import Account
 from app.modules.api_keys.service import ApiKeyData
 from app.modules.proxy._service.support import _request_log_client_fields, _RequestLogFailureMetadata
+from app.modules.proxy.account_access import require_account_access, resolve_account_scope
 from app.modules.proxy.affinity import _AffinityPolicy, _sticky_key_for_codex_control_request
 from app.modules.proxy.helpers import _header_account_id, _normalize_error_code, _parse_openai_error
 from app.modules.proxy.load_balancer import AccountSelection, effective_account_concurrency_caps
@@ -210,11 +211,7 @@ class _CodexControlMixin:
         privacy_policy: CodexControlRequestPrivacyPolicy = CodexControlRequestPrivacyPolicy.STANDARD,
     ) -> Account | None:
         proxy = cast(_CodexControlServiceProtocol, self)
-        scoped_account_ids = (
-            set(api_key.assigned_account_ids)
-            if api_key is not None and api_key.account_assignment_scope_enabled
-            else None
-        )
+        scoped_account_ids = await resolve_account_scope(api_key)
         settings = await _service_get_settings_cache().get()
         if _routing_strategy(settings) == "single_account":
             selected_account_id = (settings.single_account_id or "").strip()
@@ -367,6 +364,7 @@ class _CodexControlMixin:
                     route_endpoint_id = route.endpoint_id
                 route_trace = UpstreamProxyRouteTrace()
                 try:
+                    await require_account_access(target.id, api_key)
                     return await _service_core_codex_control_request()(
                         path,
                         method=method,

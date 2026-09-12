@@ -42,6 +42,7 @@ from app.modules.api_keys.service import (
     ApiKeyUsageReservationData,
 )
 from app.modules.proxy._service.support import _request_log_client_fields, _RequestLogFailureMetadata
+from app.modules.proxy.account_access import require_account_access, resolve_account_scope
 from app.modules.proxy.affinity import (
     _affinity_with_payload_continuity,
     _AffinityPolicy,
@@ -910,12 +911,11 @@ class _CompactMixin:
                 surface="compact",
             )
             if previous_response_preferred_account_id is None:
+                account_scope = await resolve_account_scope(api_key)
                 selection_inputs = await proxy._load_balancer._load_selection_inputs(
                     model=payload.model,
                     additional_limit_name=None,
-                    account_ids=api_key.assigned_account_ids
-                    if api_key is not None and api_key.account_assignment_scope_enabled
-                    else None,
+                    account_ids=sorted(account_scope) if account_scope is not None else None,
                 )
                 if len(selection_inputs.accounts) != 1:
                     message = "Previous response owner account is unavailable; retry later."
@@ -1175,6 +1175,7 @@ class _CompactMixin:
                     route_trace = UpstreamProxyRouteTrace()
                     upstream_started_at = time.monotonic()
                     try:
+                        await require_account_access(target.id, api_key)
                         logger.info(
                             "Compact upstream call start request_id=%s account_id=%s timeout_seconds=%.2f "
                             "remaining_budget=%.2f",

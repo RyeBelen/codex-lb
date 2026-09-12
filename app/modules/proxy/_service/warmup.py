@@ -28,6 +28,7 @@ from app.core.upstream_proxy import UpstreamProxyRouteError
 from app.db.models import Account, AccountStatus
 from app.modules.api_keys.service import ApiKeyData, ApiKeyUsageReservationData
 from app.modules.proxy._service.support import _call_with_supported_optional_kwargs, _request_log_client_fields
+from app.modules.proxy.account_access import require_account_access, resolve_account_scope
 from app.modules.proxy.helpers import _header_account_id, _normalize_error_code, _parse_openai_error
 from app.modules.proxy.request_policy import (
     apply_prohibit_fast_mode,
@@ -199,6 +200,9 @@ class _WarmupMixin:
                 for account_id, entry in latest_usage.items()
             }
 
+        scope = await resolve_account_scope(api_key)
+        if scope is not None:
+            target_accounts = [account for account in target_accounts if account.id in scope]
         total_accounts = len(target_accounts)
         submitted: list[WarmupSubmittedAccountData] = []
         skipped: list[WarmupSkippedAccountData] = []
@@ -352,6 +356,7 @@ class _WarmupMixin:
                 prohibit_fast_mode=prohibit_fast_mode,
                 request_id=request_id,
             )
+            await require_account_access(account.id, api_key)
             response = await _call_with_supported_optional_kwargs(
                 _service_core_compact_responses(),
                 payload,
