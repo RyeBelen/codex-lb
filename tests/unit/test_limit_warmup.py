@@ -17,6 +17,15 @@ from app.modules.limit_warmup.service import LimitWarmupSendResult, LimitWarmupS
 pytestmark = pytest.mark.unit
 
 
+@pytest.fixture(autouse=True)
+def _allow_model_scope(monkeypatch):
+    # Database-backed model policies are covered by the routing integration tests.
+    async def allow(account_id: str, model: str) -> None:
+        return None
+
+    monkeypatch.setattr(limit_warmup_service, "require_model_account_access", allow)
+
+
 def _account(
     account_id: str = "acc_1", *, enabled: bool = True, status: AccountStatus = AccountStatus.ACTIVE
 ) -> Account:
@@ -45,10 +54,7 @@ def _usage(
 ) -> UsageHistory:
     window_minutes = {"primary": 300, "secondary": 10_080, "monthly": 43_200}[window]
     if recorded_at is None:
-        recorded_at = datetime.fromtimestamp(
-            reset_at - window_minutes * 60,
-            tz=timezone.utc,
-        ).replace(tzinfo=None)
+        recorded_at = datetime(1970, 1, 1) + timedelta(seconds=reset_at - window_minutes * 60)
     return UsageHistory(
         account_id=account_id,
         used_percent=used_percent,

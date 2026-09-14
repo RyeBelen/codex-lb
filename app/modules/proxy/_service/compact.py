@@ -911,7 +911,7 @@ class _CompactMixin:
                 surface="compact",
             )
             if previous_response_preferred_account_id is None:
-                account_scope = await resolve_account_scope(api_key)
+                account_scope = await resolve_account_scope(api_key, model=payload.model)
                 selection_inputs = await proxy._load_balancer._load_selection_inputs(
                     model=payload.model,
                     additional_limit_name=None,
@@ -1175,7 +1175,7 @@ class _CompactMixin:
                     route_trace = UpstreamProxyRouteTrace()
                     upstream_started_at = time.monotonic()
                     try:
-                        await require_account_access(target.id, api_key)
+                        await require_account_access(target.id, api_key, model=payload.model)
                         logger.info(
                             "Compact upstream call start request_id=%s account_id=%s timeout_seconds=%.2f "
                             "remaining_budget=%.2f",

@@ -29,6 +29,8 @@ from app.modules.dashboard_auth.service import (
 from app.modules.firewall.repository import FirewallRepository
 from app.modules.firewall.service import FirewallRepositoryPort, FirewallService
 from app.modules.limit_warmup.repository import LimitWarmupRepository
+from app.modules.model_routing.repository import ModelRoutingRepository
+from app.modules.model_routing.service import ModelRoutingService
 from app.modules.model_sources.repository import ModelSourcesRepository
 from app.modules.model_sources.service import ModelSourcesService
 from app.modules.oauth.service import OauthService
@@ -91,6 +93,15 @@ class ApiKeysContext:
     session: AsyncSession
     repository: ApiKeysRepository
     service: ApiKeysService
+
+
+@dataclass(slots=True)
+class ModelRoutingContext:
+    service: ModelRoutingService
+
+
+def get_model_routing_context(session: AsyncSession = Depends(get_session)) -> ModelRoutingContext:
+    return ModelRoutingContext(service=ModelRoutingService(ModelRoutingRepository(session)))
 
 
 @dataclass(slots=True)

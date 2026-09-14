@@ -33,6 +33,7 @@ from app.modules.automations.repository import (
     AutomationRunRecord,
     AutomationsRepository,
 )
+from app.modules.model_routing.access import require_model_account_access
 from app.modules.proxy.account_cache import get_account_selection_cache, mark_account_routing_unavailable
 from app.modules.proxy.helpers import _header_account_id
 from app.modules.proxy.request_policy import resolve_wire_reasoning_effort
@@ -1156,6 +1157,7 @@ class AutomationsService:
                     instructions="Automation ping",
                     reasoning=ResponsesReasoning(effort=wire_reasoning_effort) if wire_reasoning_effort else None,
                 )
+                await require_model_account_access(account.id, ping_request.model)
                 request_started_at = time.monotonic()
                 compact_response = await asyncio.wait_for(
                     core_compact_responses(

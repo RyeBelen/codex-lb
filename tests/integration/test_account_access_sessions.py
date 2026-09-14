@@ -98,7 +98,8 @@ def test_websocket_revocation_blocks_next_turn(app_instance, monkeypatch, path):
     "path", ["/v1/live/rtc_access", "/v1/realtime?call_id=rtc_access", "/backend-api/codex/rtc_access"]
 )
 @pytest.mark.parametrize("binary", [False, True])
-def test_realtime_revocation_blocks_frames_and_reattachment(app_instance, monkeypatch, path, binary):
+@pytest.mark.parametrize("restriction", ["account", "model"])
+def test_realtime_revocation_blocks_frames_and_reattachment(app_instance, monkeypatch, path, binary, restriction):
     class Upstream:
         def __init__(self):
             self.frames = []
@@ -157,7 +158,14 @@ def test_realtime_revocation_blocks_frames_and_reattachment(app_instance, monkey
         headers = {"Authorization": f"Bearer {key['key']}"}
         assert client.put("/api/settings", json={"apiKeyAuthEnabled": True}).status_code == 200
         access_path = f"/api/accounts/{account}/api-key-access"
-        assert client.put(access_path, json={"restricted": True, "apiKeyIds": [key["id"]]}).status_code == 200
+        granted = {"restricted": True, "apiKeyIds": [key["id"]]}
+        revoked = {"restricted": True, "apiKeyIds": []}
+        if restriction == "model":
+            assert client.patch(f"/api/api-keys/{key['id']}", json={"enforcedModel": "gpt-5.1"}).status_code == 200
+            access_path = "/api/model-account-routing"
+            granted = {"model": "gpt-5.1", "restricted": True, "accountIds": [account]}
+            revoked = {"model": "gpt-5.1", "restricted": True, "accountIds": []}
+        assert client.put(access_path, json=granted).status_code == 200
         created = client.post(
             "/backend-api/codex/realtime/calls",
             content=b"v=offer\r\n",
@@ -169,7 +177,7 @@ def test_realtime_revocation_blocks_frames_and_reattachment(app_instance, monkey
             send = ws.send_bytes if binary else ws.send_text
             send(b"first" if binary else "first")
             assert ws.receive_text() == "accepted"
-            assert client.put(access_path, json={"restricted": True, "apiKeyIds": []}).status_code == 200
+            assert client.put(access_path, json=revoked).status_code == 200
             send(b"forbidden" if binary else "forbidden")
             closed = ws.receive()
             assert closed["type"] == "websocket.close"

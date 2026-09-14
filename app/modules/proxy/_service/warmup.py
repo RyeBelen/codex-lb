@@ -200,7 +200,14 @@ class _WarmupMixin:
                 for account_id, entry in latest_usage.items()
             }
 
-        scope = await resolve_account_scope(api_key)
+        dashboard_settings = await get_settings_cache().get()
+        configured_model = dashboard_settings.warmup_model
+        prohibit_fast_mode = dashboard_settings.prohibit_fast_mode
+        effective_model = api_key.enforced_model if api_key and api_key.enforced_model else configured_model
+        validate_model_access(api_key, effective_model)
+        scope_payload = ResponsesCompactRequest(model=effective_model, input=[], instructions="")
+        normalize_upstream_model_alias(scope_payload)
+        scope = await resolve_account_scope(api_key, model=scope_payload.model)
         if scope is not None:
             target_accounts = [account for account in target_accounts if account.id in scope]
         total_accounts = len(target_accounts)
@@ -239,11 +246,6 @@ class _WarmupMixin:
                 if account.id not in eligible_ids
             )
 
-        dashboard_settings = await get_settings_cache().get()
-        configured_model = dashboard_settings.warmup_model
-        prohibit_fast_mode = dashboard_settings.prohibit_fast_mode
-        effective_model = api_key.enforced_model if api_key and api_key.enforced_model else configured_model
-        validate_model_access(api_key, effective_model)
         filtered_headers = filter_inbound_headers(headers)
 
         submission_semaphore = asyncio.Semaphore(_WARMUP_MAX_CONCURRENT_SUBMISSIONS)
@@ -356,7 +358,7 @@ class _WarmupMixin:
                 prohibit_fast_mode=prohibit_fast_mode,
                 request_id=request_id,
             )
-            await require_account_access(account.id, api_key)
+            await require_account_access(account.id, api_key, model=payload.model)
             response = await _call_with_supported_optional_kwargs(
                 _service_core_compact_responses(),
                 payload,

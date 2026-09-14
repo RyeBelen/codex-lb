@@ -1771,6 +1771,7 @@ async def _websocket_full_replay_should_wait_for_continuity(
 def _is_account_neutral_error_code(code: str | None) -> bool:
     return is_local_overload_error_code(code) or code in {
         "account_access_denied",
+        "model_account_not_allowed",
         PROCESS_NETWORK_UNAVAILABLE_CODE,
         "proxy_unavailable",
         "responses_compact_input_too_large",

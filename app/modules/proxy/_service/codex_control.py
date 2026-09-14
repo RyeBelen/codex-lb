@@ -211,7 +211,7 @@ class _CodexControlMixin:
         privacy_policy: CodexControlRequestPrivacyPolicy = CodexControlRequestPrivacyPolicy.STANDARD,
     ) -> Account | None:
         proxy = cast(_CodexControlServiceProtocol, self)
-        scoped_account_ids = await resolve_account_scope(api_key)
+        scoped_account_ids = await resolve_account_scope(api_key, model=api_key.enforced_model if api_key else None)
         settings = await _service_get_settings_cache().get()
         if _routing_strategy(settings) == "single_account":
             selected_account_id = (settings.single_account_id or "").strip()
@@ -364,7 +364,7 @@ class _CodexControlMixin:
                     route_endpoint_id = route.endpoint_id
                 route_trace = UpstreamProxyRouteTrace()
                 try:
-                    await require_account_access(target.id, api_key)
+                    await require_account_access(target.id, api_key, model=selection_model)
                     return await _service_core_codex_control_request()(
                         path,
                         method=method,

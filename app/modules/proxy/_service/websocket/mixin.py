@@ -2537,11 +2537,12 @@ class _WebSocketMixin:
                     upstream_turn_state = _facade()._upstream_turn_state_from_socket(upstream) or upstream_turn_state
                     upstream_control = _WebSocketUpstreamControl()
 
-
                 try:
                     if upstream_reader is None and account is not None:
                         await require_account_access(
-                            account.id, request_state.api_key if request_state is not None else api_key
+                            account.id,
+                            request_state.api_key if request_state is not None else api_key,
+                            model=request_state.model if request_state is not None else None,
                         )
                         upstream_reader = asyncio.create_task(
                             proxy._relay_upstream_websocket_messages(
@@ -2687,7 +2688,9 @@ class _WebSocketMixin:
                         continue
                     if account is not None:
                         await require_account_access(
-                            account.id, request_state.api_key if request_state is not None else api_key
+                            account.id,
+                            request_state.api_key if request_state is not None else api_key,
+                            model=request_state.model if request_state is not None else None,
                         )
                     if text_data is not None:
                         archive_request_id = None if request_state is None else request_state.archive_request_id

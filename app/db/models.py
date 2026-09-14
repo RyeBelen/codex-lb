@@ -1222,6 +1222,23 @@ class ApiKey(Base):
     )
 
 
+class ModelAccountPolicy(Base):
+    __tablename__ = "model_account_policies"
+
+    model: Mapped[str] = mapped_column(String(128), primary_key=True)
+
+
+class ModelAccountGrant(Base):
+    __tablename__ = "model_account_grants"
+
+    model: Mapped[str] = mapped_column(
+        String(128), ForeignKey("model_account_policies.model", ondelete="CASCADE"), primary_key=True
+    )
+    account_id: Mapped[str] = mapped_column(
+        String, ForeignKey("accounts.id", ondelete="CASCADE"), primary_key=True, index=True
+    )
+
+
 class AccountApiKeyGrant(Base):
     __tablename__ = "account_api_key_grants"
 

@@ -27,6 +27,7 @@ from app.modules.api_keys.service import (
     ApiKeyRequestUsageBudget,
     ApiKeysService,
 )
+from app.modules.model_routing.access import require_model_account_access
 from app.modules.request_logs.repository import RequestLogsRepository
 from app.modules.usage.repository import UsageRepository
 from app.modules.usage.updater import UsageUpdater
@@ -583,6 +584,7 @@ class QuotaWarmupService:
         access_token = self._encryptor.decrypt(account.access_token_encrypted)
         upstream_account_id = account.chatgpt_account_id
         usage = WarmupUsage(input_tokens=0, output_tokens=0, cached_input_tokens=0, reasoning_tokens=None)
+        await require_model_account_access(account.id, payload.model)
         async for event_block in stream_responses(
             payload,
             headers,

@@ -326,6 +326,7 @@ type MockState = {
     }>
   >;
   modelSources: ModelSource[];
+  modelRoutingRules: Array<{ model: string; restricted: boolean; accountIds: string[] }>;
   firewallEntries: Array<{ ipAddress: string; createdAt: string }>;
   stickySessions: Array<{
     key: string;
@@ -362,6 +363,7 @@ function createInitialState(): MockState {
     automations: [],
     automationRuns: {},
     modelSources: createDefaultModelSources(),
+    modelRoutingRules: [],
     firewallEntries: [],
     stickySessions: [],
   };
@@ -2102,6 +2104,14 @@ export const handlers = [
       authenticated: false,
     });
     return HttpResponse.json({ status: "ok" });
+  }),
+
+  http.get("/api/model-account-routing", () => HttpResponse.json({ rules: state.modelRoutingRules })),
+  http.put("/api/model-account-routing", async ({ request }) => {
+    const policy = await request.json() as MockState["modelRoutingRules"][number];
+    state.modelRoutingRules = state.modelRoutingRules.filter((rule) => rule.model !== policy.model);
+    if (policy.restricted) state.modelRoutingRules.push(policy);
+    return HttpResponse.json(policy);
   }),
 
   http.get("/api/models", () => {

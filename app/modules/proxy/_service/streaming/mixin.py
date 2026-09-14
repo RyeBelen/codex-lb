@@ -570,7 +570,7 @@ class _StreamingMixin(_StreamingRetryMixin):
                 concurrency_caps=concurrency_caps or _facade().effective_account_concurrency_caps(),
             )
             response_create_lease = await proxy._get_work_admission().acquire_response_create()
-            await require_account_access(account.id, api_key)
+            await require_account_access(account.id, api_key, model=payload.model)
             attempt_started_at = time.monotonic()
             latency_queue_ms = max(0, int((attempt_started_at - request_started_at) * 1000))
             stream_optional_kwargs: dict[str, object] = {

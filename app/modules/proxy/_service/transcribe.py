@@ -199,6 +199,7 @@ class _TranscribeMixin:
                 prefer_earlier_reset_window=_prefer_earlier_reset_window(settings),
                 routing_strategy=routing_strategy,
                 model=None,
+                policy_model=transcribe_model,
             )
             account = selection.account
             if not account:
@@ -232,7 +233,7 @@ class _TranscribeMixin:
                     total_timeout_seconds=remaining_budget,
                 )
                 try:
-                    await require_account_access(target.id, api_key)
+                    await require_account_access(target.id, api_key, model=transcribe_model)
                     return await _call_with_supported_optional_kwargs(
                         _service_core_transcribe_audio(),
                         audio_bytes,
@@ -265,6 +266,7 @@ class _TranscribeMixin:
                     prefer_earlier_reset_accounts=prefer_earlier_reset,
                     routing_strategy=routing_strategy,
                     model=None,
+                    policy_model=transcribe_model,
                     exclude_account_ids=excluded_account_ids,
                 )
 

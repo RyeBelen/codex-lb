@@ -435,7 +435,7 @@ async def _send_http_bridge_request_text_with_archive_id(
     # the exact frame that will cross the websocket so the metadata cannot
     # push an otherwise-valid response.create over the upstream limit.
     _enforce_http_bridge_response_create_text_size(request_state, text_data)
-    await require_account_access(session.account.id, request_state.api_key)
+    await require_account_access(session.account.id, request_state.api_key, model=request_state.model)
     if on_send_started is not None:
         on_send_started()
     token = set_request_id(request_state.archive_request_id)
