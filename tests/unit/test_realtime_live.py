@@ -32,10 +32,27 @@ def _unscoped_api_key(*, key_id: str = "api-key-a") -> ApiKeyData:
         ApiKeyData,
         SimpleNamespace(
             id=key_id,
+            enforced_model=None,
             account_assignment_scope_enabled=False,
             assigned_account_ids=(),
         ),
     )
+
+
+@pytest.fixture(autouse=True)
+def _isolate_authorization_database(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Committed reservation checks are covered by test_account_access_sessions.
+    async def scope(api_key, *, model, allow_model_less):
+        assert model is None
+        assert allow_model_less is False
+        return None
+
+    async def require(account_id, api_key, *, model, allow_model_less):
+        assert model is None
+        assert allow_model_less is False
+
+    monkeypatch.setattr(realtime_live_module, "resolve_account_scope", scope)
+    monkeypatch.setattr(realtime_live_module, "require_account_access", require)
 
 
 class _FakeDownstreamWebSocket:

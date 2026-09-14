@@ -15,7 +15,7 @@ pytestmark = pytest.mark.integration
 @pytest.mark.asyncio
 async def test_background_warmup_senders_recheck_model_policy(async_client, monkeypatch):
     account_id, _, _ = await _setup(async_client)
-    await _rule(async_client, [])
+    await _rule(async_client, [account_id], model="gpt-6-astra")
     calls = []
 
     async def unexpected(*args, **kwargs):
@@ -47,7 +47,7 @@ async def test_background_warmup_senders_recheck_model_policy(async_client, monk
 @pytest.mark.asyncio
 async def test_automation_ping_fails_without_inference_when_model_denied(async_client, monkeypatch):
     account_id, _, _ = await _setup(async_client)
-    await _rule(async_client, [], model="gpt-5.6-sol")
+    await _rule(async_client, [account_id], model="gpt-6-astra")
     calls = []
 
     async def unexpected(*args, **kwargs):

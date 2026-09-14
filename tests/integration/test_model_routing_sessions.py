@@ -12,7 +12,7 @@ from app.db.session import SessionLocal
 from app.dependencies import get_proxy_service_for_app
 from tests.integration.test_account_api_key_access import _setup
 from tests.integration.test_http_responses_bridge import _FakeBridgeUpstreamWebSocket, _install_bridge_settings
-from tests.integration.test_model_account_routing import _rule
+from tests.integration.test_model_account_routing import _reserve_elsewhere, _rule
 from tests.integration.test_proxy_sticky_sessions import _make_auth_json
 
 pytestmark = pytest.mark.integration
@@ -41,7 +41,7 @@ async def test_http_bridge_revocation_blocks_reused_connection(async_client, app
         assert first.status_code == 200, first.text
         assert "resp_bridge_1" in first.text
         assert len(upstream.sent_text) == 1
-        await _rule(async_client, [])
+        await _reserve_elsewhere(async_client, account)
         second = await async_client.post(
             path, headers=headers, json={**payload, "previous_response_id": "resp_bridge_1"}
         )
@@ -86,7 +86,13 @@ def test_websocket_revocation_blocks_next_turn(app_instance, monkeypatch, path):
             assert messages[-1]["type"] == "response.completed", messages
             assert len(upstream.sent_text) == 1
             assert (
-                client.put(access_path, json={"model": "gpt-5.1", "restricted": True, "accountIds": []}).status_code
+                client.put(access_path, json={"model": "gpt-5.1", "restricted": False, "accountIds": []}).status_code
+                == 200
+            )
+            assert (
+                client.put(
+                    access_path, json={"model": "gpt-6-astra", "restricted": True, "accountIds": [account]}
+                ).status_code
                 == 200
             )
             ws.send_json({**payload, "previous_response_id": "resp_bridge_1"})

@@ -1,15 +1,17 @@
-# Model account routing
+# Model account reservations
 
-This policy controls which upstream subscription accounts may spend usage on a model. It is independent of the model catalog and API-key permissions. External model sources retain their own routing and permissions.
+This policy reserves upstream subscription accounts for particular models to protect their usage. It is independent of the model catalog and API-key permissions. External model sources retain their own routing and permissions.
 
-In Settings, expand Advanced and open Model account routing. Add the exact model ID, select the allowed accounts, and save. For example, create a rule for `gpt-6-astra`, press Select Pro accounts, adjust the selection, and save. Leave `gpt-5.6-sol` without a rule to keep its ordinary pool. The shortcut selects accounts whose current plan type is `pro`; it does not include Pro Lite or automatically select future accounts.
+In Settings, expand Advanced and open Model account routing. Add the exact model ID, select accounts to reserve, and save. For example, reserve three Pro accounts for `gpt-6-astra`. Those accounts then serve only Astra. Astra can also use unreserved eligible accounts, while `gpt-5.6-sol` cannot use the three reserved accounts. An account assigned to multiple model rules can serve any of those models.
 
-An absent policy permits normal routing. A stored policy with no grants blocks the model on the account pool. Deleting the last account does not remove that policy. To remove a restriction, edit its rule, choose All eligible accounts, and save.
+Select Pro accounts selects the currently listed accounts whose plan type is exactly `pro`. It excludes Pro Lite. New accounts remain unreserved and eligible under ordinary routing until explicitly reserved.
 
-Rules are evaluated after request model enforcement and existing alias normalization. Use canonical upstream model IDs. Whitespace and case are normalized for policy lookup; wildcard and model-family rules are not supported. Transcription uses `gpt-4o-transcribe` for policy checks while retaining its separate catalog behavior.
+An empty rule reserves no accounts and does not block its model. To release a reservation, edit the rule, choose Remove reservation, and save. An account remains reserved if another model rule still assigns it. Deleting the last selected account does not block that model from using unreserved accounts.
 
-Selections and upstream submissions read committed policy without a process cache. This adds indexed database reads but lets later requests on existing connections observe edits. Work already submitted can finish. Pinned state never moves to an unlisted account. Limit warm-ups, quota-planner probes, and automation pings also check the model rule before sending. Background jobs retain their existing error reporting and settlement behavior.
+Rules use exact canonical model IDs after request model enforcement and existing alias normalization. Whitespace and case are normalized; wildcard and model-family rules are not supported. Transcription checks `gpt-4o-transcribe` while retaining its separate catalog behavior. API-key scope, account grants, model capability, health, and quotas still apply.
 
-Realtime attachment and frames use the API key's enforced model when present. Opaque Realtime call bodies do not currently provide a persisted model identity, so a call without a known model cannot use model-specific filtering. Existing API-key and account permissions still apply.
+Selection and upstream submission read committed reservations without a process cache. Later requests on reused connections observe edits. Work already submitted can finish and settle normally. Pinned state never moves between accounts to evade a reservation. Limit warm-ups, quota-planner probes, and automation pings also check reservations before inference.
 
-The additive migration creates no rules and leaves existing account and API-key data unchanged. A downgrade removes only the new policy tables. This change has been developed locally; deploying it and selecting production accounts are separate actions. Deployment should use the existing GitHub `prod` integration.
+Realtime creation, attachment, and frames use the API key's enforced model when present. An unknown-model Realtime call excludes reserved accounts because its model cannot be established. Model-less file operations retain their existing authorization and account ownership.
+
+Existing saved account selections become reservations without a schema migration or account-ID rewrite. The API's existing `restricted` field enables the reservation row; it does not limit the model to the selected accounts. Deployment uses the existing GitHub `prod` integration.

@@ -97,6 +97,7 @@ class _RealtimeLiveServiceProtocol(Protocol):
         api_key: ApiKeyData,
         model: str | None,
         policy_model: str | None,
+        allow_model_less: bool,
         preferred_account_id: str,
         preferred_account_is_continuity_owner: bool,
         fallback_on_preferred_account_unavailable: bool,
@@ -469,7 +470,9 @@ class _RealtimeLiveMixin:
         proxy = cast(_RealtimeLiveServiceProtocol, self)
         owner_account_id = await self._resolve_realtime_call_owner(normalized_call_id, api_key=api_key)
         account_scope = (
-            await resolve_account_scope(api_key, model=api_key.enforced_model) if owner_account_id is not None else None
+            await resolve_account_scope(api_key, model=api_key.enforced_model, allow_model_less=False)
+            if owner_account_id is not None
+            else None
         )
         if owner_account_id is None or (account_scope is not None and owner_account_id not in account_scope):
             raise ProxyResponseError(
@@ -489,6 +492,7 @@ class _RealtimeLiveMixin:
             api_key=api_key,
             model=None,
             policy_model=api_key.enforced_model,
+            allow_model_less=False,
             preferred_account_id=owner_account_id,
             preferred_account_is_continuity_owner=True,
             fallback_on_preferred_account_unavailable=False,
@@ -556,7 +560,9 @@ class _RealtimeLiveMixin:
                 account,
                 operation="realtime_live_websocket",
             )
-            await require_account_access(owner_account_id, api_key, model=api_key.enforced_model)
+            await require_account_access(
+                owner_account_id, api_key, model=api_key.enforced_model, allow_model_less=False
+            )
             upstream = await proxy._live_websocket_connector(
                 normalized_call_id,
                 forwarded_headers,
@@ -592,7 +598,13 @@ class _RealtimeLiveMixin:
                 relay_upstream,
                 max_message_bytes=settings.max_sse_event_bytes,
                 close_timeout_seconds=upstream_close_timeout_seconds,
-                before_send=partial(require_account_access, owner_account_id, api_key, model=api_key.enforced_model),
+                before_send=partial(
+                    require_account_access,
+                    owner_account_id,
+                    api_key,
+                    model=api_key.enforced_model,
+                    allow_model_less=False,
+                ),
             )
             log_status = "success"
         except WebSocketDisconnect:

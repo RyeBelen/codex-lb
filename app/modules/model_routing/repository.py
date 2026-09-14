@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from sqlalchemy import and_, delete, select
+from sqlalchemy import and_, delete, false, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -47,11 +47,24 @@ class ModelRoutingRepository:
                 accounts.append(account_id)
         return [ModelAccountRule(model_id, account_ids) for model_id, account_ids in rules.items()]
 
-    async def scope(self, model: str | None) -> set[str] | None:
-        if model is None:
+    async def scope(self, model: str | None, *, allow_model_less: bool = True) -> set[str] | None:
+        if model is None and allow_model_less:
             return None
-        rules = await self.list_rules(model)
-        return set(rules[0].account_ids) if rules else None
+        if await self._session.scalar(select(ModelAccountGrant.account_id).limit(1)) is None:
+            return None
+        reserved = select(ModelAccountGrant.account_id).where(ModelAccountGrant.account_id == Account.id).exists()
+        permitted = (
+            select(ModelAccountGrant.account_id)
+            .where(ModelAccountGrant.account_id == Account.id, ModelAccountGrant.model == model.strip().lower())
+            .exists()
+            if model is not None
+            else false()
+        )
+        return set(
+            await self._session.scalars(
+                select(Account.id).where(Account.delete_requested_at.is_(None), or_(~reserved, permitted))
+            )
+        )
 
     async def replace(self, model: str, account_ids: list[str] | None) -> None:
         try:

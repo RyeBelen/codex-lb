@@ -37,6 +37,8 @@ describe("ModelRoutingSettings", () => {
     const user = userEvent.setup();
     const { saved } = setup();
     await user.click(await screen.findByRole("button", { name: "Add model rule" }));
+    expect(screen.getByText(/Those accounts serve only their assigned models/)).toHaveTextContent("The model can also use other eligible accounts.");
+    expect(screen.getByText(/Selected accounts only serve this model/)).toHaveTextContent("This model can also use unreserved accounts.");
     await user.type(screen.getByRole("combobox", { name: "Model ID" }), "GPT-6-astra");
     await user.click(screen.getByRole("button", { name: "Select Pro accounts" }));
     expect(screen.getByRole("checkbox", { name: /First Pro/ })).toBeChecked();
@@ -50,22 +52,22 @@ describe("ModelRoutingSettings", () => {
     expect(screen.getByRole("checkbox", { name: /Second Pro/ })).not.toBeChecked();
   });
 
-  it("saves an explicit empty restriction and can restore unrestricted routing", async () => {
+  it("explains empty reservations and can remove a reservation", async () => {
     const user = userEvent.setup();
     const { saved } = setup([{ model: "gpt-6-astra", restricted: true, accountIds: ["pro1"] }]);
     await user.click(await screen.findByRole("button", { name: "Edit gpt-6-astra" }));
     await user.click(screen.getByRole("button", { name: "Clear selection" }));
-    expect(screen.getByText(/This model will be blocked/)).toBeVisible();
+    expect(screen.getByText(/This rule reserves no accounts and does not block the model/)).toBeVisible();
     await user.click(screen.getByRole("button", { name: "Save model rule" }));
     await user.click(await screen.findByRole("button", { name: "Edit gpt-6-astra" }));
     await user.click(screen.getByRole("combobox", { name: "Model routing mode" }));
-    await user.click(screen.getByRole("option", { name: "All eligible accounts" }));
+    await user.click(screen.getByRole("option", { name: "Remove reservation" }));
     await user.click(screen.getByRole("button", { name: "Save model rule" }));
     await waitFor(() => expect(saved).toEqual([
       { model: "gpt-6-astra", restricted: true, accountIds: [] },
       { model: "gpt-6-astra", restricted: false, accountIds: [] },
     ]));
-    expect(await screen.findByText("No model restrictions configured.")).toBeVisible();
+    expect(await screen.findByText("No account reservations configured.")).toBeVisible();
   });
 
   it("retains selection after a save error", async () => {

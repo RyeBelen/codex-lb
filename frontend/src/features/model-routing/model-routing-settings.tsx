@@ -26,7 +26,7 @@ export function ModelRoutingSettings({ accounts, accountsReady, disabled }: {
     <section id="model-account-routing" aria-label="Model account routing" className="scroll-mt-16 space-y-3 rounded-xl border bg-card p-5">
       <h3 className="text-sm font-semibold">Model account routing</h3>
       <p className="text-sm text-muted-foreground">
-        Reserve a model for selected accounts. Models without a rule use the normal account pool.
+        Reserve selected accounts for a model. Those accounts serve only their assigned models. The model can also use other eligible accounts.
       </p>
       {policies.isError ? (
         <p role="alert" className="text-sm text-destructive">Unable to load model routing rules.</p>
@@ -34,11 +34,11 @@ export function ModelRoutingSettings({ accounts, accountsReady, disabled }: {
         <p role="status">Loading model routing rules...</p>
       ) : (
         <>
-          {rules.length === 0 ? <p className="text-sm text-muted-foreground">No model restrictions configured.</p> : (
+          {rules.length === 0 ? <p className="text-sm text-muted-foreground">No account reservations configured.</p> : (
             <ul className="space-y-2">
               {rules.map((rule) => (
                 <li key={rule.model} className="flex flex-wrap items-center justify-between gap-2 rounded-lg border p-3 text-sm">
-                  <div><span className="font-medium">{rule.model}</span><p className="text-muted-foreground">{rule.accountIds.length} selected accounts</p></div>
+                  <div><span className="font-medium">{rule.model}</span><p className="text-muted-foreground">{rule.accountIds.length} reserved accounts</p></div>
                   <Button variant="outline" size="sm" disabled={!accountsReady || editing !== null} onClick={() => setEditing(rule)}>
                     {disabled ? "View" : "Edit"} {rule.model}
                   </Button>
@@ -113,13 +113,13 @@ function ModelRoutingForm({ policy, accounts, existingModels, modelOptions, disa
       <Select value={restricted ? "restricted" : "unrestricted"} disabled={locked} onValueChange={(value) => setRestricted(value === "restricted")}>
         <SelectTrigger aria-label="Model routing mode"><SelectValue /></SelectTrigger>
         <SelectContent>
-          <SelectItem value="restricted">Only selected accounts</SelectItem>
-          <SelectItem value="unrestricted">All eligible accounts</SelectItem>
+          <SelectItem value="restricted">Reserve selected accounts for this model</SelectItem>
+          <SelectItem value="unrestricted">Remove reservation</SelectItem>
         </SelectContent>
       </Select>
       {restricted ? (
         <fieldset disabled={locked} className="space-y-3">
-          <legend className="text-sm font-medium">Allowed accounts</legend>
+          <legend className="text-sm font-medium">Reserved accounts</legend>
           <div className="flex flex-wrap gap-2">
             <Button type="button" size="sm" variant="outline" disabled={locked} onClick={() => setSelected(accounts.filter((account) => account.planType === "pro").map((account) => account.accountId))}>Select Pro accounts</Button>
             <Button type="button" size="sm" variant="outline" disabled={locked} onClick={() => setSelected([])}>Clear selection</Button>
@@ -138,10 +138,10 @@ function ModelRoutingForm({ policy, accounts, existingModels, modelOptions, disa
               </label>
             ))}
           </div>
-          {selected.length === 0 ? <p role="status" className="text-sm">No accounts selected. This model will be blocked on the account pool.</p> : null}
-          <p className="text-xs text-muted-foreground">There is no fallback to other accounts. Existing key permissions, model support, and usage limits still apply. Newly added accounts need explicit selection.</p>
+          {selected.length === 0 ? <p role="status" className="text-sm">No accounts selected. This rule reserves no accounts and does not block the model.</p> : null}
+          <p className="text-xs text-muted-foreground">Selected accounts only serve this model, plus any other models you reserve them for. This model can also use unreserved accounts. Existing key permissions, model support, and usage limits still apply. Newly added accounts remain unreserved.</p>
         </fieldset>
-      ) : <p className="text-sm text-muted-foreground">Saving removes this model's account restriction.</p>}
+      ) : <p className="text-sm text-muted-foreground">Saving releases these accounts from this model's reservation. Accounts reserved for another model remain reserved.</p>}
       {mutation.isError ? <p role="alert" className="text-sm text-destructive">{mutation.error.message}</p> : null}
       <div className="flex gap-2">
         <Button type="submit" size="sm" disabled={locked || !changed || !validModel || duplicate}>{mutation.isPending ? "Saving..." : "Save model rule"}</Button>

@@ -1,9 +1,4 @@
-# model-account-routing Specification
-
-## Purpose
-The system SHALL reserve selected upstream accounts for assigned models while preserving ordinary eligibility on unreserved accounts.
-
-## Requirements
+## MODIFIED Requirements
 
 ### Requirement: Explicit model account scope
 The system SHALL reserve selected accounts for normalized exact model IDs. An account assigned to one or more model rules SHALL serve only those models. Unreserved accounts SHALL retain ordinary model eligibility. A model SHALL remain eligible to use unreserved accounts in addition to accounts reserved for it. Empty rules SHALL reserve no accounts and SHALL NOT block the model. Model account scope SHALL intersect with API-key account scope, account grants, discovered model capability, health, and quota eligibility. Rules SHALL apply after model enforcement and existing alias normalization. Retries SHALL NOT use an account reserved for another model.

@@ -211,7 +211,11 @@ class _CodexControlMixin:
         privacy_policy: CodexControlRequestPrivacyPolicy = CodexControlRequestPrivacyPolicy.STANDARD,
     ) -> Account | None:
         proxy = cast(_CodexControlServiceProtocol, self)
-        scoped_account_ids = await resolve_account_scope(api_key, model=api_key.enforced_model if api_key else None)
+        scoped_account_ids = await resolve_account_scope(
+            api_key,
+            model=api_key.enforced_model if api_key else None,
+            allow_model_less=not privacy_policy.redacts_sensitive_details,
+        )
         settings = await _service_get_settings_cache().get()
         if _routing_strategy(settings) == "single_account":
             selected_account_id = (settings.single_account_id or "").strip()
@@ -323,6 +327,7 @@ class _CodexControlMixin:
                 prefer_earlier_reset_window=_prefer_earlier_reset_window(settings),
                 routing_strategy=routing_strategy,
                 model=selection_model,
+                allow_model_less=not sensitive_realtime_request,
                 redact_sensitive_details=sensitive_realtime_request,
             )
             account = selection.account
@@ -364,7 +369,9 @@ class _CodexControlMixin:
                     route_endpoint_id = route.endpoint_id
                 route_trace = UpstreamProxyRouteTrace()
                 try:
-                    await require_account_access(target.id, api_key, model=selection_model)
+                    await require_account_access(
+                        target.id, api_key, model=selection_model, allow_model_less=not sensitive_realtime_request
+                    )
                     return await _service_core_codex_control_request()(
                         path,
                         method=method,
@@ -404,6 +411,7 @@ class _CodexControlMixin:
                     prefer_earlier_reset_accounts=settings.prefer_earlier_reset_accounts,
                     routing_strategy=routing_strategy,
                     model=selection_model,
+                    allow_model_less=not sensitive_realtime_request,
                     exclude_account_ids=excluded_account_ids,
                     redact_sensitive_details=sensitive_realtime_request,
                 )
@@ -500,6 +508,7 @@ class _CodexControlMixin:
                                     prefer_earlier_reset_window=_prefer_earlier_reset_window(settings),
                                     routing_strategy=routing_strategy,
                                     model=selection_model,
+                                    allow_model_less=not sensitive_realtime_request,
                                     exclude_account_ids={account.id},
                                     redact_sensitive_details=sensitive_realtime_request,
                                 )

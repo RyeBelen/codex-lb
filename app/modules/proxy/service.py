@@ -1705,6 +1705,7 @@ class ProxyService(
         routing_strategy: RoutingStrategy = "capacity_weighted",
         model: str | None = None,
         policy_model: str | None = None,
+        allow_model_less: bool = True,
         service_tier: str | None = None,
         additional_limit_name: str | None = None,
         exclude_account_ids: Collection[str] | None = None,
@@ -1726,7 +1727,7 @@ class ProxyService(
             _raise_proxy_budget_exhausted()
         # Transcription and realtime can identify a policy model without using the Responses catalog.
         scoped_account_ids = await resolve_account_scope(
-            api_key, model=policy_model if policy_model is not None else model
+            api_key, model=policy_model if policy_model is not None else model, allow_model_less=allow_model_less
         )
         effective_traffic_class = (
             TRAFFIC_CLASS_OPPORTUNISTIC

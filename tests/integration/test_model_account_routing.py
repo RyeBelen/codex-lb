@@ -24,6 +24,92 @@ async def _rule(client, accounts, model="gpt-5.1", restricted=True):
     return response.json()
 
 
+async def _reserve_elsewhere(client, account, model="gpt-5.1"):
+    await _rule(client, [], model=model, restricted=False)
+    await _rule(client, [account], model="gpt-6-astra")
+
+
+@pytest.mark.asyncio
+async def test_reservation_union_empty_rules_new_accounts_and_release(async_client):
+    from app.modules.model_routing.repository import ModelRoutingRepository
+
+    account, _, _ = await _setup(async_client)
+    await _rule(async_client, [])
+    async with SessionLocal() as session:
+        assert await ModelRoutingRepository(session).scope("gpt-5.1") is None
+    await _rule(async_client, [account])
+    await _rule(async_client, [account], model="gpt-6-astra")
+    other = await _import_account(async_client, "new", "new@example.com")
+    async with SessionLocal() as session:
+        repo = ModelRoutingRepository(session)
+        assert await repo.scope(" GPT-6-ASTRA ") == {account, other}
+        assert await repo.scope("gpt-5.1") == {account, other}
+        assert await repo.scope("gpt-5.6-sol") == {other}
+        assert await repo.scope(None, allow_model_less=False) == {other}
+        assert await repo.scope(None) is None
+    await _rule(async_client, [], restricted=False)
+    async with SessionLocal() as session:
+        repo = ModelRoutingRepository(session)
+        assert await repo.scope("gpt-5.1") == {other}
+        assert await repo.scope("gpt-6-astra") == {account, other}
+    await _rule(async_client, [], model="gpt-6-astra", restricted=False)
+    async with SessionLocal() as session:
+        assert await ModelRoutingRepository(session).scope("gpt-5.6-sol") is None
+
+
+@pytest.mark.asyncio
+async def test_unknown_model_realtime_excludes_reserved_accounts(async_client, monkeypatch):
+    from app.core.clients.proxy import CodexControlResponse
+
+    account, key, headers = await _setup(async_client)
+    await _rule(async_client, [account], model="gpt-6-astra")
+    seen = []
+
+    async def control(*args, account_id, **kwargs):
+        seen.append(account_id)
+        return CodexControlResponse(
+            status_code=201,
+            body=b"v=answer\r\n",
+            headers={"content-type": "application/sdp", "location": "/v1/realtime/calls/rtc_reserved"},
+        )
+
+    monkeypatch.setattr(proxy_module, "core_codex_control_request", control)
+    path = "/backend-api/codex/realtime/calls"
+    request_headers = {**headers, "content-type": "application/sdp"}
+    denied = await async_client.post(path, content=b"v=offer\r\n", headers=request_headers)
+    assert denied.status_code >= 400, denied.text
+    assert seen == []
+    await _import_account(async_client, "unreserved", "unreserved@example.com")
+    allowed = await async_client.post(path, content=b"v=offer\r\n", headers=request_headers)
+    assert allowed.status_code == 201, allowed.text
+    assert seen == ["unreserved"]
+
+
+@pytest.mark.asyncio
+async def test_model_less_files_keep_reserved_account_ownership(async_client, monkeypatch):
+    account, _, headers = await _setup(async_client)
+    await _rule(async_client, [account], model="gpt-6-astra")
+    seen = []
+
+    async def create(*, account_id, **kwargs):
+        seen.append(account_id)
+        return {"file_id": "file-reserved", "upload_url": "https://example.invalid/upload"}
+
+    async def finalize(*, account_id, **kwargs):
+        seen.append(account_id)
+        return {"status": "success"}
+
+    monkeypatch.setattr(proxy_module, "core_create_file", create)
+    monkeypatch.setattr(proxy_module, "core_finalize_file", finalize)
+    created = await async_client.post(
+        "/backend-api/files", headers=headers, json={"file_name": "a.txt", "file_size": 10, "use_case": "codex"}
+    )
+    assert created.status_code == 200, created.text
+    finalized = await async_client.post("/backend-api/files/file-reserved/uploaded", headers=headers, json={})
+    assert finalized.status_code == 200, finalized.text
+    assert seen == ["private", "private"]
+
+
 @pytest.mark.asyncio
 async def test_rule_lifecycle_validation_and_account_deletion(async_client):
     account, _, _ = await _setup(async_client)
@@ -76,10 +162,11 @@ async def test_dashboard_auth_and_guest_read_only(async_client, app_instance):
         "/backend-api/codex/responses/compact",
     ],
 )
-async def test_inference_routes_restrict_only_configured_model(async_client, monkeypatch, path):
-    account, _, headers = await _setup(async_client)
-    await _import_account(async_client, "other", "other@example.com")
+async def test_accounts_are_reserved_but_model_can_use_other_accounts(async_client, monkeypatch, path):
+    account, key, headers = await _setup(async_client)
+    other = await _import_account(async_client, "other", "other@example.com")
     await _rule(async_client, [account])
+    await async_client.patch(f"/api/api-keys/{key['id']}", json={"assignedAccountIds": [account]})
     seen = []
 
     async def stream(payload, _headers, _access_token, account_id, **kwargs):
@@ -103,13 +190,19 @@ async def test_inference_routes_restrict_only_configured_model(async_client, mon
     response = await async_client.post(path, json=payload, headers=headers)
     assert response.status_code == 200, response.text
     assert seen == ["private"]
-    await _rule(async_client, [])
-    response = await async_client.post(path, json=payload, headers=headers)
+    other_payload = {**payload, "model": "gpt-5.1-codex-mini"}
+    response = await async_client.post(path, json=other_payload, headers=headers)
     assert response.status_code >= 400 or '"error"' in response.text or "response.failed" in response.text
     assert seen == ["private"]
-    response = await async_client.post(path, json={**payload, "model": "gpt-5.1-codex-mini"}, headers=headers)
+    await async_client.patch(f"/api/api-keys/{key['id']}", json={"assignedAccountIds": [other]})
+    response = await async_client.post(path, json=payload, headers=headers)
     assert response.status_code == 200, response.text
-    assert len(seen) == 2 and seen[-1] in ("private", "other")
+    assert seen == ["private", "other"]
+    await _rule(async_client, [], restricted=False)
+    await async_client.patch(f"/api/api-keys/{key['id']}", json={"assignedAccountIds": [account]})
+    response = await async_client.post(path, json=other_payload, headers=headers)
+    assert response.status_code == 200, response.text
+    assert seen == ["private", "other", "private"]
     async with SessionLocal() as session:
         assert not list(
             await session.scalars(select(ApiKeyUsageReservation).where(ApiKeyUsageReservation.status == "reserved"))
@@ -121,6 +214,7 @@ async def test_intersects_key_and_account_permissions_and_forced_routing(async_c
     account, key, headers = await _setup(async_client)
     other = await _import_account(async_client, "other", "other@example.com")
     await _rule(async_client, [account])
+    await _rule(async_client, [other], model="gpt-6-astra")
     await async_client.patch(f"/api/api-keys/{key['id']}", json={"assignedAccountIds": [other]})
     await async_client.put("/api/settings", json={"routingStrategy": "single_account", "singleAccountId": other})
     response = await async_client.post("/v1/responses", headers=headers, json={"model": "gpt-5.1", "input": "hi"})
@@ -134,8 +228,9 @@ async def test_intersects_key_and_account_permissions_and_forced_routing(async_c
 @pytest.mark.asyncio
 async def test_retry_cannot_leave_model_scope(async_client, monkeypatch):
     account, _, headers = await _setup(async_client)
-    await _import_account(async_client, "other", "other@example.com")
+    other = await _import_account(async_client, "other", "other@example.com")
     await _rule(async_client, [account])
+    await _rule(async_client, [other], model="gpt-6-astra")
     seen = []
 
     async def fail(payload, _headers, _access_token, account_id, **kwargs):
@@ -151,8 +246,8 @@ async def test_retry_cannot_leave_model_scope(async_client, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_enforced_model_and_no_api_key_cannot_bypass_rule(async_client, monkeypatch):
-    _, key, headers = await _setup(async_client)
-    await _rule(async_client, [])
+    account, key, headers = await _setup(async_client)
+    await _rule(async_client, [account], model="gpt-6-astra")
     assert (
         await async_client.patch(f"/api/api-keys/{key['id']}", json={"enforcedModel": "gpt-5.1"})
     ).status_code == 200
@@ -194,7 +289,7 @@ async def test_revocation_during_retry_preserves_health_and_settles_usage(async_
 
     async def stream(payload, _headers, _access_token, account_id, **kwargs):
         seen.append(account_id)
-        await _rule(async_client, [])
+        await _reserve_elsewhere(async_client, account)
         raise ProxyResponseError(503, openai_error("upstream_unavailable", "temporary failure"))
         yield ""
 
@@ -222,6 +317,7 @@ async def test_warmup_filters_effective_model_including_alias(async_client, monk
         await _add_primary_usage(account_id, used_percent=0, window_minutes=300)
     assert (await async_client.put("/api/settings", json={"warmupModel": model})).status_code == 200
     await _rule(async_client, [account])
+    await _rule(async_client, [other], model="gpt-6-astra")
     seen = []
 
     async def compact(payload, _headers, _token, account_id, **kwargs):
@@ -239,8 +335,9 @@ async def test_warmup_filters_effective_model_including_alias(async_client, monk
 @pytest.mark.parametrize("path", ["/backend-api/transcribe", "/v1/audio/transcriptions"])
 async def test_transcription_selects_only_allowed_accounts(async_client, monkeypatch, path):
     account, _, headers = await _setup(async_client)
-    await _import_account(async_client, "other", "other@example.com")
+    other = await _import_account(async_client, "other", "other@example.com")
     await _rule(async_client, [account], model="gpt-4o-transcribe")
+    await _rule(async_client, [other], model="gpt-6-astra")
     seen = []
 
     async def transcribe(*args, account_id, **kwargs):
@@ -250,7 +347,8 @@ async def test_transcription_selects_only_allowed_accounts(async_client, monkeyp
     monkeypatch.setattr(proxy_module, "core_transcribe_audio", transcribe)
     for allowed in (True, False):
         if not allowed:
-            await _rule(async_client, [], model="gpt-4o-transcribe")
+            await _rule(async_client, [], model="gpt-4o-transcribe", restricted=False)
+            await _rule(async_client, [account, other], model="gpt-6-astra")
         response = await async_client.post(
             path,
             headers=headers,

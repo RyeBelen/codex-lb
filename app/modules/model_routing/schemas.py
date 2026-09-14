@@ -16,7 +16,7 @@ class ModelRoutingPolicy(DashboardModel):
     @model_validator(mode="after")
     def validate_accounts(self) -> "ModelRoutingPolicy":
         if not self.restricted and self.account_ids:
-            raise ValueError("Unrestricted routing must have no selected accounts")
+            raise ValueError("Removing a reservation must have no selected accounts")
         if any(not account_id.strip() for account_id in self.account_ids):
             raise ValueError("Account IDs must not be blank")
         self.account_ids = sorted(set(self.account_ids))
