@@ -180,6 +180,7 @@ class _FakeUpstreamWebSocket:
         self.archived_receive_texts: list[str] = []
         self.closed = False
         self.closed_event = threading.Event()
+        self._request_sent = asyncio.Event()
         self._messages: asyncio.Queue[_FakeUpstreamMessage] = asyncio.Queue()
         for message in messages:
             self._messages.put_nowait(message)
@@ -187,12 +188,15 @@ class _FakeUpstreamWebSocket:
     async def send_text(self, text: str) -> None:
         self.sent_text_request_ids.append(get_request_id())
         self.sent_text.append(text)
+        self._request_sent.set()
 
     async def send_bytes(self, data: bytes) -> None:
         self.sent_bytes_request_ids.append(get_request_id())
         self.sent_bytes.append(data)
 
     async def receive(self) -> _FakeUpstreamMessage:
+        # Upstream response fixtures must not finish a request before its send.
+        await self._request_sent.wait()
         self.receive_request_ids.append(get_request_id())
         return await self._messages.get()
 
@@ -4560,6 +4564,7 @@ def test_v1_responses_websocket_reuses_upstream_for_sequential_requests(app_inst
             ),
         ],
         deferred_message_batches=[
+            [],  # The first send consumes the initially queued response.
             [
                 _FakeUpstreamMessage(
                     "text",

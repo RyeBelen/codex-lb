@@ -1145,6 +1145,14 @@ async def test_v1_reset_credit_post_holds_session_open_through_lock_and_upstream
             assert requested_account_id == account_id
             return account
 
+    class StubAccountAccessRepository:
+        def __init__(self, repo_session_arg):
+            assert repo_session_arg is repo_session
+
+        async def is_denied(self, account_id, api_key_id):
+            events.append("access_check")
+            return False
+
     @asynccontextmanager
     async def fake_serialize_reset_credit_redeem(requested_account_id: str, *, session: object | None):
         events.append("lock_wait")
@@ -1194,6 +1202,7 @@ async def test_v1_reset_credit_post_holds_session_open_through_lock_and_upstream
 
     monkeypatch.setattr("app.modules.proxy.api.get_background_session", lambda: SessionManager())
     monkeypatch.setattr("app.modules.proxy.api.AccountsRepository", StubAccountsRepository)
+    monkeypatch.setattr("app.modules.proxy.api.AccountAccessRepository", StubAccountAccessRepository)
     monkeypatch.setattr("app.modules.proxy.api._resolve_reset_credit_route", fake_resolve_route)
     monkeypatch.setattr("app.modules.proxy.api.serialize_reset_credit_redeem", fake_serialize_reset_credit_redeem)
     monkeypatch.setattr(
@@ -1236,6 +1245,7 @@ async def test_v1_reset_credit_post_holds_session_open_through_lock_and_upstream
         "session_enter",
         "repo_init",
         "repo_get",
+        "access_check",
         "lock_wait",
         "lock_enter",
         "route_resolve",

@@ -716,6 +716,7 @@ from app.modules.proxy._service.websocket.helpers import (
     _websocket_top_level_error_payload,  # noqa: F401
     _wrapped_websocket_error_event,  # noqa: F401
 )
+from app.modules.proxy.account_access import resolve_account_scope
 from app.modules.proxy.affinity import (
     _AffinityPolicy,
     _CodexSessionSource,
@@ -1703,6 +1704,8 @@ class ProxyService(
         prefer_earlier_reset_window: ResetPreferenceWindow = "secondary",
         routing_strategy: RoutingStrategy = "capacity_weighted",
         model: str | None = None,
+        policy_model: str | None = None,
+        allow_model_less: bool = True,
         service_tier: str | None = None,
         additional_limit_name: str | None = None,
         exclude_account_ids: Collection[str] | None = None,
@@ -1722,10 +1725,9 @@ class ProxyService(
                 "%s request budget exhausted before account selection request_id=%s", kind.title(), request_id
             )
             _raise_proxy_budget_exhausted()
-        scoped_account_ids = (
-            set(api_key.assigned_account_ids)
-            if api_key is not None and api_key.account_assignment_scope_enabled
-            else None
+        # Transcription and realtime can identify a policy model without using the Responses catalog.
+        scoped_account_ids = await resolve_account_scope(
+            api_key, model=policy_model if policy_model is not None else model, allow_model_less=allow_model_less
         )
         effective_traffic_class = (
             TRAFFIC_CLASS_OPPORTUNISTIC
@@ -2028,11 +2030,7 @@ class ProxyService(
         lease_kind: AccountLeaseKind | None = None,
     ) -> AccountSelection:
         settings = await get_settings_cache().get()
-        scoped_account_ids = (
-            set(api_key.assigned_account_ids)
-            if api_key is not None and api_key.account_assignment_scope_enabled
-            else None
-        )
+        scoped_account_ids = await resolve_account_scope(api_key, model=model)
         if _routing_strategy(settings) == "single_account":
             selected_account_id = (settings.single_account_id or "").strip()
             if selected_account_id:

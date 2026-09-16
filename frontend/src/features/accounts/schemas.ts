@@ -1,5 +1,12 @@
 import { z } from "zod";
 
+export const AccountAccessSchema = z.object({
+  accountId: z.string(),
+  restricted: z.boolean(),
+  apiKeyIds: z.array(z.string()),
+});
+export type AccountAccess = z.infer<typeof AccountAccessSchema>;
+
 const UsageTrendPointSchema = z.object({
   t: z.iso.datetime({ offset: true }),
   v: z.number(),

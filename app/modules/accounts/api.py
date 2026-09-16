@@ -23,8 +23,11 @@ from app.core.multipart import ACCOUNT_IMPORT_MULTIPART_POLICY, bounded_multipar
 from app.core.multipart_fields import required_upload
 from app.core.upstream_proxy import UpstreamProxyRouteError
 from app.dependencies import AccountsContext, get_accounts_context, get_proxy_service_for_app
+from app.modules.accounts.access_repository import AccountAccessPolicy, UnknownAccessKeyError
 from app.modules.accounts.repository import AccountIdentityConflictError
 from app.modules.accounts.schemas import (
+    AccountAccessRequest,
+    AccountAccessResponse,
     AccountAliasRequest,
     AccountAliasResponse,
     AccountAuthExportResponse,
@@ -103,6 +106,41 @@ async def list_accounts(
 ) -> AccountsResponse:
     accounts = await context.service.list_accounts()
     return AccountsResponse(accounts=accounts)
+
+
+@router.get("/{account_id}/api-key-access", response_model=AccountAccessResponse)
+async def get_account_api_key_access(
+    account_id: str,
+    context: AccountsContext = Depends(get_accounts_context),
+) -> AccountAccessResponse:
+    policy = await context.service.get_access_policy(account_id)
+    if policy is None:
+        raise DashboardNotFoundError("Account not found", code="account_not_found")
+    return AccountAccessResponse(account_id=account_id, restricted=policy.restricted, api_key_ids=policy.api_key_ids)
+
+
+@router.put("/{account_id}/api-key-access", response_model=AccountAccessResponse)
+async def set_account_api_key_access(
+    request: Request,
+    account_id: str,
+    payload: AccountAccessRequest,
+    _write_access=Depends(require_dashboard_write_access),
+    context: AccountsContext = Depends(get_accounts_context),
+) -> AccountAccessResponse:
+    try:
+        updated = await context.service.set_access_policy(
+            account_id, AccountAccessPolicy(restricted=payload.restricted, api_key_ids=payload.api_key_ids)
+        )
+    except UnknownAccessKeyError as exc:
+        raise DashboardBadRequestError(str(exc), code="invalid_api_key_ids") from exc
+    if not updated:
+        raise DashboardNotFoundError("Account not found", code="account_not_found")
+    AuditService.log_async(
+        "account_api_key_access_updated",
+        actor_ip=request.client.host if request.client else None,
+        details={"account_id": account_id, "restricted": payload.restricted, "api_key_ids": payload.api_key_ids},
+    )
+    return AccountAccessResponse(account_id=account_id, restricted=payload.restricted, api_key_ids=payload.api_key_ids)
 
 
 @router.get("/{account_id}/trends", response_model=AccountTrendsResponse)

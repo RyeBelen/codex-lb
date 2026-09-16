@@ -178,6 +178,7 @@ from app.core.utils.sse import (
 from app.db.models import Account, AccountStatus, ModelSource
 from app.db.session import detach_session_objects, get_background_session
 from app.dependencies import ProxyContext, get_proxy_context, get_proxy_websocket_context
+from app.modules.accounts.access_repository import AccountAccessRepository
 from app.modules.accounts.auth_manager import AuthManager
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.api_keys.repository import ApiKeysRepository
@@ -1695,13 +1696,20 @@ async def v1_usage(
     async with get_background_session() as session:
         service = ApiKeysService(ApiKeysRepository(session), usage_repository=UsageRepository(session))
         usage = await service.get_key_usage_summary_for_self(api_key.id)
-        aggregate_limits = await _build_aggregate_credit_limits(session) if "upstream_limits" in usage_sections else {}
+        scope = await AccountAccessRepository(session).filter_scope(
+            api_key.id, set(api_key.assigned_account_ids) if api_key.account_assignment_scope_enabled else None
+        )
+        aggregate_limits = (
+            await _build_aggregate_credit_limits(session, account_scope=scope)
+            if "upstream_limits" in usage_sections
+            else {}
+        )
         hide_upstream_limits = await _hide_upstream_quota_for_api_key_clients(api_key)
         account_pool_usage = (
             await _build_account_pool_usage(
                 session,
-                assigned_account_ids=api_key.assigned_account_ids,
-                account_assignment_scope_enabled=api_key.account_assignment_scope_enabled,
+                assigned_account_ids=sorted(scope) if scope is not None else [],
+                account_assignment_scope_enabled=scope is not None,
             )
             if "account_pool_usage" in usage_sections and not hide_upstream_limits
             else None
@@ -1887,6 +1895,11 @@ async def v1_reset_credit(
 ) -> list[V1ResetCreditEntry]:
     async with get_background_session() as session:
         accounts = await AccountsRepository(session).list_accounts(refresh_existing=True)
+        scope = await AccountAccessRepository(session).filter_scope(
+            api_key.id, set(api_key.assigned_account_ids) if api_key.account_assignment_scope_enabled else None
+        )
+        if scope is not None:
+            accounts = [account for account in accounts if account.id in scope]
         eligible_accounts = _project_reset_credit_accounts(accounts, api_key)
 
     response: list[V1ResetCreditEntry] = []
@@ -1914,7 +1927,9 @@ async def v1_redeem_reset_credit(
         # membership tests stub the account with plain namespaces.
         if account is not None and getattr(account, "delete_requested_at", None) is not None:
             account = None
-        if not _is_reset_credit_account_in_api_key_pool(account, api_key):
+        if not _is_reset_credit_account_in_api_key_pool(account, api_key) or (
+            await AccountAccessRepository(session).is_denied(payload.account_id, api_key.id)
+        ):
             raise HTTPException(status_code=403, detail="Account is outside the API key pool")
         if account is None:
             raise HTTPException(status_code=403, detail="Account is outside the API key pool")
@@ -2384,7 +2399,9 @@ def _attach_codex_usage_reset_credits(
     return replace(payload, rate_limit_reset_credits=reset_credits)
 
 
-async def _build_aggregate_credit_limits(session: AsyncSession) -> dict[str, V1UsageLimitResponse]:
+async def _build_aggregate_credit_limits(
+    session: AsyncSession, *, account_scope: set[str] | None = None
+) -> dict[str, V1UsageLimitResponse]:
     usage_repository = UsageRepository(session)
     primary_latest = await usage_repository.latest_by_account(window="primary")
     secondary_latest = await usage_repository.latest_by_account(window="secondary")
@@ -2403,6 +2420,8 @@ async def _build_aggregate_credit_limits(session: AsyncSession) -> dict[str, V1U
     if not account_ids:
         return {}
 
+    if account_scope is not None:
+        account_ids &= account_scope
     account_map = {account.id: account for account in await _load_accounts_by_id(session, account_ids)}
     if not account_map:
         return {}

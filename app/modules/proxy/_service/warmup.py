@@ -28,6 +28,7 @@ from app.core.upstream_proxy import UpstreamProxyRouteError
 from app.db.models import Account, AccountStatus
 from app.modules.api_keys.service import ApiKeyData, ApiKeyUsageReservationData
 from app.modules.proxy._service.support import _call_with_supported_optional_kwargs, _request_log_client_fields
+from app.modules.proxy.account_access import require_account_access, resolve_account_scope
 from app.modules.proxy.helpers import _header_account_id, _normalize_error_code, _parse_openai_error
 from app.modules.proxy.request_policy import (
     apply_prohibit_fast_mode,
@@ -199,6 +200,16 @@ class _WarmupMixin:
                 for account_id, entry in latest_usage.items()
             }
 
+        dashboard_settings = await get_settings_cache().get()
+        configured_model = dashboard_settings.warmup_model
+        prohibit_fast_mode = dashboard_settings.prohibit_fast_mode
+        effective_model = api_key.enforced_model if api_key and api_key.enforced_model else configured_model
+        validate_model_access(api_key, effective_model)
+        scope_payload = ResponsesCompactRequest(model=effective_model, input=[], instructions="")
+        normalize_upstream_model_alias(scope_payload)
+        scope = await resolve_account_scope(api_key, model=scope_payload.model)
+        if scope is not None:
+            target_accounts = [account for account in target_accounts if account.id in scope]
         total_accounts = len(target_accounts)
         submitted: list[WarmupSubmittedAccountData] = []
         skipped: list[WarmupSkippedAccountData] = []
@@ -235,11 +246,6 @@ class _WarmupMixin:
                 if account.id not in eligible_ids
             )
 
-        dashboard_settings = await get_settings_cache().get()
-        configured_model = dashboard_settings.warmup_model
-        prohibit_fast_mode = dashboard_settings.prohibit_fast_mode
-        effective_model = api_key.enforced_model if api_key and api_key.enforced_model else configured_model
-        validate_model_access(api_key, effective_model)
         filtered_headers = filter_inbound_headers(headers)
 
         submission_semaphore = asyncio.Semaphore(_WARMUP_MAX_CONCURRENT_SUBMISSIONS)
@@ -352,6 +358,7 @@ class _WarmupMixin:
                 prohibit_fast_mode=prohibit_fast_mode,
                 request_id=request_id,
             )
+            await require_account_access(account.id, api_key, model=payload.model)
             response = await _call_with_supported_optional_kwargs(
                 _service_core_compact_responses(),
                 payload,

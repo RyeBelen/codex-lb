@@ -28,6 +28,7 @@ from app.core.utils.request_id import ensure_request_id, get_request_id
 from app.db.models import Account
 from app.modules.api_keys.service import ApiKeyData
 from app.modules.proxy._service.support import _request_log_client_fields, _RequestLogFailureMetadata
+from app.modules.proxy.account_access import require_account_access
 from app.modules.proxy.helpers import _header_account_id, _normalize_error_code, _parse_openai_error
 from app.modules.proxy.load_balancer import AccountSelection
 from app.modules.proxy.selection_errors import selection_failure_response
@@ -198,6 +199,7 @@ class _TranscribeMixin:
                 prefer_earlier_reset_window=_prefer_earlier_reset_window(settings),
                 routing_strategy=routing_strategy,
                 model=None,
+                policy_model=transcribe_model,
             )
             account = selection.account
             if not account:
@@ -231,6 +233,7 @@ class _TranscribeMixin:
                     total_timeout_seconds=remaining_budget,
                 )
                 try:
+                    await require_account_access(target.id, api_key, model=transcribe_model)
                     return await _call_with_supported_optional_kwargs(
                         _service_core_transcribe_audio(),
                         audio_bytes,
@@ -263,6 +266,7 @@ class _TranscribeMixin:
                     prefer_earlier_reset_accounts=prefer_earlier_reset,
                     routing_strategy=routing_strategy,
                     model=None,
+                    policy_model=transcribe_model,
                     exclude_account_ids=excluded_account_ids,
                 )
 

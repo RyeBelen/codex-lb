@@ -23,6 +23,7 @@ from app.core.utils.time import naive_utc_to_epoch, utcnow
 from app.db.models import Account, AccountLimitWarmup, AccountStatus, DashboardSettings, UsageHistory
 from app.modules.accounts.auth_manager import AuthManager
 from app.modules.accounts.repository import AccountsRepository
+from app.modules.model_routing.access import require_model_account_access
 from app.modules.usage.mappers import usage_history_to_window_row
 
 logger = logging.getLogger(__name__)
@@ -223,6 +224,7 @@ class StreamingLimitWarmupSender:
         }
         usage: ResponseUsage | None = None
         route_trace = UpstreamProxyRouteTrace()
+        await require_model_account_access(fresh_account.id, payload.model)
         with override_stream_timeouts(
             connect_timeout_seconds=5.0,
             idle_timeout_seconds=10.0,

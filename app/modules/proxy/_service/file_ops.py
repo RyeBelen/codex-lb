@@ -33,6 +33,7 @@ from app.modules.proxy._service.support import (
     _request_log_client_fields,
     _RequestLogFailureMetadata,
 )
+from app.modules.proxy.account_access import require_account_access
 from app.modules.proxy.continuity import resolve_required_account_id
 from app.modules.proxy.file_pin_repository import (
     FileAccountPinOwnershipConflict,
@@ -502,6 +503,7 @@ class _FileOpsMixin:
 
             async def _call(target: Account) -> dict[str, JsonValue]:
                 nonlocal route_mode, route_pool_id, route_endpoint_id, route_fallback_used
+                await require_account_access(target.id, api_key)
                 access_token = proxy._encryptor.decrypt(target.access_token_encrypted)
                 account_id = _header_account_id(target.chatgpt_account_id)
                 route = await proxy._resolve_upstream_route_for_account(target, operation=kind)

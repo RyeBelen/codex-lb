@@ -3,9 +3,27 @@ from __future__ import annotations
 from datetime import datetime
 from typing import List
 
-from pydantic import Field, PrivateAttr, field_validator
+from pydantic import Field, PrivateAttr, StrictBool, field_validator, model_validator
 
 from app.modules.shared.schemas import DashboardModel
+
+
+class AccountAccessRequest(DashboardModel):
+    restricted: StrictBool
+    api_key_ids: list[str] = Field(max_length=10000)
+
+    @model_validator(mode="after")
+    def validate_grants(self) -> AccountAccessRequest:
+        if any(not key_id.strip() or key_id != key_id.strip() for key_id in self.api_key_ids):
+            raise ValueError("API key IDs must be nonempty without surrounding whitespace")
+        if not self.restricted and self.api_key_ids:
+            raise ValueError("Shared accounts cannot have API key grants")
+        self.api_key_ids = sorted(set(self.api_key_ids))
+        return self
+
+
+class AccountAccessResponse(AccountAccessRequest):
+    account_id: str
 
 
 class UsageTrendPoint(DashboardModel):

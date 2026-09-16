@@ -81,6 +81,9 @@ class Account(Base):
     __tablename__ = "accounts"
 
     id: Mapped[str] = mapped_column(String, primary_key=True)
+    api_key_access_restricted: Mapped[bool] = mapped_column(
+        Boolean, default=False, server_default=false(), nullable=False
+    )
     chatgpt_account_id: Mapped[str | None] = mapped_column(String, nullable=True)
     # Stable per-seat OpenAI principal identity (chatgpt_user_id / auth sub).
     # Distinct from chatgpt_account_id, which is the shared Team/Business
@@ -1216,6 +1219,32 @@ class ApiKey(Base):
         back_populates="api_key",
         cascade="all, delete-orphan",
         lazy="selectin",
+    )
+
+
+class ModelAccountPolicy(Base):
+    __tablename__ = "model_account_policies"
+
+    model: Mapped[str] = mapped_column(String(128), primary_key=True)
+
+
+class ModelAccountGrant(Base):
+    __tablename__ = "model_account_grants"
+
+    model: Mapped[str] = mapped_column(
+        String(128), ForeignKey("model_account_policies.model", ondelete="CASCADE"), primary_key=True
+    )
+    account_id: Mapped[str] = mapped_column(
+        String, ForeignKey("accounts.id", ondelete="CASCADE"), primary_key=True, index=True
+    )
+
+
+class AccountApiKeyGrant(Base):
+    __tablename__ = "account_api_key_grants"
+
+    account_id: Mapped[str] = mapped_column(String, ForeignKey("accounts.id", ondelete="CASCADE"), primary_key=True)
+    api_key_id: Mapped[str] = mapped_column(
+        String, ForeignKey("api_keys.id", ondelete="CASCADE"), primary_key=True, index=True
     )
 
 

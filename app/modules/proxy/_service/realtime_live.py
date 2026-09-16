@@ -4,8 +4,9 @@ import asyncio
 import hashlib
 import logging
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from datetime import timedelta
+from functools import partial
 from typing import Protocol, cast
 from urllib.parse import urlparse
 
@@ -30,6 +31,7 @@ from app.db.models import Account, AccountStatus, StickySessionKind
 from app.db.session import detach_session_objects
 from app.modules.api_keys.service import ApiKeyData
 from app.modules.proxy._service.support import _request_log_client_fields
+from app.modules.proxy.account_access import require_account_access, resolve_account_scope
 from app.modules.proxy.helpers import _header_account_id
 from app.modules.proxy.load_balancer import AccountLease, AccountSelection
 from app.modules.proxy.repo_bundle import ProxyRepoFactory
@@ -94,6 +96,8 @@ class _RealtimeLiveServiceProtocol(Protocol):
         kind: str,
         api_key: ApiKeyData,
         model: str | None,
+        policy_model: str | None,
+        allow_model_less: bool,
         preferred_account_id: str,
         preferred_account_is_continuity_owner: bool,
         fallback_on_preferred_account_unavailable: bool,
@@ -263,6 +267,7 @@ async def _relay_downstream_to_upstream(
     *,
     max_message_bytes: int,
     close_timeout_seconds: float,
+    before_send: Callable[[], Awaitable[None]] | None = None,
 ) -> None:
     while True:
         message = await websocket.receive()
@@ -280,6 +285,8 @@ async def _relay_downstream_to_upstream(
                 await upstream.close(code=1009, timeout_seconds=close_timeout_seconds)
                 await _safe_close_downstream(websocket, code=1009)
                 return
+            if before_send is not None:
+                await before_send()
             await upstream.send_text(text)
             continue
         data = message.get("bytes")
@@ -288,6 +295,8 @@ async def _relay_downstream_to_upstream(
                 await upstream.close(code=1009, timeout_seconds=close_timeout_seconds)
                 await _safe_close_downstream(websocket, code=1009)
                 return
+            if before_send is not None:
+                await before_send()
             await upstream.send_bytes(data)
             continue
         raise UpstreamWebSocketTransportError(
@@ -335,6 +344,7 @@ async def _relay_live_websocket(
     *,
     max_message_bytes: int,
     close_timeout_seconds: float,
+    before_send: Callable[[], Awaitable[None]] | None = None,
 ) -> None:
     tasks = {
         asyncio.create_task(
@@ -343,6 +353,7 @@ async def _relay_live_websocket(
                 upstream,
                 max_message_bytes=max_message_bytes,
                 close_timeout_seconds=close_timeout_seconds,
+                before_send=before_send,
             ),
             name="realtime-live-downstream-to-upstream",
         ),
@@ -458,9 +469,12 @@ class _RealtimeLiveMixin:
 
         proxy = cast(_RealtimeLiveServiceProtocol, self)
         owner_account_id = await self._resolve_realtime_call_owner(normalized_call_id, api_key=api_key)
-        if owner_account_id is None or (
-            api_key.account_assignment_scope_enabled and owner_account_id not in api_key.assigned_account_ids
-        ):
+        account_scope = (
+            await resolve_account_scope(api_key, model=api_key.enforced_model, allow_model_less=False)
+            if owner_account_id is not None
+            else None
+        )
+        if owner_account_id is None or (account_scope is not None and owner_account_id not in account_scope):
             raise ProxyResponseError(
                 404,
                 openai_error("realtime_call_not_found", "Realtime call binding not found or expired"),
@@ -477,6 +491,8 @@ class _RealtimeLiveMixin:
             kind="realtime_live_websocket",
             api_key=api_key,
             model=None,
+            policy_model=api_key.enforced_model,
+            allow_model_less=False,
             preferred_account_id=owner_account_id,
             preferred_account_is_continuity_owner=True,
             fallback_on_preferred_account_unavailable=False,
@@ -544,6 +560,9 @@ class _RealtimeLiveMixin:
                 account,
                 operation="realtime_live_websocket",
             )
+            await require_account_access(
+                owner_account_id, api_key, model=api_key.enforced_model, allow_model_less=False
+            )
             upstream = await proxy._live_websocket_connector(
                 normalized_call_id,
                 forwarded_headers,
@@ -579,6 +598,13 @@ class _RealtimeLiveMixin:
                 relay_upstream,
                 max_message_bytes=settings.max_sse_event_bytes,
                 close_timeout_seconds=upstream_close_timeout_seconds,
+                before_send=partial(
+                    require_account_access,
+                    owner_account_id,
+                    api_key,
+                    model=api_key.enforced_model,
+                    allow_model_less=False,
+                ),
             )
             log_status = "success"
         except WebSocketDisconnect:
