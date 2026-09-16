@@ -11,6 +11,8 @@ function renderSettings(overrides: Partial<Parameters<typeof UpstreamProxySettin
     busy: false,
     onSaveSettings: vi.fn().mockResolvedValue(undefined),
     onCreateEndpoint: vi.fn().mockResolvedValue(undefined),
+    onUpdateEndpoint: vi.fn().mockResolvedValue(undefined),
+    onDeleteEndpoint: vi.fn().mockResolvedValue(undefined),
     onTestEndpoint: vi.fn().mockResolvedValue({ endpointId: "ep_primary", ok: true }),
     onCreatePool: vi.fn().mockResolvedValue(undefined),
     onAddPoolMember: vi.fn().mockResolvedValue(undefined),
@@ -121,6 +123,47 @@ describe("UpstreamProxySettings", () => {
     expect(within(memberDialog).getByText(/Endpoint is already in Primary pool/)).toBeInTheDocument();
     expect(within(memberDialog).getByRole("button", { name: "Add member" })).toBeDisabled();
     expect(onAddPoolMember).not.toHaveBeenCalled();
+  });
+
+  it("edits an existing endpoint without requiring its stored password", async () => {
+    const user = userEvent.setup();
+    const { onUpdateEndpoint } = renderSettings();
+
+    await user.click(screen.getByRole("button", { name: "Edit Primary proxy" }));
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByLabelText("Name")).toHaveValue("Primary proxy");
+    expect(within(dialog).getByLabelText("Host")).toHaveValue("proxy-primary.test");
+    expect(within(dialog).getByText("Leave blank to keep the current password.")).toBeInTheDocument();
+
+    const hostInput = within(dialog).getByLabelText("Host");
+    await user.clear(hostInput);
+    await user.type(hostInput, "proxy-new.test");
+    await user.click(within(dialog).getByRole("button", { name: "Save" }));
+
+    await waitFor(() => {
+      expect(onUpdateEndpoint).toHaveBeenCalledWith("ep_primary", {
+        name: "Primary proxy",
+        scheme: "http",
+        host: "proxy-new.test",
+        port: 8080,
+        username: "operator",
+        password: null,
+        isActive: true,
+      });
+    });
+  });
+
+  it("confirms before deleting an endpoint", async () => {
+    const user = userEvent.setup();
+    const { onDeleteEndpoint } = renderSettings();
+
+    await user.click(screen.getByRole("button", { name: "Delete Primary proxy" }));
+    const dialog = await screen.findByRole("alertdialog");
+    expect(within(dialog).getByText(/Remove it from every pool first/)).toBeInTheDocument();
+    expect(onDeleteEndpoint).not.toHaveBeenCalled();
+
+    await user.click(within(dialog).getByRole("button", { name: "Delete" }));
+    await waitFor(() => expect(onDeleteEndpoint).toHaveBeenCalledWith("ep_primary"));
   });
 
   it("tests a configured proxy endpoint", async () => {

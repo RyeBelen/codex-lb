@@ -74,6 +74,8 @@ const EXPECTED_ENDPOINTS = [
 	"PUT /api/settings/telemetry",
 	"GET /api/settings/upstream-proxy",
 	"POST /api/settings/upstream-proxy/endpoints",
+	"PUT /api/settings/upstream-proxy/endpoints/:endpointId",
+	"DELETE /api/settings/upstream-proxy/endpoints/:endpointId",
 	"POST /api/settings/upstream-proxy/endpoints/:endpointId/test",
 	"POST /api/settings/upstream-proxy/pools",
 	"POST /api/settings/upstream-proxy/pools/:poolId/members",

@@ -11,6 +11,7 @@ from sqlalchemy import text
 import app.modules.settings.api as settings_api_module
 from app.core.auth import generate_unique_account_id
 from app.core.config.settings_cache import get_settings_cache
+from app.core.crypto import TokenEncryptor
 from app.db.models import Account, AccountStatus, DashboardSettings, ProxyEndpoint
 from app.db.session import SessionLocal
 
@@ -658,6 +659,123 @@ async def test_upstream_proxy_admin_controls(async_client):
     assert admin_payload["defaultPoolId"] == pool_payload["id"]
     assert admin_payload["endpoints"][0]["id"] == endpoint_payload["id"]
     assert admin_payload["pools"][0]["endpointIds"] == [endpoint_payload["id"]]
+
+
+@pytest.mark.asyncio
+async def test_upstream_proxy_endpoint_update_preserves_password_and_invalidates_routes(async_client, monkeypatch):
+    endpoint = await async_client.post(
+        "/api/settings/upstream-proxy/endpoints",
+        json={
+            "name": "Proxy A",
+            "scheme": "https",
+            "host": "proxy.internal",
+            "port": 8080,
+            "username": "user",
+            "password": "secret",
+        },
+    )
+    endpoint_id = endpoint.json()["id"]
+    route_cache = type("RouteCache", (), {"invalidate": AsyncMock()})()
+    monkeypatch.setattr(settings_api_module, "get_upstream_route_cache", lambda: route_cache)
+
+    response = await async_client.put(
+        f"/api/settings/upstream-proxy/endpoints/{endpoint_id}",
+        json={
+            "name": "Proxy A edited",
+            "scheme": "https",
+            "host": "new-proxy.internal",
+            "port": 8443,
+            "username": "user",
+            "password": None,
+            "isActive": False,
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "id": endpoint_id,
+        "name": "Proxy A edited",
+        "scheme": "https",
+        "host": "new-proxy.internal",
+        "port": 8443,
+        "username": "user",
+        "isActive": False,
+    }
+    route_cache.invalidate.assert_awaited_once()
+    async with SessionLocal() as session:
+        row = await session.get(ProxyEndpoint, endpoint_id)
+        assert row is not None
+        assert TokenEncryptor().decrypt(row.password_encrypted) == "secret"
+
+    rejected = await async_client.put(
+        f"/api/settings/upstream-proxy/endpoints/{endpoint_id}",
+        json={
+            "name": "Proxy A edited",
+            "scheme": "http",
+            "host": "new-proxy.internal",
+            "port": 8443,
+            "username": "user",
+            "password": None,
+            "isActive": False,
+        },
+    )
+    assert rejected.status_code == 400
+    assert rejected.json()["error"]["code"] == "plaintext_proxy_credentials_forbidden"
+
+    cleared = await async_client.put(
+        f"/api/settings/upstream-proxy/endpoints/{endpoint_id}",
+        json={
+            "name": "Proxy A edited",
+            "scheme": "http",
+            "host": "new-proxy.internal",
+            "port": 8443,
+            "username": None,
+            "password": None,
+            "isActive": True,
+        },
+    )
+    assert cleared.status_code == 200
+    assert cleared.json()["username"] is None
+    assert route_cache.invalidate.await_count == 2
+    async with SessionLocal() as session:
+        row = await session.get(ProxyEndpoint, endpoint_id)
+        assert row is not None
+        assert row.password_encrypted is None
+
+
+@pytest.mark.asyncio
+async def test_upstream_proxy_endpoint_delete_rejects_pool_members_and_deletes_unused(async_client, monkeypatch):
+    used = await async_client.post(
+        "/api/settings/upstream-proxy/endpoints",
+        json={"name": "Used", "scheme": "http", "host": "used.proxy", "port": 8080},
+    )
+    used_id = used.json()["id"]
+    pool = await async_client.post(
+        "/api/settings/upstream-proxy/pools",
+        json={"name": "Pool A", "endpointIds": [used_id]},
+    )
+    assert pool.status_code == 200
+
+    rejected = await async_client.delete(f"/api/settings/upstream-proxy/endpoints/{used_id}")
+    assert rejected.status_code == 400
+    assert rejected.json()["error"]["code"] == "proxy_endpoint_in_use"
+
+    unused = await async_client.post(
+        "/api/settings/upstream-proxy/endpoints",
+        json={"name": "Unused", "scheme": "http", "host": "unused.proxy", "port": 8080},
+    )
+    unused_id = unused.json()["id"]
+    route_cache = type("RouteCache", (), {"invalidate": AsyncMock()})()
+    monkeypatch.setattr(settings_api_module, "get_upstream_route_cache", lambda: route_cache)
+
+    deleted = await async_client.delete(f"/api/settings/upstream-proxy/endpoints/{unused_id}")
+    assert deleted.status_code == 204
+    route_cache.invalidate.assert_awaited_once()
+
+    admin = await async_client.get("/api/settings/upstream-proxy")
+    endpoint_ids = {endpoint["id"] for endpoint in admin.json()["endpoints"]}
+    assert used_id in endpoint_ids
+    assert unused_id not in endpoint_ids
 
 
 @pytest.mark.asyncio

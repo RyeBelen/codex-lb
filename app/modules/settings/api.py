@@ -269,16 +269,7 @@ async def create_upstream_proxy_endpoint(
     _write_access=Depends(require_dashboard_write_access),
     context: SettingsContext = Depends(get_settings_context),
 ) -> UpstreamProxyEndpointResponse:
-    if payload.scheme in {"http", "socks5", "socks5h"} and (
-        payload.username is not None or payload.password is not None
-    ):
-        raise DashboardBadRequestError(
-            "Plaintext proxies cannot carry credentials",
-            code="plaintext_proxy_credentials_forbidden",
-        )
-    if payload.username is not None and ":" in payload.username:
-        # Mirrors the resolver: a Basic user-id cannot encode a colon.
-        raise DashboardBadRequestError('Proxy usernames cannot contain ":"', code="invalid_proxy_username")
+    _validate_proxy_endpoint_credentials(payload.scheme, payload.username, payload.password is not None)
     encryptor = TokenEncryptor()
     row = ProxyEndpoint(
         name=payload.name,
@@ -293,6 +284,69 @@ async def create_upstream_proxy_endpoint(
     await context.session.commit()
     await context.session.refresh(row)
     return _proxy_endpoint_response(row)
+
+
+@router.put("/upstream-proxy/endpoints/{endpoint_id}", response_model=UpstreamProxyEndpointResponse)
+async def update_upstream_proxy_endpoint(
+    endpoint_id: str,
+    payload: UpstreamProxyEndpointCreateRequest,
+    _write_access=Depends(require_dashboard_write_access),
+    context: SettingsContext = Depends(get_settings_context),
+) -> UpstreamProxyEndpointResponse:
+    row = await context.session.get(ProxyEndpoint, endpoint_id)
+    if row is None:
+        raise DashboardBadRequestError("Proxy endpoint not found", code="proxy_endpoint_not_found")
+
+    password_encrypted = row.password_encrypted
+    if payload.username is None:
+        password_encrypted = None
+    elif payload.password:
+        password_encrypted = TokenEncryptor().encrypt(payload.password)
+    _validate_proxy_endpoint_credentials(payload.scheme, payload.username, password_encrypted is not None)
+
+    row.name = payload.name
+    row.scheme = payload.scheme
+    row.host = payload.host
+    row.port = payload.port
+    row.username = payload.username
+    row.password_encrypted = password_encrypted
+    row.is_active = payload.is_active
+    await context.session.commit()
+    await get_upstream_route_cache().invalidate()
+    await context.session.refresh(row)
+    return _proxy_endpoint_response(row)
+
+
+@router.delete("/upstream-proxy/endpoints/{endpoint_id}", status_code=204)
+async def delete_upstream_proxy_endpoint(
+    endpoint_id: str,
+    _write_access=Depends(require_dashboard_write_access),
+    context: SettingsContext = Depends(get_settings_context),
+) -> None:
+    row = (
+        (
+            await context.session.execute(
+                select(ProxyEndpoint).where(ProxyEndpoint.id == endpoint_id).with_for_update()
+            )
+        )
+        .scalars()
+        .one_or_none()
+    )
+    if row is None:
+        raise DashboardBadRequestError("Proxy endpoint not found", code="proxy_endpoint_not_found")
+    membership_id = (
+        await context.session.execute(
+            select(ProxyPoolMember.id).where(ProxyPoolMember.endpoint_id == endpoint_id).limit(1)
+        )
+    ).scalar_one_or_none()
+    if membership_id is not None:
+        raise DashboardBadRequestError(
+            "Remove the proxy endpoint from all pools before deleting it",
+            code="proxy_endpoint_in_use",
+        )
+    await context.session.delete(row)
+    await context.session.commit()
+    await get_upstream_route_cache().invalidate()
 
 
 @router.post("/upstream-proxy/endpoints/{endpoint_id}/test", response_model=UpstreamProxyEndpointTestResponse)
@@ -553,6 +607,17 @@ def _proxy_endpoint_response(row: ProxyEndpoint) -> UpstreamProxyEndpointRespons
         username=row.username,
         is_active=row.is_active,
     )
+
+
+def _validate_proxy_endpoint_credentials(scheme: str, username: str | None, has_password: bool) -> None:
+    if scheme in {"http", "socks5", "socks5h"} and (username is not None or has_password):
+        raise DashboardBadRequestError(
+            "Plaintext proxies cannot carry credentials",
+            code="plaintext_proxy_credentials_forbidden",
+        )
+    if username is not None and ":" in username:
+        # Mirrors the resolver: a Basic user-id cannot encode a colon.
+        raise DashboardBadRequestError('Proxy usernames cannot contain ":"', code="invalid_proxy_username")
 
 
 def _account_proxy_binding_should_reactivate(account: Account) -> bool:

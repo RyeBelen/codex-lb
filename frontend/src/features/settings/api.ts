@@ -1,4 +1,4 @@
-import { get, post, put } from "@/lib/api-client";
+import { del, get, post, put } from "@/lib/api-client";
 import {
   AccountProxyBindingRequestSchema,
   AccountProxyBindingSchema,
@@ -51,6 +51,17 @@ export function createUpstreamProxyEndpoint(payload: unknown) {
   return post(`${UPSTREAM_PROXY_PATH}/endpoints`, UpstreamProxyEndpointSchema, {
     body: validated,
   });
+}
+
+export function updateUpstreamProxyEndpoint(endpointId: string, payload: unknown) {
+  const validated = UpstreamProxyEndpointCreateRequestSchema.parse(payload);
+  return put(`${UPSTREAM_PROXY_PATH}/endpoints/${encodeURIComponent(endpointId)}`, UpstreamProxyEndpointSchema, {
+    body: validated,
+  });
+}
+
+export function deleteUpstreamProxyEndpoint(endpointId: string) {
+  return del(`${UPSTREAM_PROXY_PATH}/endpoints/${encodeURIComponent(endpointId)}`);
 }
 
 export function testUpstreamProxyEndpoint(endpointId: string) {

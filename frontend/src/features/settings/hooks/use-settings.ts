@@ -7,11 +7,13 @@ import {
   addUpstreamProxyPoolMember,
   createUpstreamProxyEndpoint,
   createUpstreamProxyPool,
+  deleteUpstreamProxyEndpoint,
   getSettings,
   getTelemetryConsent,
   getUpstreamProxyAdmin,
   putAccountProxyBinding,
   testUpstreamProxyEndpoint,
+  updateUpstreamProxyEndpoint,
   updateSettings,
   updateTelemetryConsent,
 } from "@/features/settings/api";
@@ -138,6 +140,29 @@ export function useUpstreamProxyAdmin() {
     },
   });
 
+  const updateEndpointMutation = useMutation({
+    mutationFn: ({ endpointId, payload }: { endpointId: string; payload: UpstreamProxyEndpointCreateRequest }) =>
+      updateUpstreamProxyEndpoint(endpointId, payload),
+    onSuccess: () => {
+      toast.success(t("upstreamProxy.toasts.endpointUpdated"));
+      void queryClient.invalidateQueries({ queryKey: ["settings", "upstream-proxy"] });
+    },
+    onError: (error: Error) => {
+      toast.error(error.message || t("upstreamProxy.toasts.endpointUpdateFailed"));
+    },
+  });
+
+  const deleteEndpointMutation = useMutation({
+    mutationFn: (endpointId: string) => deleteUpstreamProxyEndpoint(endpointId),
+    onSuccess: () => {
+      toast.success(t("upstreamProxy.toasts.endpointDeleted"));
+      void queryClient.invalidateQueries({ queryKey: ["settings", "upstream-proxy"] });
+    },
+    onError: (error: Error) => {
+      toast.error(error.message || t("upstreamProxy.toasts.endpointDeleteFailed"));
+    },
+  });
+
   const createPoolMutation = useMutation({
     mutationFn: (payload: UpstreamProxyPoolCreateRequest) => createUpstreamProxyPool(payload),
     onSuccess: () => {
@@ -193,6 +218,8 @@ export function useUpstreamProxyAdmin() {
   return {
     upstreamProxyQuery,
     createEndpointMutation,
+    updateEndpointMutation,
+    deleteEndpointMutation,
     createPoolMutation,
     addPoolMemberMutation,
     testEndpointMutation,

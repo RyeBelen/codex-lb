@@ -176,6 +176,8 @@ describe("SettingsPage", () => {
         error: null,
       },
       createEndpointMutation: { isPending: false, error: null, mutateAsync: vi.fn() },
+      updateEndpointMutation: { isPending: false, error: null, mutateAsync: vi.fn() },
+      deleteEndpointMutation: { isPending: false, error: null, mutateAsync: vi.fn() },
       createPoolMutation: { isPending: false, error: null, mutateAsync: vi.fn() },
       addPoolMemberMutation: { isPending: false, error: null, mutateAsync: vi.fn() },
       testEndpointMutation: { isPending: false, error: null, mutateAsync: vi.fn() },

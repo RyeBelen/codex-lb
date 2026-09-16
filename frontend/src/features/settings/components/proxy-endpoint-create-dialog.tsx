@@ -12,7 +12,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from "@/components/ui/form";
+import { Form, FormControl, FormDescription, FormField, FormItem, FormLabel, FormMessage } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
 import {
   Select,
@@ -21,7 +21,8 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import type { UpstreamProxyEndpointCreateRequest } from "@/features/settings/schemas";
+import { Switch } from "@/components/ui/switch";
+import type { UpstreamProxyEndpoint, UpstreamProxyEndpointCreateRequest } from "@/features/settings/schemas";
 
 const SCHEME_OPTIONS = ["http", "https", "socks5", "socks5h"] as const;
 
@@ -32,22 +33,25 @@ type FormValues = {
   port: string;
   username: string;
   password: string;
+  isActive: boolean;
 };
 
 export type ProxyEndpointCreateDialogProps = {
   open: boolean;
   busy: boolean;
+  endpoint?: UpstreamProxyEndpoint | null;
   onOpenChange: (open: boolean) => void;
   onSubmit: (payload: UpstreamProxyEndpointCreateRequest) => Promise<unknown>;
 };
 
 type ProxyEndpointCreateFormProps = {
   busy: boolean;
+  endpoint?: UpstreamProxyEndpoint | null;
   onClose: () => void;
   onSubmit: (payload: UpstreamProxyEndpointCreateRequest) => Promise<unknown>;
 };
 
-function ProxyEndpointCreateForm({ busy, onClose, onSubmit }: ProxyEndpointCreateFormProps) {
+function ProxyEndpointCreateForm({ busy, endpoint, onClose, onSubmit }: ProxyEndpointCreateFormProps) {
   const { t } = useTranslation();
   const formSchema = z.object({
     name: z.string().trim().min(1, t("upstreamProxy.validation.nameRequired")),
@@ -59,16 +63,18 @@ function ProxyEndpointCreateForm({ busy, onClose, onSubmit }: ProxyEndpointCreat
     }, t("upstreamProxy.validation.portInvalid")),
     username: z.string(),
     password: z.string(),
+    isActive: z.boolean(),
   });
   const form = useForm<FormValues>({
     resolver: zodResolver(formSchema),
     defaultValues: {
-      name: "",
-      scheme: "http",
-      host: "",
-      port: "8080",
-      username: "",
+      name: endpoint?.name ?? "",
+      scheme: endpoint?.scheme ?? "http",
+      host: endpoint?.host ?? "",
+      port: String(endpoint?.port ?? 8080),
+      username: endpoint?.username ?? "",
       password: "",
+      isActive: endpoint?.isActive ?? true,
     },
   });
 
@@ -81,7 +87,7 @@ function ProxyEndpointCreateForm({ busy, onClose, onSubmit }: ProxyEndpointCreat
       port: Number(values.port),
       username: username ? username : null,
       password: values.password ? values.password : null,
-      isActive: true,
+      isActive: values.isActive,
     };
 
     try {
@@ -153,6 +159,19 @@ function ProxyEndpointCreateForm({ busy, onClose, onSubmit }: ProxyEndpointCreat
 
         <FormField
           control={form.control}
+          name="isActive"
+          render={({ field }) => (
+            <FormItem className="flex items-center justify-between rounded-lg border px-3 py-2">
+              <FormLabel className="mb-0">{t("common.states.active")}</FormLabel>
+              <FormControl>
+                <Switch checked={field.value} onCheckedChange={field.onChange} />
+              </FormControl>
+            </FormItem>
+          )}
+        />
+
+        <FormField
+          control={form.control}
           name="port"
           render={({ field }) => (
             <FormItem>
@@ -186,9 +205,10 @@ function ProxyEndpointCreateForm({ busy, onClose, onSubmit }: ProxyEndpointCreat
             render={({ field }) => (
               <FormItem>
 	                <FormLabel>{t("auth.login.passwordLabel")}</FormLabel>
-	                <FormControl>
+                <FormControl>
 	                  <Input {...field} type="password" autoComplete="new-password" placeholder={t("upstreamProxy.optional")} />
                 </FormControl>
+                {endpoint ? <FormDescription>{t("upstreamProxy.endpointDialog.passwordUnchanged")}</FormDescription> : null}
                 <FormMessage />
               </FormItem>
             )}
@@ -197,7 +217,7 @@ function ProxyEndpointCreateForm({ busy, onClose, onSubmit }: ProxyEndpointCreat
 
         <DialogFooter className="mt-2">
           <Button type="submit" disabled={busy || form.formState.isSubmitting}>
-	            {t("upstreamProxy.actions.createEndpoint")}
+            {endpoint ? t("common.actions.save") : t("upstreamProxy.actions.createEndpoint")}
           </Button>
         </DialogFooter>
       </form>
@@ -205,19 +225,26 @@ function ProxyEndpointCreateForm({ busy, onClose, onSubmit }: ProxyEndpointCreat
   );
 }
 
-export function ProxyEndpointCreateDialog({ open, busy, onOpenChange, onSubmit }: ProxyEndpointCreateDialogProps) {
+export function ProxyEndpointCreateDialog({ open, busy, endpoint, onOpenChange, onSubmit }: ProxyEndpointCreateDialogProps) {
   const { t } = useTranslation();
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       {open ? (
         <DialogContent className="sm:max-w-md">
           <DialogHeader>
-	            <DialogTitle>{t("upstreamProxy.endpointDialog.title")}</DialogTitle>
+            <DialogTitle>
+              {endpoint ? t("upstreamProxy.endpointDialog.editTitle") : t("upstreamProxy.endpointDialog.title")}
+            </DialogTitle>
 	            <DialogDescription>
 	              {t("upstreamProxy.endpointDialog.description")}
 	            </DialogDescription>
           </DialogHeader>
-          <ProxyEndpointCreateForm busy={busy} onClose={() => onOpenChange(false)} onSubmit={onSubmit} />
+          <ProxyEndpointCreateForm
+            busy={busy}
+            endpoint={endpoint}
+            onClose={() => onOpenChange(false)}
+            onSubmit={onSubmit}
+          />
         </DialogContent>
       ) : null}
     </Dialog>

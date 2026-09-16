@@ -1281,6 +1281,61 @@ export const handlers = [
     return HttpResponse.json(endpoint);
   }),
 
+  http.put("/api/settings/upstream-proxy/endpoints/:endpointId", async ({ params, request }) => {
+    const endpointId = String(params.endpointId);
+    const payload = await parseJsonBody(request, z.looseObject({
+      name: z.string().min(1),
+      scheme: z.enum(["http", "https", "socks5", "socks5h"]),
+      host: z.string().min(1),
+      port: z.number().int(),
+      username: z.string().nullable().optional(),
+      isActive: z.boolean(),
+    }));
+    const endpoint = state.upstreamProxyAdmin.endpoints.find((item) => item.id === endpointId);
+    if (!payload || !endpoint) {
+      return HttpResponse.json(
+        { error: { code: "proxy_endpoint_not_found", message: "Proxy endpoint not found" } },
+        { status: 404 },
+      );
+    }
+    const updated = {
+      id: endpoint.id,
+      name: payload.name,
+      scheme: payload.scheme,
+      host: payload.host,
+      port: payload.port,
+      username: payload.username ?? null,
+      isActive: payload.isActive,
+    };
+    state.upstreamProxyAdmin = {
+      ...state.upstreamProxyAdmin,
+      endpoints: state.upstreamProxyAdmin.endpoints.map((item) => item.id === endpointId ? updated : item),
+    };
+    return HttpResponse.json(updated);
+  }),
+
+  http.delete("/api/settings/upstream-proxy/endpoints/:endpointId", ({ params }) => {
+    const endpointId = String(params.endpointId);
+    const endpoint = state.upstreamProxyAdmin.endpoints.find((item) => item.id === endpointId);
+    if (!endpoint) {
+      return HttpResponse.json(
+        { error: { code: "proxy_endpoint_not_found", message: "Proxy endpoint not found" } },
+        { status: 404 },
+      );
+    }
+    if (state.upstreamProxyAdmin.pools.some((pool) => pool.endpointIds.includes(endpointId))) {
+      return HttpResponse.json(
+        { error: { code: "proxy_endpoint_in_use", message: "Remove the proxy endpoint from all pools first" } },
+        { status: 400 },
+      );
+    }
+    state.upstreamProxyAdmin = {
+      ...state.upstreamProxyAdmin,
+      endpoints: state.upstreamProxyAdmin.endpoints.filter((item) => item.id !== endpointId),
+    };
+    return new HttpResponse(null, { status: 204 });
+  }),
+
   http.post("/api/settings/upstream-proxy/endpoints/:endpointId/test", ({ params }) => {
     const endpointId = String(params.endpointId);
     const endpoint = state.upstreamProxyAdmin.endpoints.find((item) => item.id === endpointId);

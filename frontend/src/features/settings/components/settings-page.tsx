@@ -52,6 +52,8 @@ export function SettingsPage() {
   const {
     upstreamProxyQuery,
     createEndpointMutation,
+    updateEndpointMutation,
+    deleteEndpointMutation,
     createPoolMutation,
     addPoolMemberMutation,
     testEndpointMutation,
@@ -65,6 +67,8 @@ export function SettingsPage() {
   const busy =
     updateSettingsMutation.isPending ||
     createEndpointMutation.isPending ||
+    updateEndpointMutation.isPending ||
+    deleteEndpointMutation.isPending ||
     createPoolMutation.isPending ||
     addPoolMemberMutation.isPending ||
     testEndpointMutation.isPending;
@@ -81,6 +85,8 @@ export function SettingsPage() {
     getErrorMessageOrNull(upstreamProxyQuery.error) ||
     getErrorMessageOrNull(updateSettingsMutation.error) ||
     getErrorMessageOrNull(createEndpointMutation.error) ||
+    getErrorMessageOrNull(updateEndpointMutation.error) ||
+    getErrorMessageOrNull(deleteEndpointMutation.error) ||
     getErrorMessageOrNull(createPoolMutation.error) ||
     getErrorMessageOrNull(addPoolMemberMutation.error) ||
     getErrorMessageOrNull(testEndpointMutation.error);
@@ -218,6 +224,10 @@ export function SettingsPage() {
                   busy={controlsDisabled}
                   onSaveSettings={handleSave}
                   onCreateEndpoint={(payload) => createEndpointMutation.mutateAsync(payload)}
+                  onUpdateEndpoint={(endpointId, payload) =>
+                    updateEndpointMutation.mutateAsync({ endpointId, payload })
+                  }
+                  onDeleteEndpoint={(endpointId) => deleteEndpointMutation.mutateAsync(endpointId)}
                   onTestEndpoint={(endpointId) => testEndpointMutation.mutateAsync(endpointId)}
                   onCreatePool={(payload) => createPoolMutation.mutateAsync(payload)}
                   onAddPoolMember={(poolId, payload) =>
