@@ -47,6 +47,20 @@ class ModelRoutingRepository:
                 accounts.append(account_id)
         return [ModelAccountRule(model_id, account_ids) for model_id, account_ids in rules.items()]
 
+    async def list_account_models(self, account_id: str) -> list[str] | None:
+        account_exists = await self._session.scalar(
+            select(Account.id).where(Account.id == account_id, Account.delete_requested_at.is_(None))
+        )
+        if account_exists is None:
+            return None
+        return list(
+            await self._session.scalars(
+                select(ModelAccountGrant.model)
+                .where(ModelAccountGrant.account_id == account_id)
+                .order_by(ModelAccountGrant.model)
+            )
+        )
+
     async def scope(self, model: str | None, *, allow_model_less: bool = True) -> set[str] | None:
         if model is None and allow_model_less:
             return None
@@ -93,6 +107,56 @@ class ModelRoutingRepository:
                         await self._session.flush()
                     await self._session.execute(delete(ModelAccountGrant).where(ModelAccountGrant.model == model))
                     self._session.add_all(ModelAccountGrant(model=model, account_id=account_id) for account_id in ids)
+                await self._session.commit()
+        except IntegrityError as exc:
+            await self._session.rollback()
+            raise RoutingPolicyConflictError("Routing policy changed concurrently. Reload and try again.") from exc
+        except UnknownRoutingAccountError:
+            await self._session.rollback()
+            raise
+
+    async def replace_account(self, account_id: str, models: list[str]) -> None:
+        try:
+            async with sqlite_writer_section():
+                account = await self._session.scalar(
+                    select(Account)
+                    .where(Account.id == account_id, Account.delete_requested_at.is_(None))
+                    .with_for_update()
+                )
+                if account is None:
+                    raise UnknownRoutingAccountError("Unknown or deleted routing account")
+
+                selected = sorted(set(models))
+                current = set(
+                    await self._session.scalars(
+                        select(ModelAccountGrant.model)
+                        .where(ModelAccountGrant.account_id == account_id)
+                        .with_for_update()
+                    )
+                )
+                existing_policies = set(
+                    await self._session.scalars(
+                        select(ModelAccountPolicy.model).where(ModelAccountPolicy.model.in_(selected)).with_for_update()
+                    )
+                )
+                await self._session.execute(delete(ModelAccountGrant).where(ModelAccountGrant.account_id == account_id))
+                self._session.add_all(
+                    ModelAccountPolicy(model=model) for model in selected if model not in existing_policies
+                )
+                await self._session.flush()
+                self._session.add_all(ModelAccountGrant(model=model, account_id=account_id) for model in selected)
+                await self._session.flush()
+
+                affected = current | set(selected)
+                if affected:
+                    has_grants = (
+                        select(ModelAccountGrant.model)
+                        .where(ModelAccountGrant.model == ModelAccountPolicy.model)
+                        .exists()
+                    )
+                    await self._session.execute(
+                        delete(ModelAccountPolicy).where(ModelAccountPolicy.model.in_(affected), ~has_grants)
+                    )
                 await self._session.commit()
         except IntegrityError as exc:
             await self._session.rollback()

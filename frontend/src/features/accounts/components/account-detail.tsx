@@ -9,6 +9,7 @@ import { cn } from "@/lib/utils";
 import { usePrivacyStore } from "@/hooks/use-privacy";
 import { AccountActions } from "@/features/accounts/components/account-actions";
 import { AccountAccess } from "@/features/accounts/components/account-access";
+import { AccountAllowedModels } from "@/features/accounts/components/account-allowed-models";
 import { AccountProxyBinding } from "@/features/accounts/components/account-proxy-binding";
 import { AccountTokenInfo } from "@/features/accounts/components/account-token-info";
 import { AccountUsagePanel } from "@/features/accounts/components/account-usage-panel";
@@ -164,6 +165,7 @@ export function AccountDetail({
         />
       ) : null}
       <AccountAccess accountId={account.accountId} readOnly={readOnly} busy={busy} />
+      <AccountAllowedModels accountId={account.accountId} readOnly={readOnly} busy={busy} />
       <AccountUsagePanel
         account={account}
         trends={trends}

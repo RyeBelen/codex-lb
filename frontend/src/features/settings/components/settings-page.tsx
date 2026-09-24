@@ -10,7 +10,6 @@ import { ApiKeysSection } from "@/features/api-keys/components/api-keys-section"
 import { useAccounts } from "@/features/accounts/hooks/use-accounts";
 import { FirewallSection } from "@/features/firewall/components/firewall-section";
 import { ModelSourcesSettings } from "@/features/model-sources/components/model-sources-settings";
-import { ModelRoutingSettings } from "@/features/model-routing/model-routing-settings";
 import { QuotaPlannerSection } from "@/features/quota-planner/components/quota-planner-section";
 import { buildSettingsUpdateRequest } from "@/features/settings/payload";
 import { shouldExpandAdvancedSettings } from "@/features/settings/advanced-settings-deeplink";
@@ -218,11 +217,6 @@ export function SettingsPage() {
                 accountsLoading={accountsQuery.isLoading}
                 busy={controlsDisabled}
                 onSave={handleSave}
-              />
-              <ModelRoutingSettings
-                accounts={accountsQuery.data ?? []}
-                accountsReady={accountsQuery.isSuccess}
-                disabled={controlsDisabled}
               />
               {upstreamProxyQuery.data ? (
                 <UpstreamProxySettings

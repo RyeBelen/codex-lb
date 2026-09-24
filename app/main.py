@@ -986,6 +986,7 @@ def create_app() -> FastAPI:
     app.include_router(api_keys_api.router)
     app.include_router(model_sources_api.router)
     app.include_router(model_routing_api.router)
+    app.include_router(model_routing_api.account_router)
     app.include_router(health_api.router)
 
     static_dir = Path(__file__).parent / "static"

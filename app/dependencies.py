@@ -8,6 +8,7 @@ from typing import cast
 from fastapi import Depends, FastAPI, Request, WebSocket
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.openai.model_registry import get_model_registry
 from app.db.session import get_background_session, get_session
 from app.modules.accounts.auth_manager import AuthManager
 from app.modules.accounts.repository import AccountsRepository
@@ -101,7 +102,7 @@ class ModelRoutingContext:
 
 
 def get_model_routing_context(session: AsyncSession = Depends(get_session)) -> ModelRoutingContext:
-    return ModelRoutingContext(service=ModelRoutingService(ModelRoutingRepository(session)))
+    return ModelRoutingContext(service=ModelRoutingService(ModelRoutingRepository(session), get_model_registry()))
 
 
 @dataclass(slots=True)

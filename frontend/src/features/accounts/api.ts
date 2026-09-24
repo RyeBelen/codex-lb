@@ -1,6 +1,7 @@
 import { del, get, patch, post, put } from "@/lib/api-client";
 
 import {
+  AccountAllowedModelsSchema,
   AccountAccessSchema,
   AccountActionResponseSchema,
   AccountAliasRequestSchema,
@@ -45,6 +46,16 @@ export function getAccountAccess(accountId: string) {
 export function setAccountAccess(accountId: string, restricted: boolean, apiKeyIds: string[]) {
   return put(`${ACCOUNTS_BASE_PATH}/${encodeURIComponent(accountId)}/api-key-access`, AccountAccessSchema, {
     body: { restricted, apiKeyIds },
+  });
+}
+
+export function getAccountAllowedModels(accountId: string) {
+  return get(`${ACCOUNTS_BASE_PATH}/${encodeURIComponent(accountId)}/allowed-models`, AccountAllowedModelsSchema);
+}
+
+export function setAccountAllowedModels(accountId: string, allowedModels: string[]) {
+  return put(`${ACCOUNTS_BASE_PATH}/${encodeURIComponent(accountId)}/allowed-models`, AccountAllowedModelsSchema, {
+    body: { allowedModels },
   });
 }
 

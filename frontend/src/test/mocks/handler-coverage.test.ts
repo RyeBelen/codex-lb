@@ -20,8 +20,6 @@ function extractHandlerPaths(): string[] {
 // All API endpoints consumed by the frontend (method + MSW path pattern).
 // Parameterized segments use MSW `:param` syntax.
 const EXPECTED_ENDPOINTS = [
-  "GET /api/model-account-routing",
-  "PUT /api/model-account-routing",
 	// health
 	"GET /health",
 	"GET /health/ready",
@@ -38,6 +36,8 @@ const EXPECTED_ENDPOINTS = [
 	// accounts
 	"GET /api/accounts",
 	"GET /api/accounts/:accountId/api-key-access",
+	"GET /api/accounts/:accountId/allowed-models",
+	"PUT /api/accounts/:accountId/allowed-models",
 	"POST /api/accounts/import",
 	"PATCH /api/accounts/:accountId",
 	"POST /api/accounts/:accountId/pause",

@@ -326,7 +326,7 @@ type MockState = {
     }>
   >;
   modelSources: ModelSource[];
-  modelRoutingRules: Array<{ model: string; restricted: boolean; accountIds: string[] }>;
+  accountAllowedModels: Record<string, string[]>;
   firewallEntries: Array<{ ipAddress: string; createdAt: string }>;
   stickySessions: Array<{
     key: string;
@@ -363,7 +363,7 @@ function createInitialState(): MockState {
     automations: [],
     automationRuns: {},
     modelSources: createDefaultModelSources(),
-    modelRoutingRules: [],
+    accountAllowedModels: {},
     firewallEntries: [],
     stickySessions: [],
   };
@@ -849,6 +849,34 @@ export const handlers = [
 
   http.get("/api/accounts/:accountId/api-key-access", ({ params }) => {
     return HttpResponse.json({ accountId: params.accountId, restricted: false, apiKeyIds: [] });
+  }),
+
+  http.get("/api/accounts/:accountId/allowed-models", ({ params }) => {
+    const accountId = String(params.accountId);
+    return HttpResponse.json({
+      accountId,
+      allowedModels: state.accountAllowedModels[accountId] ?? [],
+      availableModels: [
+        { id: "gpt-5.1", name: "GPT 5.1" },
+        { id: "gpt-5.1-codex-mini", name: "GPT 5.1 Codex Mini" },
+      ],
+      catalogAvailable: true,
+    });
+  }),
+
+  http.put("/api/accounts/:accountId/allowed-models", async ({ params, request }) => {
+    const accountId = String(params.accountId);
+    const body = await request.json() as { allowedModels: string[] };
+    state.accountAllowedModels[accountId] = body.allowedModels;
+    return HttpResponse.json({
+      accountId,
+      allowedModels: body.allowedModels,
+      availableModels: [
+        { id: "gpt-5.1", name: "GPT 5.1" },
+        { id: "gpt-5.1-codex-mini", name: "GPT 5.1 Codex Mini" },
+      ],
+      catalogAvailable: true,
+    });
   }),
 
   http.get("/api/accounts", () => {
@@ -2159,14 +2187,6 @@ export const handlers = [
       authenticated: false,
     });
     return HttpResponse.json({ status: "ok" });
-  }),
-
-  http.get("/api/model-account-routing", () => HttpResponse.json({ rules: state.modelRoutingRules })),
-  http.put("/api/model-account-routing", async ({ request }) => {
-    const policy = await request.json() as MockState["modelRoutingRules"][number];
-    state.modelRoutingRules = state.modelRoutingRules.filter((rule) => rule.model !== policy.model);
-    if (policy.restricted) state.modelRoutingRules.push(policy);
-    return HttpResponse.json(policy);
   }),
 
   http.get("/api/models", () => {

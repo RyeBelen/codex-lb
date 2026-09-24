@@ -22,15 +22,31 @@ The system SHALL reserve selected accounts for normalized exact model IDs. An ac
 - **THEN** the request fails without inference on an account reserved for another model
 
 ### Requirement: Dashboard rule management
-Authenticated dashboard users SHALL list model reservations. Dashboard writers SHALL atomically replace a reservation, validate account IDs, and remove reservations. Invalid writes SHALL preserve the previous reservation. The settings dashboard SHALL support individual account selection, a shortcut selecting the currently listed Pro accounts, explicit save/reload, an empty selection explanation, and read-only behavior. The editor SHALL explain that selected accounts serve only their assigned models and that the model can also use other eligible accounts. The shortcut SHALL NOT automatically reserve future Pro accounts.
+Authenticated dashboard users SHALL view an account's current allowed-model selections and resolved supported subscription models from that account's detail view. Dashboard writers SHALL atomically replace all allowed-model selections for one account. No selection SHALL mean the account is unrestricted and can serve every model it otherwise supports; one or more selections SHALL restrict the account to those exact model IDs. The editor SHALL render the resolved models as checkboxes, explain empty-selection behavior, support explicit save/reload, and honor read-only access. A selected model that is no longer in the resolved catalog SHALL remain visible as unavailable and removable. When the account catalog is unavailable, the dashboard SHALL distinguish that state from an empty resolved catalog and SHALL NOT offer a write based on missing catalog evidence. The previous global Settings editor SHALL NOT be presented, while the existing model-oriented backend API SHALL remain compatible.
 
-#### Scenario: Save selected Pro accounts
-- **WHEN** a writer selects Pro accounts and saves a reservation
-- **THEN** the selected IDs persist and newly imported accounts remain unreserved
+#### Scenario: Show the resolved account catalog
+- **WHEN** an authenticated user opens an account whose model catalog is resolved
+- **THEN** the account detail shows a checkbox for each supported subscription model and checks the account's current selections
 
-#### Scenario: Reject invalid policy
-- **WHEN** a writer names an unknown or pending-deletion account, or a read-only viewer submits a policy
-- **THEN** the update fails without changing the stored reservation
+#### Scenario: Restrict one account to selected models
+- **WHEN** a dashboard writer selects Astra and Sol for an account and saves
+- **THEN** the account is atomically restricted to Astra and Sol while other accounts' selections remain unchanged
+
+#### Scenario: Clear all selections
+- **WHEN** a dashboard writer clears every model checkbox and saves
+- **THEN** all model grants for that account are removed and the account returns to ordinary eligibility for every model it supports
+
+#### Scenario: Keep stale selections visible
+- **WHEN** a selected model is absent from the account's current resolved catalog
+- **THEN** the editor shows the model as an unavailable checked selection that the writer can remove
+
+#### Scenario: Account catalog unavailable
+- **WHEN** no resolved or retained model catalog exists for the account
+- **THEN** the editor reports that the catalog is unavailable and does not allow a replacement write
+
+#### Scenario: Reject invalid account update
+- **WHEN** a writer submits a newly selected model outside the account's resolved catalog, names an unknown or pending-deletion account, or a read-only viewer submits an update
+- **THEN** the update fails without changing any stored grants
 
 ### Requirement: Fresh routing enforcement
 HTTP inference, retries, compact requests, transcription, warm-up, and subsequent requests on reused HTTP bridge and WebSocket connections SHALL check committed account reservations before upstream submission. A pinned account reserved for another model SHALL fail without transferring its account-bound state. Reservation denials SHALL NOT penalize account health. Requests already submitted SHALL retain their existing completion and settlement behavior. Realtime inference with no known model SHALL exclude reserved accounts. Model-less file operations SHALL preserve their existing authorization behavior.

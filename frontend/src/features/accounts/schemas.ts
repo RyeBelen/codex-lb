@@ -7,6 +7,19 @@ export const AccountAccessSchema = z.object({
 });
 export type AccountAccess = z.infer<typeof AccountAccessSchema>;
 
+export const AccountModelOptionSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+});
+
+export const AccountAllowedModelsSchema = z.object({
+  accountId: z.string(),
+  allowedModels: z.array(z.string()),
+  availableModels: z.array(AccountModelOptionSchema),
+  catalogAvailable: z.boolean(),
+});
+export type AccountAllowedModels = z.infer<typeof AccountAllowedModelsSchema>;
+
 const UsageTrendPointSchema = z.object({
   t: z.iso.datetime({ offset: true }),
   v: z.number(),

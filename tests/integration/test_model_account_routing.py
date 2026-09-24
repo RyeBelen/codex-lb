@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
@@ -7,6 +9,7 @@ from sqlalchemy import select
 import app.modules.proxy.service as proxy_module
 from app.core.clients.proxy import ProxyResponseError
 from app.core.errors import openai_error
+from app.core.openai.model_registry import ModelRegistrySnapshot, get_model_registry
 from app.core.openai.models import CompactResponsePayload
 from app.db.models import Account, AccountStatus, ApiKeyUsageReservation
 from app.db.session import SessionLocal
@@ -18,6 +21,32 @@ pytestmark = pytest.mark.integration
 PATH = "/api/model-account-routing"
 
 
+def _set_account_catalog(monkeypatch, catalogs: dict[str, list[tuple[str, str]]]) -> None:
+    registry = get_model_registry()
+    template = next(iter(registry.get_models_for_metadata().values()))
+    models = {
+        slug: replace(template, slug=slug, display_name=name) for entries in catalogs.values() for slug, name in entries
+    }
+    model_accounts = {
+        slug: frozenset(
+            account_id for account_id, entries in catalogs.items() if any(item[0] == slug for item in entries)
+        )
+        for slug in models
+    }
+    snapshot = ModelRegistrySnapshot(
+        models=models,
+        model_plans={slug: frozenset({"pro"}) for slug in models},
+        plan_models={"pro": frozenset(models)},
+        model_service_tier_plans={},
+        model_service_tier_accounts={},
+        account_plans={account_id: "pro" for account_id in catalogs},
+        fetched_at=0,
+        model_accounts=model_accounts,
+        account_catalogs_authoritative=True,
+    )
+    monkeypatch.setattr(registry, "_snapshot", snapshot)
+
+
 async def _rule(client, accounts, model="gpt-5.1", restricted=True):
     response = await client.put(PATH, json={"model": model, "restricted": restricted, "accountIds": accounts})
     assert response.status_code == 200, response.text
@@ -27,6 +56,108 @@ async def _rule(client, accounts, model="gpt-5.1", restricted=True):
 async def _reserve_elsewhere(client, account, model="gpt-5.1"):
     await _rule(client, [], model=model, restricted=False)
     await _rule(client, [account], model="gpt-6-astra")
+
+
+@pytest.mark.asyncio
+async def test_account_allowed_models_replace_is_atomic_and_preserves_other_accounts(async_client, monkeypatch):
+    from app.core.utils.time import utcnow
+
+    account, _, _ = await _setup(async_client)
+    other = await _import_account(async_client, "other", "other@example.com")
+    _set_account_catalog(
+        monkeypatch,
+        {
+            account: [("gpt-6-astra", "GPT-6 Astra"), ("gpt-6-sol", "GPT-6 Sol")],
+            other: [("gpt-6-astra", "GPT-6 Astra")],
+        },
+    )
+    await _rule(async_client, [account, other], model="gpt-6-astra")
+
+    path = f"/api/accounts/{account}/allowed-models"
+    assert (await async_client.get(path)).json() == {
+        "accountId": account,
+        "allowedModels": ["gpt-6-astra"],
+        "availableModels": [
+            {"id": "gpt-6-astra", "name": "GPT-6 Astra"},
+            {"id": "gpt-6-sol", "name": "GPT-6 Sol"},
+        ],
+        "catalogAvailable": True,
+    }
+
+    replaced = await async_client.put(path, json={"allowedModels": ["gpt-6-sol", "gpt-6-sol"]})
+    assert replaced.status_code == 200, replaced.text
+    assert replaced.json()["allowedModels"] == ["gpt-6-sol"]
+    assert (await async_client.get(PATH)).json()["rules"] == [
+        {"model": "gpt-6-astra", "restricted": True, "accountIds": [other]},
+        {"model": "gpt-6-sol", "restricted": True, "accountIds": [account]},
+    ]
+
+    cleared = await async_client.put(path, json={"allowedModels": []})
+    assert cleared.status_code == 200, cleared.text
+    assert cleared.json()["allowedModels"] == []
+    assert (await async_client.get(PATH)).json()["rules"] == [
+        {"model": "gpt-6-astra", "restricted": True, "accountIds": [other]}
+    ]
+    async with SessionLocal() as session:
+        stored = await session.get(Account, account)
+        stored.delete_requested_at = utcnow()
+        await session.commit()
+    assert (await async_client.get(path)).status_code == 404
+    assert (await async_client.put(path, json={"allowedModels": []})).status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_account_allowed_models_preserves_visible_stale_selection_and_rejects_new_unknown(
+    async_client, monkeypatch
+):
+    account, _, _ = await _setup(async_client)
+    await _rule(async_client, [account], model="retired-model")
+    _set_account_catalog(monkeypatch, {account: [("gpt-6-sol", "GPT-6 Sol")]})
+    path = f"/api/accounts/{account}/allowed-models"
+
+    policy = (await async_client.get(path)).json()
+    assert policy["allowedModels"] == ["retired-model"]
+    assert policy["availableModels"] == [{"id": "gpt-6-sol", "name": "GPT-6 Sol"}]
+    assert (await async_client.put(path, json={"allowedModels": ["retired-model"]})).status_code == 200
+    rejected = await async_client.put(path, json={"allowedModels": ["unknown-model"]})
+    assert rejected.status_code == 400
+    assert rejected.json()["error"]["code"] == "invalid_account_models"
+    assert (await async_client.get(path)).json()["allowedModels"] == ["retired-model"]
+    assert (await async_client.put(path, json={"allowedModels": []})).status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_account_allowed_models_distinguishes_unavailable_catalog_and_authorization(
+    async_client, app_instance, monkeypatch
+):
+    account, _, _ = await _setup(async_client)
+    _set_account_catalog(monkeypatch, {account: []})
+    path = f"/api/accounts/{account}/allowed-models"
+    empty = await async_client.get(path)
+    assert empty.status_code == 200
+    assert empty.json()["catalogAvailable"] is True
+    assert empty.json()["availableModels"] == []
+    assert (await async_client.put(path, json={"allowedModels": []})).status_code == 200
+
+    _set_account_catalog(monkeypatch, {})
+    policy = await async_client.get(path)
+    assert policy.status_code == 200
+    assert policy.json()["catalogAvailable"] is False
+    unavailable = await async_client.put(path, json={"allowedModels": []})
+    assert unavailable.status_code == 409
+    assert unavailable.json()["error"]["code"] == "account_model_catalog_unavailable"
+    assert (await async_client.get("/api/accounts/missing/allowed-models")).status_code == 404
+
+    assert (
+        await async_client.post("/api/dashboard-auth/password/setup", json={"password": "password123"})
+    ).status_code == 200
+    transport = ASGITransport(app=app_instance, client=("203.0.113.20", 50001))
+    async with AsyncClient(transport=transport, base_url="http://lb.example") as guest:
+        assert (await guest.get(path)).status_code == 401
+        assert (await guest.put(path, json={"allowedModels": []})).status_code == 401
+        await _enable_guest_access(async_client)
+        assert (await guest.get(path)).status_code == 200
+        assert (await guest.put(path, json={"allowedModels": []})).status_code == 403
 
 
 @pytest.mark.asyncio

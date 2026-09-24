@@ -7,6 +7,10 @@ vi.mock("@/features/accounts/components/account-access", () => ({
   AccountAccess: () => <section aria-label="Account API key access" />,
 }));
 
+vi.mock("@/features/accounts/components/account-allowed-models", () => ({
+  AccountAllowedModels: () => <section aria-label="Account allowed models" />,
+}));
+
 import { AccountsPage } from "@/features/accounts/components/accounts-page";
 import { useAccountQuotaDisplayStore } from "@/hooks/use-account-quota-display";
 import type { AccountSummary } from "@/features/accounts/schemas";
