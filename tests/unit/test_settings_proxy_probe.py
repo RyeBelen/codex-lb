@@ -1,13 +1,40 @@
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
 
 import app.modules.settings.api as settings_api
+from app.core.upstream_proxy import ResolvedProxyEndpoint
 
 pytestmark = pytest.mark.unit
+
+
+@pytest.mark.asyncio
+async def test_http_probe_sends_basic_auth_on_connect() -> None:
+    heads: list[bytes] = []
+
+    async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        heads.append(await reader.readuntil(b"\r\n\r\n"))
+        writer.write(b"HTTP/1.1 407 Proxy Authentication Required\r\nContent-Length: 0\r\n\r\n")
+        await writer.drain()
+        writer.close()
+
+    server = await asyncio.start_server(handle, "127.0.0.1", 0)
+    try:
+        port = server.sockets[0].getsockname()[1]
+        endpoint = ResolvedProxyEndpoint("probe", "http", "127.0.0.1", port, "u", "p")
+        with pytest.raises(httpx.ProxyError):
+            await settings_api._probe_upstream_proxy_endpoint(endpoint)
+    finally:
+        server.close()
+        await server.wait_closed()
+
+    assert heads[0].startswith(b"CONNECT chatgpt.com:443 HTTP/1.1\r\n")
+    assert b"proxy-authorization: basic dtpw\r\n" in heads[0].lower()
 
 
 @pytest.mark.asyncio

@@ -450,14 +450,33 @@ The shared upstream TCP connectors MUST configure connection keepalive of at lea
 
 When the fixed packaged `codex-lb-native-egress` executable is available, direct and account-routed Codex model-discovery, JSON/raw/multipart HTTP, Responses HTTP/SSE, and Responses or Live WebSocket calls MUST prefer it over the corresponding Python data-plane client. Python MUST retain ownership of account selection, route resolution, ordered proxy endpoint fallback, route metadata, and health classification, while each native command MUST target exactly one concrete direct or proxy endpoint. The worker MUST reuse one persistent helper generation and compatible reqwest HTTP/2 client pools across HTTP requests, and MUST multiplex concurrent HTTP and WebSocket operations without cross-delivering events. Native calls MUST preserve standard direct HTTP/HTTPS/SOCKS proxy environment resolution and `NO_PROXY` bypass behavior, and routed calls MUST use the resolved endpoint without consulting environment proxy variables. Python fallback is permitted only when the executable is absent or cannot be spawned. Once a helper process launches, a malformed, timed-out, or incompatible hello/negotiation exchange MUST fail closed without dispatching the operation to Python. A non-idempotent request, WebSocket handshake, or WebSocket frame MUST NOT fall back to Python after its native command may have been dispatched. Helper failure MUST fail operations from that generation without replay and MAY be recovered only by starting a new generation for a later operation. A confirmed pre-dispatch routed connection failure MAY use the next endpoint under the existing route policy, while a TLS verification failure or ambiguous delivery MUST NOT gain new replay eligibility.
 
-Credential-bearing routed proxy endpoints MUST use encrypted `https://`
-transport. Route resolution MUST reject a username or password on a plaintext
-`http://`, `socks5://`, or `socks5h://` endpoint before either the native helper
-or Python connector can use the URL.
+Credential-bearing routed proxy endpoints MAY use `http://` or `https://`
+transport. The dashboard MUST accept credentials on HTTP endpoints for create,
+edit, and test, and route resolution MUST pass them to the native or Python
+connector. For a credentialed HTTP proxy, the client MUST send proxy
+credentials only to the proxy during `CONNECT` to an HTTPS/WSS upstream target;
+it MUST reject plaintext HTTP/WS upstream targets before dispatch. Route
+resolution MUST continue to reject credentials on `socks5://` and `socks5h://`
+endpoints before either connector can use the URL. HTTP proxy credentials are
+not encrypted on the client-to-proxy connection.
+
+#### Scenario: Authenticated HTTP proxy reaches an HTTPS upstream
+
+- **GIVEN** a routed HTTP proxy endpoint has a username and password
+- **WHEN** the dashboard tests it or an account sends an HTTPS/WSS request
+- **THEN** the proxy receives the credentials on its CONNECT request
+- **AND** the upstream request does not receive the proxy credentials
+- **AND** no credential is exposed in the dashboard test response or transport error
+
+#### Scenario: Credentialed HTTP proxy rejects a plaintext upstream target
+
+- **GIVEN** a routed HTTP proxy endpoint has credentials
+- **WHEN** a request targets HTTP or WS upstream
+- **THEN** the request fails before any network dispatch
 
 #### Scenario: Plaintext proxy credentials fail before connector selection
 
-- **GIVEN** a routed endpoint contains credentials and uses `http://`, `socks5://`, or `socks5h://`
+- **GIVEN** a routed endpoint contains credentials and uses `socks5://` or `socks5h://`
 - **WHEN** codex-lb resolves the route for an HTTP or WebSocket operation
 - **THEN** route resolution fails closed
 - **AND** neither native nor Python egress receives the credential-bearing URL

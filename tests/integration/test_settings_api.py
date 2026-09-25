@@ -707,7 +707,7 @@ async def test_upstream_proxy_endpoint_update_preserves_password_and_invalidates
         assert row is not None
         assert TokenEncryptor().decrypt(row.password_encrypted) == "secret"
 
-    rejected = await async_client.put(
+    switched = await async_client.put(
         f"/api/settings/upstream-proxy/endpoints/{endpoint_id}",
         json={
             "name": "Proxy A edited",
@@ -719,8 +719,12 @@ async def test_upstream_proxy_endpoint_update_preserves_password_and_invalidates
             "isActive": False,
         },
     )
-    assert rejected.status_code == 400
-    assert rejected.json()["error"]["code"] == "plaintext_proxy_credentials_forbidden"
+    assert switched.status_code == 200
+    assert switched.json()["scheme"] == "http"
+    async with SessionLocal() as session:
+        row = await session.get(ProxyEndpoint, endpoint_id)
+        assert row is not None
+        assert TokenEncryptor().decrypt(row.password_encrypted) == "secret"
 
     cleared = await async_client.put(
         f"/api/settings/upstream-proxy/endpoints/{endpoint_id}",
@@ -736,7 +740,7 @@ async def test_upstream_proxy_endpoint_update_preserves_password_and_invalidates
     )
     assert cleared.status_code == 200
     assert cleared.json()["username"] is None
-    assert route_cache.invalidate.await_count == 2
+    assert route_cache.invalidate.await_count == 3
     async with SessionLocal() as session:
         row = await session.get(ProxyEndpoint, endpoint_id)
         assert row is not None
@@ -779,7 +783,8 @@ async def test_upstream_proxy_endpoint_delete_rejects_pool_members_and_deletes_u
 
 
 @pytest.mark.asyncio
-async def test_upstream_proxy_endpoint_test_probes_configured_proxy(async_client, monkeypatch):
+@pytest.mark.parametrize("scheme", ["http", "https"])
+async def test_upstream_proxy_endpoint_test_probes_configured_proxy(async_client, monkeypatch, scheme: str):
     captured: dict[str, object] = {}
 
     class _Response:
@@ -805,7 +810,7 @@ async def test_upstream_proxy_endpoint_test_probes_configured_proxy(async_client
         "/api/settings/upstream-proxy/endpoints",
         json={
             "name": "Proxy A",
-            "scheme": "https",
+            "scheme": scheme,
             "host": "proxy.internal",
             "port": 8080,
             "username": "user",
@@ -825,7 +830,7 @@ async def test_upstream_proxy_endpoint_test_probes_configured_proxy(async_client
     assert payload["error"] is None
     client_kwargs = cast(dict[str, Any], captured["client_kwargs"])
     assert captured["url"] == "https://chatgpt.com/cdn-cgi/trace"
-    assert client_kwargs["proxy"] == "https://user:secret@proxy.internal:8080"
+    assert client_kwargs["proxy"] == f"{scheme}://user:secret@proxy.internal:8080"
     assert "secret" not in str(payload)
 
 
@@ -875,8 +880,8 @@ async def test_upstream_proxy_endpoint_test_rejects_proxy_auth_response(async_cl
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("scheme", ["http", "socks5", "socks5h"])
-async def test_upstream_proxy_endpoint_create_rejects_plaintext_credentials(async_client, scheme: str):
+@pytest.mark.parametrize("scheme", ["socks5", "socks5h"])
+async def test_upstream_proxy_endpoint_create_rejects_socks_credentials(async_client, scheme: str):
     response = await async_client.post(
         "/api/settings/upstream-proxy/endpoints",
         json={

@@ -200,6 +200,33 @@ async def test_request_passes_resolver_proxy_and_builtin_fingerprint(route: Reso
 
 
 @pytest.mark.asyncio
+async def test_authenticated_http_proxy_reaches_python_and_native_transports() -> None:
+    endpoint = ResolvedProxyEndpoint("ep_1", "http", "proxy.test", 8080, "u", "p")
+    route = ResolvedUpstreamRoute("account_bound", "pool_1", endpoint)
+    session = _Session()
+    client = CodexClient(session)
+
+    await client.request("GET", "https://upstream.test", route=route)
+    await client.ws_connect("wss://upstream.test", route=route)
+
+    assert len(session.calls) == 2
+    assert all(call["proxy"] == "http://proxy.test:8080" for call in session.calls)
+    assert all(call["proxy_headers"] == {"Proxy-Authorization": _ROUTE_PROXY_BASIC_TOKEN} for call in session.calls)
+    with pytest.raises(CodexTransportError, match="https/wss upstream target"):
+        await client.request("GET", "http://upstream.test", route=route)
+    assert len(session.calls) == 2
+
+    native = _NativeClient()
+    native_client = CodexClient(_Session(), native_egress_client=cast(Any, native))
+    await native_client.request("GET", "https://upstream.test", route=route)
+    await native_client.open_ws_with_route_metadata("wss://upstream.test", route=route, compress=15)
+
+    expected_url = runtime_basic_auth_url("u", "p", "proxy.test:8080")
+    assert native.request_calls[0].proxy_url == expected_url
+    assert native.websocket_calls[0].proxy_url == expected_url
+
+
+@pytest.mark.asyncio
 async def test_routed_request_prefers_native_single_endpoint_attempt(route: ResolvedUpstreamRoute) -> None:
     session = _Session()
     native = _NativeClient()

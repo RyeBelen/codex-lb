@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from typing import Any
 from urllib.parse import quote
 
-_PLAINTEXT_SCHEMES = frozenset({"http", "socks5", "socks5h"})
+_UNSUPPORTED_CREDENTIAL_SCHEMES = frozenset({"socks5", "socks5h"})
 
 
 def _encode_basic_proxy_auth(username: str, password: str) -> str:
@@ -28,13 +28,15 @@ class ResolvedProxyEndpoint:
     username: str | None = None
     password: str | None = None
 
-    def _reject_plaintext_credentials(self) -> None:
-        if self.scheme.lower() in _PLAINTEXT_SCHEMES and (self.username is not None or self.password is not None):
-            raise ValueError("credential-bearing plaintext proxy URLs are forbidden")
+    def _reject_unsupported_credentials(self) -> None:
+        if self.scheme.lower() in _UNSUPPORTED_CREDENTIAL_SCHEMES and (
+            self.username is not None or self.password is not None
+        ):
+            raise ValueError("credential-bearing SOCKS proxy URLs are unsupported")
 
     @property
     def proxy_url(self) -> str:
-        self._reject_plaintext_credentials()
+        self._reject_unsupported_credentials()
         scheme = "socks5h" if self.scheme == "socks5" else self.scheme
         auth = ""
         if self.username:
@@ -59,7 +61,7 @@ class ResolvedProxyEndpoint:
         only on the CONNECT tunnel request, i.e. for TLS (``https``/``wss``)
         targets; callers must not use these kwargs for plaintext targets.
         """
-        self._reject_plaintext_credentials()
+        self._reject_unsupported_credentials()
         kwargs: dict[str, Any] = {"proxy": self.proxy_url_without_credentials}
         if self.username:
             kwargs["proxy_headers"] = {

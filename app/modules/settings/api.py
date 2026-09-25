@@ -324,11 +324,7 @@ async def delete_upstream_proxy_endpoint(
     context: SettingsContext = Depends(get_settings_context),
 ) -> None:
     row = (
-        (
-            await context.session.execute(
-                select(ProxyEndpoint).where(ProxyEndpoint.id == endpoint_id).with_for_update()
-            )
-        )
+        (await context.session.execute(select(ProxyEndpoint).where(ProxyEndpoint.id == endpoint_id).with_for_update()))
         .scalars()
         .one_or_none()
     )
@@ -610,9 +606,9 @@ def _proxy_endpoint_response(row: ProxyEndpoint) -> UpstreamProxyEndpointRespons
 
 
 def _validate_proxy_endpoint_credentials(scheme: str, username: str | None, has_password: bool) -> None:
-    if scheme in {"http", "socks5", "socks5h"} and (username is not None or has_password):
+    if scheme in {"socks5", "socks5h"} and (username is not None or has_password):
         raise DashboardBadRequestError(
-            "Plaintext proxies cannot carry credentials",
+            "SOCKS proxies cannot carry credentials",
             code="plaintext_proxy_credentials_forbidden",
         )
     if username is not None and ":" in username:

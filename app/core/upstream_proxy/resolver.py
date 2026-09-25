@@ -137,9 +137,7 @@ def _resolve_endpoint(endpoint: ProxyEndpoint, *, encryptor: TokenEncryptor | No
     scheme = endpoint.scheme.lower().strip()
     if scheme not in _SUPPORTED_SCHEMES:
         raise UpstreamProxyRouteError("unsupported_proxy_scheme")
-    if scheme in {"http", "socks5", "socks5h"} and (
-        endpoint.username is not None or endpoint.password_encrypted is not None
-    ):
+    if scheme in {"socks5", "socks5h"} and (endpoint.username is not None or endpoint.password_encrypted is not None):
         raise UpstreamProxyRouteError("plaintext_proxy_credentials_forbidden")
     if endpoint.username is not None and ":" in endpoint.username:
         # RFC 7617 Basic credentials cannot encode a colon in the user-id.
