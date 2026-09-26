@@ -14,7 +14,7 @@ from app.modules.model_routing.schemas import (
     ModelRoutingPolicies,
     ModelRoutingPolicy,
 )
-from app.modules.model_routing.service import AccountModelCatalogUnavailableError, UnsupportedAccountModelError
+from app.modules.model_routing.service import UnsupportedAccountModelError
 
 router = APIRouter(
     prefix="/api/model-account-routing",
@@ -72,7 +72,5 @@ async def replace_account_allowed_models(
         raise DashboardNotFoundError("Account not found", code="account_not_found") from exc
     except UnsupportedAccountModelError as exc:
         raise DashboardBadRequestError(str(exc), code="invalid_account_models") from exc
-    except AccountModelCatalogUnavailableError as exc:
-        raise DashboardConflictError(str(exc), code="account_model_catalog_unavailable") from exc
     except RoutingPolicyConflictError as exc:
         raise DashboardConflictError(str(exc), code="routing_policy_conflict") from exc

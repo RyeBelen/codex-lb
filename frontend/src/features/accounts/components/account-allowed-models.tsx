@@ -28,22 +28,11 @@ export function AccountAllowedModels({ accountId, readOnly, busy }: {
       {policy.isError ? (
         <p role="alert" className="mt-3 text-sm text-destructive">Unable to load allowed models.</p>
       ) : policy.data ? (
-        policy.data.catalogAvailable ? (
-          <AccountAllowedModelsForm
-            key={JSON.stringify(policy.data)}
-            policy={policy.data}
-            disabled={readOnly || busy}
-          />
-        ) : (
-          <div role="status" className="mt-3 space-y-2 text-sm text-muted-foreground">
-            <p>This account&apos;s model catalog is unavailable. Refresh the account catalog before changing this setting.</p>
-            {policy.data.allowedModels.length > 0 ? (
-              <ul aria-label="Current unavailable model selections" className="space-y-1">
-                {policy.data.allowedModels.map((id) => <li key={id}>Unavailable model ({id})</li>)}
-              </ul>
-            ) : null}
-          </div>
-        )
+        <AccountAllowedModelsForm
+          key={JSON.stringify(policy.data)}
+          policy={policy.data}
+          disabled={readOnly || busy}
+        />
       ) : <p role="status" className="mt-3 text-sm text-muted-foreground">Loading allowed models...</p>}
     </section>
   );
@@ -68,6 +57,11 @@ function AccountAllowedModelsForm({ policy, disabled }: {
 
   return (
     <div className="mt-3 space-y-3">
+      {!policy.catalogAvailable ? (
+        <p role="status" className="text-sm text-muted-foreground">
+          This account&apos;s model catalog is unavailable. Known models are listed when available; this account&apos;s support is unverified until its catalog refreshes.
+        </p>
+      ) : null}
       <fieldset disabled={locked} className="space-y-2">
         <legend className="sr-only">Allowed models</legend>
         <div className="max-h-56 space-y-2 overflow-y-auto">
@@ -85,7 +79,7 @@ function AccountAllowedModelsForm({ policy, disabled }: {
             <label key={id} className="flex items-center gap-2 text-sm">
               <Checkbox checked disabled={locked}
                 onCheckedChange={() => setSelected((current) => current.filter((value) => value !== id))} />
-              <span>Unavailable model ({id})</span>
+              <span>{policy.catalogAvailable ? "Unavailable model" : "Saved model"} ({id})</span>
             </label>
           ))}
         </div>

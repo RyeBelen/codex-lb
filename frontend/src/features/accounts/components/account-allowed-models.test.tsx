@@ -59,19 +59,30 @@ describe("AccountAllowedModels", () => {
     await waitFor(() => expect(saved).toEqual([{ allowedModels: [] }]));
   });
 
-  it("does not offer a save when the account catalog is unavailable or loading fails", async () => {
+  it("edits known models and saved selections while account support is unverified", async () => {
+    const user = userEvent.setup();
     const unavailable = setup({ catalogAvailable: false, allowedModels: ["retired-model"] });
     expect(await screen.findByText(/model catalog is unavailable/)).toBeVisible();
-    expect(screen.getByText("Unavailable model (retired-model)")).toBeVisible();
-    expect(screen.queryByRole("button", { name: "Save allowed models" })).not.toBeInTheDocument();
+    expect(screen.getByText(/support is unverified/)).toBeVisible();
+    await user.click(screen.getByRole("checkbox", { name: /Saved model \(retired-model\)/ }));
+    await user.click(screen.getByRole("checkbox", { name: /GPT-6 Sol/ }));
+    await user.click(screen.getByRole("button", { name: "Save allowed models" }));
+    await waitFor(() => expect(unavailable.saved).toEqual([{ allowedModels: ["gpt-6-sol"] }]));
     unavailable.unmount();
+
+    const noKnownModels = setup({ catalogAvailable: false, availableModels: [], allowedModels: ["retired-model"] });
+    const stale = await screen.findByRole("checkbox", { name: /Saved model \(retired-model\)/ });
+    await user.click(stale);
+    await user.click(screen.getByRole("button", { name: "Save allowed models" }));
+    await waitFor(() => expect(noKnownModels.saved).toEqual([{ allowedModels: [] }]));
+    noKnownModels.unmount();
 
     setup({}, false, true);
     expect(await screen.findByRole("alert")).toHaveTextContent("Unable to load allowed models");
   });
 
   it("disables controls for read-only viewers and retains edits after a save failure", async () => {
-    const readOnly = setup({}, true);
+    const readOnly = setup({ catalogAvailable: false }, true);
     expect(await screen.findByRole("checkbox", { name: /GPT-6 Astra/ })).toBeDisabled();
     expect(screen.getByRole("button", { name: "Save allowed models" })).toBeDisabled();
     readOnly.unmount();

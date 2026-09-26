@@ -131,6 +131,7 @@ async def test_account_allowed_models_distinguishes_unavailable_catalog_and_auth
     async_client, app_instance, monkeypatch
 ):
     account, _, _ = await _setup(async_client)
+    other = await _import_account(async_client, "catalog-source", "catalog-source@example.com")
     _set_account_catalog(monkeypatch, {account: []})
     path = f"/api/accounts/{account}/allowed-models"
     empty = await async_client.get(path)
@@ -139,13 +140,23 @@ async def test_account_allowed_models_distinguishes_unavailable_catalog_and_auth
     assert empty.json()["availableModels"] == []
     assert (await async_client.put(path, json={"allowedModels": []})).status_code == 200
 
-    _set_account_catalog(monkeypatch, {})
+    _set_account_catalog(monkeypatch, {other: [("gpt-6-sol", "GPT-6 Sol")]})
     policy = await async_client.get(path)
     assert policy.status_code == 200
     assert policy.json()["catalogAvailable"] is False
-    unavailable = await async_client.put(path, json={"allowedModels": []})
-    assert unavailable.status_code == 409
-    assert unavailable.json()["error"]["code"] == "account_model_catalog_unavailable"
+    assert policy.json()["availableModels"] == [{"id": "gpt-6-sol", "name": "GPT-6 Sol"}]
+    selected = await async_client.put(path, json={"allowedModels": ["gpt-6-sol"]})
+    assert selected.status_code == 200
+    assert selected.json()["allowedModels"] == ["gpt-6-sol"]
+    assert selected.json()["catalogAvailable"] is False
+    rejected = await async_client.put(path, json={"allowedModels": ["unknown-model"]})
+    assert rejected.status_code == 400
+    assert rejected.json()["error"]["code"] == "invalid_account_models"
+    assert (await async_client.get(path)).json()["allowedModels"] == ["gpt-6-sol"]
+    _set_account_catalog(monkeypatch, {})
+    assert (await async_client.get(path)).json()["availableModels"] == []
+    assert (await async_client.put(path, json={"allowedModels": ["gpt-6-sol"]})).status_code == 200
+    assert (await async_client.put(path, json={"allowedModels": []})).status_code == 200
     assert (await async_client.get("/api/accounts/missing/allowed-models")).status_code == 404
 
     assert (

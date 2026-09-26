@@ -8,10 +8,6 @@ from app.modules.model_routing.schemas import (
 )
 
 
-class AccountModelCatalogUnavailableError(ValueError):
-    pass
-
-
 class UnsupportedAccountModelError(ValueError):
     pass
 
@@ -49,9 +45,6 @@ class ModelRoutingService:
         current = await self.get_account_allowed_models(account_id)
         if current is None:
             raise UnknownRoutingAccountError("Unknown or deleted routing account")
-        if not current.catalog_available:
-            raise AccountModelCatalogUnavailableError("The account model catalog is unavailable. Reload and try again.")
-
         accepted = {model.id for model in current.available_models} | set(current.allowed_models)
         unsupported = sorted(set(allowed_models) - accepted)
         if unsupported:
@@ -64,16 +57,18 @@ class ModelRoutingService:
 
     def _resolved_account_models(self, account_id: str) -> tuple[list[AccountModelOption], bool]:
         snapshot = self._registry.get_snapshot()
-        if snapshot is None or account_id not in snapshot.account_plans:
-            return [], False
-
         models = self._registry.get_models_with_fallback()
+        if snapshot is None or account_id not in snapshot.account_plans:
+            slugs = models.keys()
+            catalog_available = False
+        else:
+            slugs = (slug for slug, account_ids in snapshot.model_accounts.items() if account_id in account_ids)
+            catalog_available = True
         options = {
             slug: AccountModelOption(id=slug, name=model.display_name or slug)
-            for slug, account_ids in snapshot.model_accounts.items()
-            if account_id in account_ids
-            and (model := models.get(slug)) is not None
+            for slug in slugs
+            if (model := models.get(slug)) is not None
             and model.source_kind == MODEL_SOURCE_KIND_SUBSCRIPTION
             and is_public_model(model, None)
         }
-        return [options[slug] for slug in sorted(options)], True
+        return [options[slug] for slug in sorted(options)], catalog_available

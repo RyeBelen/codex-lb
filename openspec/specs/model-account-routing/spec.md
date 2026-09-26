@@ -22,7 +22,7 @@ The system SHALL reserve selected accounts for normalized exact model IDs. An ac
 - **THEN** the request fails without inference on an account reserved for another model
 
 ### Requirement: Dashboard rule management
-Authenticated dashboard users SHALL view an account's current allowed-model selections and resolved supported subscription models from that account's detail view. Dashboard writers SHALL atomically replace all allowed-model selections for one account. No selection SHALL mean the account is unrestricted and can serve every model it otherwise supports; one or more selections SHALL restrict the account to those exact model IDs. The editor SHALL render the resolved models as checkboxes, explain empty-selection behavior, support explicit save/reload, and honor read-only access. A selected model that is no longer in the resolved catalog SHALL remain visible as unavailable and removable. When the account catalog is unavailable, the dashboard SHALL distinguish that state from an empty resolved catalog and SHALL NOT offer a write based on missing catalog evidence. The previous global Settings editor SHALL NOT be presented, while the existing model-oriented backend API SHALL remain compatible.
+Authenticated dashboard users SHALL view an account's current allowed-model selections and resolved supported subscription models from that account's detail view. Dashboard writers SHALL atomically replace all allowed-model selections for one account. No selection SHALL mean the account is unrestricted and can serve every model it otherwise supports; one or more selections SHALL restrict the account to those exact model IDs. The editor SHALL render the resolved models as checkboxes, explain empty-selection behavior, support explicit save/reload, and honor read-only access. A selected model that is no longer in the resolved catalog SHALL remain visible as unavailable and removable. When the account catalog is unavailable, the dashboard SHALL distinguish that state from an empty resolved catalog and SHALL offer saved selections and known public subscription models as provisional checkbox choices. The dashboard SHALL explain that those model choices are not verified for that account. The API SHALL accept previously selected IDs and known public subscription model IDs in this state and SHALL reject unknown new IDs. The previous global Settings editor SHALL NOT be presented, while the existing model-oriented backend API SHALL remain compatible.
 
 #### Scenario: Show the resolved account catalog
 - **WHEN** an authenticated user opens an account whose model catalog is resolved
@@ -42,10 +42,14 @@ Authenticated dashboard users SHALL view an account's current allowed-model sele
 
 #### Scenario: Account catalog unavailable
 - **WHEN** no resolved or retained model catalog exists for the account
-- **THEN** the editor reports that the catalog is unavailable and does not allow a replacement write
+- **THEN** the editor offers saved selections and any known public subscription models as provisional choices and permits a dashboard writer to save a changed selection
+
+#### Scenario: Reject unknown provisional model
+- **WHEN** a writer submits a new model ID outside both the account's resolved catalog and the known public subscription registry
+- **THEN** the update fails without changing stored grants
 
 #### Scenario: Reject invalid account update
-- **WHEN** a writer submits a newly selected model outside the account's resolved catalog, names an unknown or pending-deletion account, or a read-only viewer submits an update
+- **WHEN** a writer names an unknown or pending-deletion account, or a read-only viewer submits an update
 - **THEN** the update fails without changing any stored grants
 
 ### Requirement: Fresh routing enforcement
