@@ -1,10 +1,12 @@
 import { useState } from "react";
+import { Trash2 } from "lucide-react";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useForm } from "react-hook-form";
 import { useTranslation } from "react-i18next";
 import { z } from "zod";
 
 import { Button } from "@/components/ui/button";
+import { ConfirmDialog } from "@/components/confirm-dialog";
 import { Checkbox } from "@/components/ui/checkbox";
 import {
   Dialog,
@@ -16,8 +18,10 @@ import {
 } from "@/components/ui/dialog";
 import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
+import { Switch } from "@/components/ui/switch";
 import type {
   UpstreamProxyEndpoint,
+  UpstreamProxyPool,
   UpstreamProxyPoolCreateRequest,
 } from "@/features/settings/schemas";
 
@@ -29,27 +33,33 @@ export type ProxyPoolCreateDialogProps = {
   open: boolean;
   busy: boolean;
   endpoints: UpstreamProxyEndpoint[];
+  pool?: UpstreamProxyPool | null;
   onOpenChange: (open: boolean) => void;
   onSubmit: (payload: UpstreamProxyPoolCreateRequest) => Promise<unknown>;
+  onDelete: () => Promise<unknown>;
 };
 
 type ProxyPoolCreateFormProps = {
   busy: boolean;
   endpoints: UpstreamProxyEndpoint[];
+  pool?: UpstreamProxyPool | null;
   onClose: () => void;
   onSubmit: (payload: UpstreamProxyPoolCreateRequest) => Promise<unknown>;
+  onDelete: () => Promise<unknown>;
 };
 
-function ProxyPoolCreateForm({ busy, endpoints, onClose, onSubmit }: ProxyPoolCreateFormProps) {
+function ProxyPoolCreateForm({ busy, endpoints, pool, onClose, onSubmit, onDelete }: ProxyPoolCreateFormProps) {
   const { t } = useTranslation();
   const formSchema = z.object({
     name: z.string().trim().min(1, t("upstreamProxy.validation.nameRequired")),
   });
   const form = useForm<FormValues>({
     resolver: zodResolver(formSchema),
-    defaultValues: { name: "" },
+    defaultValues: { name: pool?.name ?? "" },
   });
-  const [selectedEndpointIds, setSelectedEndpointIds] = useState<Set<string>>(new Set());
+  const [selectedEndpointIds, setSelectedEndpointIds] = useState<Set<string>>(new Set(pool?.endpointIds ?? []));
+  const [isActive, setIsActive] = useState(pool?.isActive ?? true);
+  const [confirmDelete, setConfirmDelete] = useState(false);
 
   const toggleEndpoint = (endpointId: string, checked: boolean) => {
     setSelectedEndpointIds((current) => {
@@ -67,7 +77,7 @@ function ProxyPoolCreateForm({ busy, endpoints, onClose, onSubmit }: ProxyPoolCr
     const payload: UpstreamProxyPoolCreateRequest = {
       name: values.name.trim(),
       endpointIds: [...selectedEndpointIds],
-      isActive: true,
+      isActive,
     };
 
     try {
@@ -95,6 +105,11 @@ function ProxyPoolCreateForm({ busy, endpoints, onClose, onSubmit }: ProxyPoolCr
             </FormItem>
           )}
         />
+
+        <div className="flex items-center justify-between rounded-lg border px-3 py-2">
+          <span className="text-sm font-medium">{t("common.states.active")}</span>
+          <Switch checked={isActive} disabled={busy} onCheckedChange={setIsActive} aria-label={t("upstreamProxy.poolDialog.activeAria")} />
+        </div>
 
         <div className="space-y-1.5">
 	          <p className="text-sm font-medium">{t("upstreamProxy.endpoints.title")}</p>
@@ -128,24 +143,47 @@ function ProxyPoolCreateForm({ busy, endpoints, onClose, onSubmit }: ProxyPoolCr
           </div>
         </div>
 
-        <DialogFooter className="mt-2">
+        <DialogFooter className="mt-2 sm:justify-between">
+          {pool ? (
+            <Button type="button" variant="destructive" disabled={busy} onClick={() => setConfirmDelete(true)}>
+              <Trash2 className="mr-1 h-4 w-4" aria-hidden="true" />
+              {t("common.actions.delete")}
+            </Button>
+          ) : null}
           <Button type="submit" disabled={busy || form.formState.isSubmitting}>
-	            {t("upstreamProxy.actions.createPool")}
+	            {pool ? t("common.actions.save") : t("upstreamProxy.actions.createPool")}
           </Button>
         </DialogFooter>
       </form>
+      {pool ? (
+        <ConfirmDialog
+          open={confirmDelete}
+          onOpenChange={setConfirmDelete}
+          title={t("upstreamProxy.poolDeleteDialog.title")}
+          description={t("upstreamProxy.poolDeleteDialog.description", { name: pool.name })}
+          confirmLabel={t("common.actions.delete")}
+          confirmDisabled={busy}
+          keepOpenOnConfirm
+          onConfirm={() => {
+            void onDelete().then(() => {
+              setConfirmDelete(false);
+              onClose();
+            }).catch(() => {});
+          }}
+        />
+      ) : null}
     </Form>
   );
 }
 
-export function ProxyPoolCreateDialog({ open, busy, endpoints, onOpenChange, onSubmit }: ProxyPoolCreateDialogProps) {
+export function ProxyPoolCreateDialog({ open, busy, endpoints, pool, onOpenChange, onSubmit, onDelete }: ProxyPoolCreateDialogProps) {
   const { t } = useTranslation();
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       {open ? (
-        <DialogContent className="sm:max-w-md">
+        <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-md">
           <DialogHeader>
-	            <DialogTitle>{t("upstreamProxy.poolDialog.title")}</DialogTitle>
+	            <DialogTitle>{pool ? t("upstreamProxy.poolDialog.editTitle") : t("upstreamProxy.poolDialog.title")}</DialogTitle>
 	            <DialogDescription>
 	              {t("upstreamProxy.poolDialog.description")}
 	            </DialogDescription>
@@ -153,8 +191,10 @@ export function ProxyPoolCreateDialog({ open, busy, endpoints, onOpenChange, onS
           <ProxyPoolCreateForm
             busy={busy}
             endpoints={endpoints}
+            pool={pool}
             onClose={() => onOpenChange(false)}
             onSubmit={onSubmit}
+            onDelete={onDelete}
           />
         </DialogContent>
       ) : null}

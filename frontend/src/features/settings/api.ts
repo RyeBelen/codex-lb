@@ -78,6 +78,17 @@ export function createUpstreamProxyPool(payload: unknown) {
   });
 }
 
+export function updateUpstreamProxyPool(poolId: string, payload: unknown) {
+  const validated = UpstreamProxyPoolCreateRequestSchema.parse(payload);
+  return put(`${UPSTREAM_PROXY_PATH}/pools/${encodeURIComponent(poolId)}`, UpstreamProxyPoolSchema, {
+    body: validated,
+  });
+}
+
+export function deleteUpstreamProxyPool(poolId: string) {
+  return del(`${UPSTREAM_PROXY_PATH}/pools/${encodeURIComponent(poolId)}`);
+}
+
 export function addUpstreamProxyPoolMember(poolId: string, payload: unknown) {
   const validated = UpstreamProxyPoolMemberRequestSchema.parse(payload);
   return post(`${UPSTREAM_PROXY_PATH}/pools/${encodeURIComponent(poolId)}/members`, UpstreamProxyPoolSchema, {

@@ -4,9 +4,9 @@ import { toast } from "sonner";
 
 import { ApiError } from "@/lib/api-client";
 import {
-  addUpstreamProxyPoolMember,
   createUpstreamProxyEndpoint,
   createUpstreamProxyPool,
+  deleteUpstreamProxyPool,
   deleteUpstreamProxyEndpoint,
   getSettings,
   getTelemetryConsent,
@@ -14,6 +14,7 @@ import {
   putAccountProxyBinding,
   testUpstreamProxyEndpoint,
   updateUpstreamProxyEndpoint,
+  updateUpstreamProxyPool,
   updateSettings,
   updateTelemetryConsent,
 } from "@/features/settings/api";
@@ -23,7 +24,6 @@ import type {
   TelemetryConsentUpdateRequest,
   UpstreamProxyEndpointCreateRequest,
   UpstreamProxyPoolCreateRequest,
-  UpstreamProxyPoolMemberRequest,
 } from "@/features/settings/schemas";
 
 export function useSettings() {
@@ -175,16 +175,28 @@ export function useUpstreamProxyAdmin() {
     },
   });
 
-  const addPoolMemberMutation = useMutation({
-    mutationFn: ({ poolId, payload }: { poolId: string; payload: UpstreamProxyPoolMemberRequest }) =>
-      addUpstreamProxyPoolMember(poolId, payload),
+  const updatePoolMutation = useMutation({
+    mutationFn: ({ poolId, payload }: { poolId: string; payload: UpstreamProxyPoolCreateRequest }) =>
+      updateUpstreamProxyPool(poolId, payload),
     onSuccess: () => {
-      toast.success(t("upstreamProxy.toasts.memberAdded"));
+      toast.success(t("upstreamProxy.toasts.poolUpdated"));
       void queryClient.invalidateQueries({ queryKey: ["settings", "upstream-proxy"] });
       void queryClient.invalidateQueries({ queryKey: ["settings", "detail"] });
     },
     onError: (error: Error) => {
       toast.error(error.message || t("upstreamProxy.toasts.poolUpdateFailed"));
+    },
+  });
+
+  const deletePoolMutation = useMutation({
+    mutationFn: (poolId: string) => deleteUpstreamProxyPool(poolId),
+    onSuccess: () => {
+      toast.success(t("upstreamProxy.toasts.poolDeleted"));
+      void queryClient.invalidateQueries({ queryKey: ["settings", "upstream-proxy"] });
+      void queryClient.invalidateQueries({ queryKey: ["settings", "detail"] });
+    },
+    onError: (error: Error) => {
+      toast.error(error.message || t("upstreamProxy.toasts.poolDeleteFailed"));
     },
   });
 
@@ -221,7 +233,8 @@ export function useUpstreamProxyAdmin() {
     updateEndpointMutation,
     deleteEndpointMutation,
     createPoolMutation,
-    addPoolMemberMutation,
+    updatePoolMutation,
+    deletePoolMutation,
     testEndpointMutation,
     accountBindingMutation,
   };

@@ -55,7 +55,8 @@ export function SettingsPage() {
     updateEndpointMutation,
     deleteEndpointMutation,
     createPoolMutation,
-    addPoolMemberMutation,
+    updatePoolMutation,
+    deletePoolMutation,
     testEndpointMutation,
   } = useUpstreamProxyAdmin();
   const authMode = useAuthStore((state) => state.authMode);
@@ -70,7 +71,8 @@ export function SettingsPage() {
     updateEndpointMutation.isPending ||
     deleteEndpointMutation.isPending ||
     createPoolMutation.isPending ||
-    addPoolMemberMutation.isPending ||
+    updatePoolMutation.isPending ||
+    deletePoolMutation.isPending ||
     testEndpointMutation.isPending;
   const controlsDisabled = busy || !canWrite;
   const settingsLoadError = getErrorMessageOrNull(
@@ -88,7 +90,8 @@ export function SettingsPage() {
     getErrorMessageOrNull(updateEndpointMutation.error) ||
     getErrorMessageOrNull(deleteEndpointMutation.error) ||
     getErrorMessageOrNull(createPoolMutation.error) ||
-    getErrorMessageOrNull(addPoolMemberMutation.error) ||
+    getErrorMessageOrNull(updatePoolMutation.error) ||
+    getErrorMessageOrNull(deletePoolMutation.error) ||
     getErrorMessageOrNull(testEndpointMutation.error);
 
   const handleSave = async (payload: SettingsUpdateRequest) => {
@@ -230,9 +233,8 @@ export function SettingsPage() {
                   onDeleteEndpoint={(endpointId) => deleteEndpointMutation.mutateAsync(endpointId)}
                   onTestEndpoint={(endpointId) => testEndpointMutation.mutateAsync(endpointId)}
                   onCreatePool={(payload) => createPoolMutation.mutateAsync(payload)}
-                  onAddPoolMember={(poolId, payload) =>
-                    addPoolMemberMutation.mutateAsync({ poolId, payload })
-                  }
+                  onUpdatePool={(poolId, payload) => updatePoolMutation.mutateAsync({ poolId, payload })}
+                  onDeletePool={(poolId) => deletePoolMutation.mutateAsync(poolId)}
                 />
               ) : null}
               <ModelSourcesSettings disabled={controlsDisabled} />

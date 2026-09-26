@@ -1,9 +1,12 @@
+import { useState } from "react";
+import { CheckCircle2, Loader2, Trash2, XCircle } from "lucide-react";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useForm } from "react-hook-form";
 import { useTranslation } from "react-i18next";
 import { z } from "zod";
 
 import { Button } from "@/components/ui/button";
+import { ConfirmDialog } from "@/components/confirm-dialog";
 import {
   Dialog,
   DialogContent,
@@ -22,7 +25,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
-import type { UpstreamProxyEndpoint, UpstreamProxyEndpointCreateRequest } from "@/features/settings/schemas";
+import type { UpstreamProxyEndpoint, UpstreamProxyEndpointCreateRequest, UpstreamProxyEndpointTestResponse } from "@/features/settings/schemas";
 
 const SCHEME_OPTIONS = ["http", "https", "socks5", "socks5h"] as const;
 
@@ -40,8 +43,12 @@ export type ProxyEndpointCreateDialogProps = {
   open: boolean;
   busy: boolean;
   endpoint?: UpstreamProxyEndpoint | null;
+  testResult: UpstreamProxyEndpointTestResponse | null;
+  testing: boolean;
   onOpenChange: (open: boolean) => void;
   onSubmit: (payload: UpstreamProxyEndpointCreateRequest) => Promise<unknown>;
+  onTest: () => Promise<unknown>;
+  onDelete: () => Promise<unknown>;
 };
 
 type ProxyEndpointCreateFormProps = {
@@ -225,12 +232,17 @@ function ProxyEndpointCreateForm({ busy, endpoint, onClose, onSubmit }: ProxyEnd
   );
 }
 
-export function ProxyEndpointCreateDialog({ open, busy, endpoint, onOpenChange, onSubmit }: ProxyEndpointCreateDialogProps) {
+export function ProxyEndpointCreateDialog({ open, busy, endpoint, testResult, testing, onOpenChange, onSubmit, onTest, onDelete }: ProxyEndpointCreateDialogProps) {
   const { t } = useTranslation();
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const handleOpenChange = (nextOpen: boolean) => {
+    if (!nextOpen) setConfirmDelete(false);
+    onOpenChange(nextOpen);
+  };
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog open={open} onOpenChange={handleOpenChange}>
       {open ? (
-        <DialogContent className="sm:max-w-md">
+        <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-md">
           <DialogHeader>
             <DialogTitle>
               {endpoint ? t("upstreamProxy.endpointDialog.editTitle") : t("upstreamProxy.endpointDialog.title")}
@@ -242,9 +254,49 @@ export function ProxyEndpointCreateDialog({ open, busy, endpoint, onOpenChange, 
           <ProxyEndpointCreateForm
             busy={busy}
             endpoint={endpoint}
-            onClose={() => onOpenChange(false)}
+            onClose={() => handleOpenChange(false)}
             onSubmit={onSubmit}
           />
+          {endpoint ? (
+            <>
+              <div className="flex items-center justify-between gap-2 border-t pt-3">
+                <Button type="button" variant="outline" disabled={busy || testing} onClick={() => void onTest()}>
+                  {testing ? <Loader2 className="mr-1 h-4 w-4 animate-spin" aria-hidden="true" /> : null}
+                  {t("upstreamProxy.actions.test")}
+                </Button>
+                <Button type="button" variant="destructive" disabled={busy} onClick={() => setConfirmDelete(true)}>
+                  <Trash2 className="mr-1 h-4 w-4" aria-hidden="true" />
+                  {t("common.actions.delete")}
+                </Button>
+              </div>
+              {testResult ? (
+                <div className={testResult.ok ? "flex items-center gap-1 text-sm text-emerald-600" : "flex items-center gap-1 text-sm text-destructive"}>
+                  {testResult.ok ? <CheckCircle2 className="h-4 w-4" aria-hidden="true" /> : <XCircle className="h-4 w-4" aria-hidden="true" />}
+                  <span>
+                    {testResult.ok ? t("upstreamProxy.endpoints.connectionOk") : t("upstreamProxy.endpoints.connectionFailed")}
+                    {testResult.statusCode ? ` · HTTP ${testResult.statusCode}` : ""}
+                    {testResult.elapsedMs !== null && testResult.elapsedMs !== undefined ? ` · ${testResult.elapsedMs}ms` : ""}
+                    {!testResult.ok && testResult.error ? ` · ${testResult.error}` : ""}
+                  </span>
+                </div>
+              ) : null}
+              <ConfirmDialog
+                open={confirmDelete}
+                onOpenChange={setConfirmDelete}
+                title={t("upstreamProxy.deleteDialog.title")}
+                description={t("upstreamProxy.deleteDialog.description", { name: endpoint.name })}
+                confirmLabel={t("common.actions.delete")}
+                confirmDisabled={busy}
+                keepOpenOnConfirm
+                onConfirm={() => {
+                  void onDelete().then(() => {
+                    setConfirmDelete(false);
+                    handleOpenChange(false);
+                  }).catch(() => {});
+                }}
+              />
+            </>
+          ) : null}
         </DialogContent>
       ) : null}
     </Dialog>

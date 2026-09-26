@@ -26,7 +26,15 @@ from app.core.crypto import TokenEncryptor
 from app.core.exceptions import DashboardBadRequestError, DashboardSettingsConflictError
 from app.core.upstream_proxy import UpstreamProxyRouteError, resolve_proxy_endpoint
 from app.core.upstream_proxy.cache import get_upstream_route_cache
-from app.db.models import Account, AccountProxyBinding, AccountStatus, ProxyEndpoint, ProxyPool, ProxyPoolMember
+from app.db.models import (
+    Account,
+    AccountProxyBinding,
+    AccountStatus,
+    DashboardSettings,
+    ProxyEndpoint,
+    ProxyPool,
+    ProxyPoolMember,
+)
 from app.dependencies import SettingsContext, get_proxy_service_for_app, get_settings_context
 from app.modules.proxy.account_cache import (
     clear_account_routing_unavailable,
@@ -466,6 +474,104 @@ async def add_upstream_proxy_pool_member(
         is_active=pool.is_active,
         endpoint_ids=list(endpoint_ids),
     )
+
+
+@router.put("/upstream-proxy/pools/{pool_id}", response_model=UpstreamProxyPoolResponse)
+async def update_upstream_proxy_pool(
+    pool_id: str,
+    payload: UpstreamProxyPoolCreateRequest,
+    _write_access=Depends(require_dashboard_write_access),
+    context: SettingsContext = Depends(get_settings_context),
+) -> UpstreamProxyPoolResponse:
+    pool = (
+        (await context.session.execute(select(ProxyPool).where(ProxyPool.id == pool_id).with_for_update()))
+        .scalars()
+        .one_or_none()
+    )
+    if pool is None:
+        raise DashboardBadRequestError("Proxy pool not found", code="proxy_pool_not_found")
+    if len(payload.endpoint_ids) != len(set(payload.endpoint_ids)):
+        raise DashboardBadRequestError("Duplicate proxy pool endpoint", code="proxy_pool_member_duplicate")
+    await _validate_proxy_endpoint_ids(context, payload.endpoint_ids)
+
+    members = (
+        (
+            await context.session.execute(
+                select(ProxyPoolMember)
+                .where(ProxyPoolMember.pool_id == pool_id)
+                .order_by(ProxyPoolMember.sort_order, ProxyPoolMember.id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    selected = set(payload.endpoint_ids)
+    existing = {member.endpoint_id for member in members}
+    for member in members:
+        if member.endpoint_id not in selected:
+            await context.session.delete(member)
+    next_order = max((member.sort_order for member in members), default=-1) + 1
+    for endpoint_id in payload.endpoint_ids:
+        if endpoint_id not in existing:
+            context.session.add(ProxyPoolMember(pool_id=pool_id, endpoint_id=endpoint_id, sort_order=next_order))
+            next_order += 1
+    pool.name = payload.name
+    pool.is_active = payload.is_active
+    try:
+        await context.session.commit()
+    except IntegrityError as exc:
+        await context.session.rollback()
+        if _is_missing_proxy_endpoint_error(exc):
+            raise DashboardBadRequestError("Proxy endpoint not found", code="proxy_endpoint_not_found")
+        raise
+    await get_upstream_route_cache().invalidate()
+    return UpstreamProxyPoolResponse(
+        id=pool.id,
+        name=pool.name,
+        is_active=pool.is_active,
+        endpoint_ids=[member.endpoint_id for member in members if member.endpoint_id in selected]
+        + [endpoint_id for endpoint_id in payload.endpoint_ids if endpoint_id not in existing],
+    )
+
+
+@router.delete("/upstream-proxy/pools/{pool_id}", status_code=204)
+async def delete_upstream_proxy_pool(
+    pool_id: str,
+    _write_access=Depends(require_dashboard_write_access),
+    context: SettingsContext = Depends(get_settings_context),
+) -> None:
+    pool = (
+        (await context.session.execute(select(ProxyPool).where(ProxyPool.id == pool_id).with_for_update()))
+        .scalars()
+        .one_or_none()
+    )
+    if pool is None:
+        raise DashboardBadRequestError("Proxy pool not found", code="proxy_pool_not_found")
+    default_reference = (
+        await context.session.execute(
+            select(DashboardSettings.id).where(DashboardSettings.upstream_proxy_default_pool_id == pool_id).limit(1)
+        )
+    ).scalar_one_or_none()
+    account_reference = (
+        await context.session.execute(
+            select(AccountProxyBinding.id).where(AccountProxyBinding.pool_id == pool_id).limit(1)
+        )
+    ).scalar_one_or_none()
+    if default_reference is not None or account_reference is not None:
+        raise DashboardBadRequestError(
+            "Unbind the proxy pool from the default route and all accounts before deleting it",
+            code="proxy_pool_in_use",
+        )
+    await context.session.delete(pool)
+    try:
+        await context.session.commit()
+    except IntegrityError:
+        await context.session.rollback()
+        raise DashboardBadRequestError(
+            "Unbind the proxy pool from the default route and all accounts before deleting it",
+            code="proxy_pool_in_use",
+        )
+    await get_upstream_route_cache().invalidate()
 
 
 async def _validate_proxy_endpoint_ids(context: SettingsContext, endpoint_ids: list[str]) -> None:

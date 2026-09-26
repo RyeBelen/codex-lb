@@ -15,7 +15,8 @@ function renderSettings(overrides: Partial<Parameters<typeof UpstreamProxySettin
     onDeleteEndpoint: vi.fn().mockResolvedValue(undefined),
     onTestEndpoint: vi.fn().mockResolvedValue({ endpointId: "ep_primary", ok: true }),
     onCreatePool: vi.fn().mockResolvedValue(undefined),
-    onAddPoolMember: vi.fn().mockResolvedValue(undefined),
+    onUpdatePool: vi.fn().mockResolvedValue(undefined),
+    onDeletePool: vi.fn().mockResolvedValue(undefined),
     ...overrides,
   };
 
@@ -36,15 +37,15 @@ describe("UpstreamProxySettings", () => {
 
     expect(screen.getByRole("button", { name: "Add endpoint" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Create pool" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Add member" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Add member" })).not.toBeInTheDocument();
   });
 
   it("lists configured endpoints and pools in the summary", () => {
     renderSettings();
 
-    expect(screen.getByText("Primary proxy")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Primary proxy" })).toBeInTheDocument();
     expect(screen.getByText(/proxy-primary\.test:8080/)).toBeInTheDocument();
-    expect(screen.getByText("Primary pool")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Primary pool" })).toBeInTheDocument();
     expect(screen.getByText(/1 endpoint\(s\)/)).toBeInTheDocument();
   });
 
@@ -55,7 +56,7 @@ describe("UpstreamProxySettings", () => {
     expect(screen.getByText("No proxy pools configured.")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Add endpoint" })).toBeEnabled();
     expect(screen.getByRole("button", { name: "Create pool" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "Add member" })).toBeDisabled();
+    expect(screen.queryByRole("button", { name: "Add member" })).not.toBeInTheDocument();
   });
 
   it("saves routing toggles and creates endpoints from a dialog", async () => {
@@ -94,9 +95,9 @@ describe("UpstreamProxySettings", () => {
     });
   });
 
-  it("creates pools and blocks duplicate member submissions", async () => {
+  it("creates pools and edits membership in the pool modal", async () => {
     const user = userEvent.setup();
-    const { onCreatePool, onAddPoolMember } = renderSettings();
+    const { onCreatePool, onUpdatePool } = renderSettings();
 
     await user.click(screen.getByRole("button", { name: "Create pool" }));
     const poolDialog = await screen.findByRole("dialog");
@@ -117,19 +118,24 @@ describe("UpstreamProxySettings", () => {
       expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     });
 
-    await user.click(screen.getByRole("button", { name: "Add member" }));
-    const memberDialog = await screen.findByRole("dialog");
-
-    expect(within(memberDialog).getByText(/Endpoint is already in Primary pool/)).toBeInTheDocument();
-    expect(within(memberDialog).getByRole("button", { name: "Add member" })).toBeDisabled();
-    expect(onAddPoolMember).not.toHaveBeenCalled();
+    await user.click(screen.getByRole("button", { name: "Primary pool" }));
+    const editDialog = await screen.findByRole("dialog");
+    expect(within(editDialog).getByLabelText("Pool name")).toHaveValue("Primary pool");
+    expect(within(editDialog).getByRole("checkbox")).toBeChecked();
+    await user.click(within(editDialog).getByRole("checkbox"));
+    await user.click(within(editDialog).getByRole("button", { name: "Save" }));
+    await waitFor(() => expect(onUpdatePool).toHaveBeenCalledWith("pool_primary", {
+      name: "Primary pool",
+      endpointIds: [],
+      isActive: true,
+    }));
   });
 
   it("edits an existing endpoint without requiring its stored password", async () => {
     const user = userEvent.setup();
     const { onUpdateEndpoint } = renderSettings();
 
-    await user.click(screen.getByRole("button", { name: "Edit Primary proxy" }));
+    await user.click(screen.getByRole("button", { name: "Primary proxy" }));
     const dialog = await screen.findByRole("dialog");
     expect(within(dialog).getByLabelText("Name")).toHaveValue("Primary proxy");
     expect(within(dialog).getByLabelText("Host")).toHaveValue("proxy-primary.test");
@@ -157,7 +163,9 @@ describe("UpstreamProxySettings", () => {
     const user = userEvent.setup();
     const { onDeleteEndpoint } = renderSettings();
 
-    await user.click(screen.getByRole("button", { name: "Delete Primary proxy" }));
+    await user.click(screen.getByRole("button", { name: "Primary proxy" }));
+    const endpointDialog = await screen.findByRole("dialog");
+    await user.click(within(endpointDialog).getByRole("button", { name: "Delete" }));
     const dialog = await screen.findByRole("alertdialog");
     expect(within(dialog).getByText(/Remove it from every pool first/)).toBeInTheDocument();
     expect(onDeleteEndpoint).not.toHaveBeenCalled();
@@ -178,10 +186,27 @@ describe("UpstreamProxySettings", () => {
 
     renderSettings({ onTestEndpoint });
 
-    await user.click(screen.getByRole("button", { name: "Test" }));
+    await user.click(screen.getByRole("button", { name: "Primary proxy" }));
+    const dialog = await screen.findByRole("dialog");
+    await user.click(within(dialog).getByRole("button", { name: "Test" }));
 
     expect(onTestEndpoint).toHaveBeenCalledWith("ep_primary");
-    expect(await screen.findByText(/Connection ok/)).toBeInTheDocument();
-    expect(screen.getByText(/HTTP 200/)).toBeInTheDocument();
+    expect(await within(dialog).findByText(/Connection ok/)).toBeInTheDocument();
+    expect(within(dialog).getByText(/HTTP 200/)).toBeInTheDocument();
+  });
+
+  it("confirms pool deletion from the pool modal", async () => {
+    const user = userEvent.setup();
+    const { onDeletePool } = renderSettings();
+
+    await user.click(screen.getByRole("button", { name: "Primary pool" }));
+    const poolDialog = await screen.findByRole("dialog");
+    await user.click(within(poolDialog).getByRole("button", { name: "Delete" }));
+    const confirmation = await screen.findByRole("alertdialog");
+    expect(within(confirmation).getByText(/Unbind it from the default route/)).toBeInTheDocument();
+    expect(onDeletePool).not.toHaveBeenCalled();
+
+    await user.click(within(confirmation).getByRole("button", { name: "Delete" }));
+    await waitFor(() => expect(onDeletePool).toHaveBeenCalledWith("pool_primary"));
   });
 });

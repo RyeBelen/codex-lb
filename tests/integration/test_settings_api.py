@@ -6,13 +6,13 @@ from typing import Any, cast
 from unittest.mock import AsyncMock
 
 import pytest
-from sqlalchemy import text
+from sqlalchemy import select, text
 
 import app.modules.settings.api as settings_api_module
 from app.core.auth import generate_unique_account_id
 from app.core.config.settings_cache import get_settings_cache
 from app.core.crypto import TokenEncryptor
-from app.db.models import Account, AccountStatus, DashboardSettings, ProxyEndpoint
+from app.db.models import Account, AccountProxyBinding, AccountStatus, DashboardSettings, ProxyEndpoint, ProxyPoolMember
 from app.db.session import SessionLocal
 
 pytestmark = pytest.mark.integration
@@ -1003,6 +1003,130 @@ async def test_upstream_proxy_pool_rejects_missing_endpoint(async_client):
 
     assert response.status_code == 400
     assert response.json()["error"]["code"] == "proxy_endpoint_not_found"
+
+
+@pytest.mark.asyncio
+async def test_upstream_proxy_pool_update_reconciles_members_and_preserves_settings(async_client, monkeypatch):
+    endpoint_ids = []
+    for name in ("Keep", "Remove", "Add"):
+        response = await async_client.post(
+            "/api/settings/upstream-proxy/endpoints",
+            json={"name": name, "scheme": "http", "host": f"{name.lower()}.proxy", "port": 8080},
+        )
+        endpoint_ids.append(response.json()["id"])
+    keep_id, remove_id, add_id = endpoint_ids
+    created = await async_client.post(
+        "/api/settings/upstream-proxy/pools",
+        json={"name": "Original", "endpointIds": [keep_id, remove_id]},
+    )
+    pool_id = created.json()["id"]
+    async with SessionLocal() as session:
+        member = (
+            await session.execute(
+                select(ProxyPoolMember).where(
+                    ProxyPoolMember.pool_id == pool_id, ProxyPoolMember.endpoint_id == keep_id
+                )
+            )
+        ).scalar_one()
+        member.weight = 7
+        member.is_active = False
+        member.sort_order = 4
+        await session.commit()
+
+    route_cache = type("RouteCache", (), {"invalidate": AsyncMock()})()
+    monkeypatch.setattr(settings_api_module, "get_upstream_route_cache", lambda: route_cache)
+    updated = await async_client.put(
+        f"/api/settings/upstream-proxy/pools/{pool_id}",
+        json={"name": "Updated", "isActive": False, "endpointIds": [keep_id, add_id]},
+    )
+    assert updated.status_code == 200
+    assert updated.json() == {
+        "id": pool_id,
+        "name": "Updated",
+        "isActive": False,
+        "endpointIds": [keep_id, add_id],
+    }
+    route_cache.invalidate.assert_awaited_once()
+    async with SessionLocal() as session:
+        members = (
+            (await session.execute(select(ProxyPoolMember).where(ProxyPoolMember.pool_id == pool_id))).scalars().all()
+        )
+    assert {member.endpoint_id for member in members} == {keep_id, add_id}
+    retained = next(member for member in members if member.endpoint_id == keep_id)
+    assert (retained.weight, retained.is_active, retained.sort_order) == (7, False, 4)
+    added = next(member for member in members if member.endpoint_id == add_id)
+    assert (added.weight, added.is_active, added.sort_order) == (1, True, 5)
+
+    for endpoint_ids in ([keep_id, keep_id], [keep_id, "missing"]):
+        rejected = await async_client.put(
+            f"/api/settings/upstream-proxy/pools/{pool_id}",
+            json={"name": "Rejected", "endpointIds": endpoint_ids},
+        )
+        assert rejected.status_code == 400
+    admin = await async_client.get("/api/settings/upstream-proxy")
+    assert next(pool for pool in admin.json()["pools"] if pool["id"] == pool_id)["name"] == "Updated"
+    missing = await async_client.put(
+        "/api/settings/upstream-proxy/pools/missing-pool",
+        json={"name": "Missing", "endpointIds": []},
+    )
+    assert missing.status_code == 400
+    assert missing.json()["error"]["code"] == "proxy_pool_not_found"
+
+
+@pytest.mark.asyncio
+async def test_upstream_proxy_pool_delete_rejects_references_then_removes_members(async_client, monkeypatch):
+    endpoint = await async_client.post(
+        "/api/settings/upstream-proxy/endpoints",
+        json={"name": "Proxy", "scheme": "http", "host": "proxy.internal", "port": 8080},
+    )
+    pool = await async_client.post(
+        "/api/settings/upstream-proxy/pools",
+        json={"name": "Pool", "endpointIds": [endpoint.json()["id"]]},
+    )
+    pool_id = pool.json()["id"]
+    await async_client.get("/api/settings")
+    async with SessionLocal() as session:
+        settings = await session.get(DashboardSettings, 1)
+        assert settings is not None
+        settings.upstream_proxy_default_pool_id = pool_id
+        await session.commit()
+    default_rejected = await async_client.delete(f"/api/settings/upstream-proxy/pools/{pool_id}")
+    assert default_rejected.status_code == 400
+    assert default_rejected.json()["error"]["code"] == "proxy_pool_in_use"
+
+    async with SessionLocal() as session:
+        settings = await session.get(DashboardSettings, 1)
+        assert settings is not None
+        settings.upstream_proxy_default_pool_id = None
+        await session.commit()
+    account_id = await _import_account(async_client, "acc-pool-delete", "pool-delete@example.com")
+    bound = await async_client.put(
+        f"/api/settings/upstream-proxy/accounts/{account_id}/binding",
+        json={"poolId": pool_id},
+    )
+    assert bound.status_code == 200
+    account_rejected = await async_client.delete(f"/api/settings/upstream-proxy/pools/{pool_id}")
+    assert account_rejected.status_code == 400
+    assert account_rejected.json()["error"]["code"] == "proxy_pool_in_use"
+
+    # Clearing the binding is a separate operator action; deletion never does it implicitly.
+    async with SessionLocal() as session:
+        binding = (
+            await session.execute(select(AccountProxyBinding).where(AccountProxyBinding.pool_id == pool_id))
+        ).scalar_one()
+        await session.delete(binding)
+        await session.commit()
+    route_cache = type("RouteCache", (), {"invalidate": AsyncMock()})()
+    monkeypatch.setattr(settings_api_module, "get_upstream_route_cache", lambda: route_cache)
+    deleted = await async_client.delete(f"/api/settings/upstream-proxy/pools/{pool_id}")
+    assert deleted.status_code == 204
+    route_cache.invalidate.assert_awaited_once()
+    missing = await async_client.delete(f"/api/settings/upstream-proxy/pools/{pool_id}")
+    assert missing.status_code == 400
+    assert missing.json()["error"]["code"] == "proxy_pool_not_found"
+    async with SessionLocal() as session:
+        members = (await session.execute(select(ProxyPoolMember).where(ProxyPoolMember.pool_id == pool_id))).scalars()
+        assert not members.all()
 
 
 @pytest.mark.asyncio
