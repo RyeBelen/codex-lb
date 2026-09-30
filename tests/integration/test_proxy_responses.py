@@ -16,6 +16,7 @@ import app.modules.proxy.api as proxy_api_module
 import app.modules.proxy.service as proxy_module
 from app.core.auth import generate_unique_account_id
 from app.core.config.settings import Settings
+from app.core.openai.model_registry import get_model_registry
 from app.core.openai.models import CompactResponsePayload
 from app.core.openai.requests import ResponsesRequest
 from app.core.types import JsonValue
@@ -50,6 +51,17 @@ def _make_auth_json(account_id: str, email: str, *, plan_type: str = "plus") -> 
             "accountId": account_id,
         },
     }
+
+
+async def _advertise_imported_account_model(model: str) -> None:
+    registry = get_model_registry()
+    models = [registry.get_models_with_fallback()[model]]
+    async with SessionLocal() as session:
+        accounts = (await session.execute(select(Account))).scalars().all()
+    await registry.update(
+        {account.plan_type: models for account in accounts},
+        per_account_results={account.id: (account.plan_type, models) for account in accounts},
+    )
 
 
 def _extract_first_event(lines: list[str]) -> dict:
@@ -185,6 +197,7 @@ async def test_backend_responses_prohibits_fast_model_alias_priority_tier(async_
     files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
     response = await async_client.post("/api/accounts/import", files=files)
     assert response.status_code == 200
+    await _advertise_imported_account_model("gpt-5.6-sol")
 
     response = await async_client.put("/api/settings", json={"prohibitFastMode": True})
     assert response.status_code == 200
@@ -269,6 +282,7 @@ async def test_compact_responses_prohibits_explicit_priority_service_tier(async_
         files={"auth_json": ("auth.json", json.dumps(auth_json), "application/json")},
     )
     assert response.status_code == 200
+    await _advertise_imported_account_model("gpt-5.6-sol")
     response = await async_client.put("/api/settings", json={"prohibitFastMode": True})
     assert response.status_code == 200
 
@@ -313,6 +327,7 @@ async def test_chat_completions_conversion_prohibits_explicit_priority_service_t
         files={"auth_json": ("auth.json", json.dumps(auth_json), "application/json")},
     )
     assert response.status_code == 200
+    await _advertise_imported_account_model("gpt-5.6-sol")
     response = await async_client.put("/api/settings", json={"prohibitFastMode": True})
     assert response.status_code == 200
 
@@ -359,6 +374,7 @@ async def test_responses_prohibits_enforced_fast_model_alias_priority_tier(
         files={"auth_json": ("auth.json", json.dumps(auth_json), "application/json")},
     )
     assert response.status_code == 200
+    await _advertise_imported_account_model("gpt-5.6-sol")
 
     response = await async_client.put(
         "/api/settings",
@@ -407,6 +423,7 @@ async def test_backend_responses_preserves_responses_lite_tools_and_outputs(asyn
     files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
     response = await async_client.post("/api/accounts/import", files=files)
     assert response.status_code == 200
+    await _advertise_imported_account_model("gpt-5.6-sol")
 
     additional_tools = {
         "type": "additional_tools",
@@ -567,6 +584,7 @@ async def test_backend_responses_preserves_non_message_developer_directive(async
     files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
     response = await async_client.post("/api/accounts/import", files=files)
     assert response.status_code == 200
+    await _advertise_imported_account_model("gpt-5.6-sol")
 
     developer_directive = {
         "type": "future_directive",
@@ -626,6 +644,8 @@ async def test_proxy_responses_repeated_401_after_refresh_fails_over(async_clien
         files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
         response = await async_client.post("/api/accounts/import", files=files)
         assert response.status_code == 200
+
+    await _advertise_imported_account_model("gpt-5.4")
 
     captured_account_ids: list[str | None] = []
     invalidated_account_id: str | None = None
@@ -2516,6 +2536,7 @@ async def test_proxy_responses_forwards_native_codex_headers(async_client, monke
     files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
     response = await async_client.post("/api/accounts/import", files=files)
     assert response.status_code == 200
+    await _advertise_imported_account_model("gpt-5.4")
 
     seen_headers: dict[str, str] = {}
 
@@ -2559,6 +2580,7 @@ async def test_v1_responses_stream_preserves_done_text_events(async_client, monk
     files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
     response = await async_client.post("/api/accounts/import", files=files)
     assert response.status_code == 200
+    await _advertise_imported_account_model("gpt-5.2")
 
     async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **_kw):
         yield 'data: {"type":"response.output_text.delta","delta":"Hey there! "}\n\n'
@@ -2602,6 +2624,7 @@ async def test_v1_responses_stream_keeps_non_text_content_part_done_events(async
     files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
     response = await async_client.post("/api/accounts/import", files=files)
     assert response.status_code == 200
+    await _advertise_imported_account_model("gpt-5.2")
 
     async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **_kw):
         yield 'data: {"type":"response.output_text.delta","delta":"First line"}\n\n'
@@ -2641,6 +2664,7 @@ async def test_backend_responses_stream_preserves_done_text_events(async_client,
     files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
     response = await async_client.post("/api/accounts/import", files=files)
     assert response.status_code == 200
+    await _advertise_imported_account_model("gpt-5.2")
 
     async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False, **_kw):
         yield 'data: {"type":"response.output_text.delta","delta":"Hey there! "}\n\n'
@@ -2777,6 +2801,7 @@ async def test_background_json_completion_is_not_truncated(
     files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
     imported = await async_client.post("/api/accounts/import", files=files)
     assert imported.status_code == 200
+    await _advertise_imported_account_model("gpt-5.4")
 
     request_log_calls: list[dict[str, object]] = []
     error_account_ids: list[str] = []
@@ -2857,6 +2882,7 @@ async def test_background_json_ack_usage_is_finalized(async_client, monkeypatch)
     files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
     imported = await async_client.post("/api/accounts/import", files=files)
     assert imported.status_code == 200
+    await _advertise_imported_account_model("gpt-5.4")
 
     reservation = ApiKeyUsageReservationData(
         reservation_id="resv_background_json_usage",
@@ -3005,6 +3031,7 @@ async def test_background_json_malformed_ack_returns_contract_error(
     files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
     imported = await async_client.post("/api/accounts/import", files=files)
     assert imported.status_code == 200
+    await _advertise_imported_account_model("gpt-5.4")
 
     request_log_calls: list[dict[str, object]] = []
     error_account_ids: list[str] = []

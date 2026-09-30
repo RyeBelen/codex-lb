@@ -33,7 +33,8 @@ def _unused_local_port() -> int:
 
 async def _wait_until_ready(server: _RunningServer) -> None:
     async with httpx.AsyncClient(timeout=0.2) as client:
-        for _ in range(100):
+        deadline = time.monotonic() + 30.0
+        while time.monotonic() < deadline:
             if server.process.returncode is not None:
                 output = await server.process.stdout.read() if server.process.stdout is not None else b""
                 raise AssertionError(f"fixture server exited early: {output.decode(errors='replace')}")

@@ -28,6 +28,7 @@ import app.modules.proxy.service as proxy_module
 from app.core.config.settings import Settings
 from app.core.exceptions import ProxyModelNotAllowed, ProxyRateLimitError
 from app.core.multipart import MultipartPolicy
+from app.core.openai.model_registry import get_model_registry
 from app.db.models import ApiKeyUsageReservation, DashboardSettings
 from app.db.session import SessionLocal
 from app.modules.api_keys.repository import ApiKeysRepository
@@ -72,6 +73,9 @@ async def _import_account(async_client, account_id: str, email: str) -> None:
     files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
     response = await async_client.post("/api/accounts/import", files=files)
     assert response.status_code == 200
+    registry = get_model_registry()
+    models = [registry.get_models_with_fallback()["gpt-5.5"]]
+    await registry.update({"plus": models}, per_account_results={response.json()["accountId"]: ("plus", models)})
 
 
 async def _enable_api_key_auth(async_client) -> None:

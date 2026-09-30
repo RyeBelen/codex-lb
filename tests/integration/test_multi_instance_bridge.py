@@ -11,6 +11,7 @@ import pytest
 
 from app.core import shutdown as shutdown_module
 from app.core.clients.proxy import ProxyResponseError
+from app.core.openai.model_registry import get_model_registry
 from app.db.models import Account, AccountStatus
 
 if TYPE_CHECKING:
@@ -89,6 +90,9 @@ async def test_existing_live_sessions_are_reused_during_drain() -> None:
         last_used_at=time.monotonic(),
         idle_ttl_seconds=30.0,
     )
+    registry = get_model_registry()
+    models = [registry.get_models_with_fallback()["gpt-5.4"]]
+    await registry.update({"plus": models}, per_account_results={account.id: ("plus", models)})
     service._http_bridge_sessions[key] = existing
 
     shutdown_module.set_bridge_drain_active(True)

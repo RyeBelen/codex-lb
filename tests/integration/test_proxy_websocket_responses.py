@@ -4587,7 +4587,7 @@ def test_v1_responses_websocket_reuses_upstream_for_sequential_requests(app_inst
                         separators=(",", ":"),
                     ),
                 ),
-            ]
+            ],
         ],
     )
     connect_calls: list[dict[str, object]] = []

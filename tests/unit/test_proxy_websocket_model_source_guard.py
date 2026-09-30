@@ -25,7 +25,9 @@ from fastapi import WebSocket
 
 import app.modules.model_sources.selection as source_selection
 import app.modules.proxy._service.websocket.mixin as ws_mixin
+from app.modules.accounts.access_repository import AccountAccessRepository
 from app.modules.api_keys.service import ApiKeyData
+from app.modules.model_routing.repository import ModelRoutingRepository
 from app.modules.model_sources.selection import (
     effective_model_for_api_key,
     responses_model_is_source_owned,
@@ -217,6 +219,13 @@ def _completed_turn(response_id: str) -> list[SimpleNamespace]:
             }
         ),
     ]
+
+
+@pytest.fixture(autouse=True)
+def _stub_persisted_account_policy(monkeypatch: pytest.MonkeyPatch) -> None:
+    """These transport tests supply accounts directly without a policy database."""
+    monkeypatch.setattr(AccountAccessRepository, "is_denied", AsyncMock(return_value=False))
+    monkeypatch.setattr(ModelRoutingRepository, "scope", AsyncMock(return_value=None))
 
 
 class _Downstream:

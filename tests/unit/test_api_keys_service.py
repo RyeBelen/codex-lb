@@ -802,9 +802,7 @@ async def test_create_key_rejects_overlapping_model_policy() -> None:
 async def test_update_key_rejects_denied_existing_allowed_model() -> None:
     repo = _FakeApiKeysRepository()
     service = ApiKeysService(repo)
-    created = await service.create_key(
-        ApiKeyCreateData(name="existing-policy", allowed_models=["gpt-5.6-sol"])
-    )
+    created = await service.create_key(ApiKeyCreateData(name="existing-policy", allowed_models=["gpt-5.6-sol"]))
 
     with pytest.raises(ValueError, match="allowed_models and denied_models"):
         await service.update_key(

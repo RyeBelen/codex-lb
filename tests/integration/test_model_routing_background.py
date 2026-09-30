@@ -26,6 +26,7 @@ async def test_background_warmup_senders_recheck_model_policy(async_client, monk
     monkeypatch.setattr("app.modules.quota_planner.warmup.stream_responses", unexpected)
     async with SessionLocal() as session:
         account = await session.get(Account, account_id)
+        assert account is not None
         account.limit_warmup_enabled = True
         await session.commit()
         sender = StreamingLimitWarmupSender(AccountsRepository(session))
@@ -73,4 +74,5 @@ async def test_automation_ping_fails_without_inference_when_model_denied(async_c
     assert calls == []
     async with SessionLocal() as session:
         account = await session.get(Account, account_id)
+        assert account is not None
         assert account.status == AccountStatus.ACTIVE

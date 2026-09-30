@@ -100,6 +100,7 @@ async def test_account_allowed_models_replace_is_atomic_and_preserves_other_acco
     ]
     async with SessionLocal() as session:
         stored = await session.get(Account, account)
+        assert stored is not None
         stored.delete_requested_at = utcnow()
         await session.commit()
     assert (await async_client.get(path)).status_code == 404
@@ -415,6 +416,7 @@ async def test_pending_deletion_remains_denied(async_client):
     await _rule(async_client, [account])
     async with SessionLocal() as session:
         row = await session.get(Account, account)
+        assert row is not None
         row.delete_requested_at = utcnow()
         await session.commit()
         assert await ModelRoutingRepository(session).scope("gpt-5.1") == set()
@@ -444,6 +446,7 @@ async def test_revocation_during_retry_preserves_health_and_settles_usage(async_
             await session.scalars(select(ApiKeyUsageReservation).where(ApiKeyUsageReservation.status == "reserved"))
         )
         stored = await session.get(Account, account)
+        assert stored is not None
         assert stored.status == AccountStatus.ACTIVE
         assert stored.deactivation_reason is None
 

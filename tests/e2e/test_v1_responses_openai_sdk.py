@@ -317,14 +317,14 @@ async def sdk_client(
     await setup_dashboard_password(e2e_client)
     await enable_api_key_auth(e2e_client)
     created = await create_api_key(e2e_client, name="e2e-sdk-key")
-    await import_test_account(e2e_client, account_id="acc_e2e_sdk", email="e2e-sdk@example.com")
+    account_id = await import_test_account(e2e_client, account_id="acc_e2e_sdk", email="e2e-sdk@example.com")
     # Populate the model registry so the proxy accepts the model name.
     registry = get_model_registry()
     snapshot = {
         "plus": [_make_upstream_model(DEFAULT_MODEL)],
         "pro": [_make_upstream_model(DEFAULT_MODEL)],
     }
-    result = registry.update(snapshot)
+    result = registry.update(snapshot, per_account_results={account_id: ("plus", snapshot["plus"])})
     if hasattr(result, "__await__"):
         await result
     # Reuse the same ASGI app that e2e_client built, wrapped for httpx2.

@@ -521,8 +521,10 @@ async def test_stream_pinned_previsible_close_exhaustion_surfaces_stream_incompl
             yield ""
         return
 
+    real_sleep = proxy_module.asyncio.sleep
+
     async def fake_sleep(delay: float) -> None:
-        pass
+        await real_sleep(0)
 
     monkeypatch.setattr(proxy_module.ProxyService, "_resolve_websocket_previous_response_owner", fake_owner)
     monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)

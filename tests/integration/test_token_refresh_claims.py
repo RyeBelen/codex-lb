@@ -26,6 +26,7 @@ from app.core.auth import refresh as refresh_module
 from app.core.auth.refresh import RefreshError, TokenRefreshResult
 from app.core.balancer import AccountState, select_account
 from app.core.crypto import TokenEncryptor
+from app.core.openai.model_registry import get_model_registry
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountRefreshClaim, AccountStatus, StickySession, StickySessionKind
 from app.db.session import SessionLocal
@@ -76,6 +77,16 @@ async def _create_account(account_id: str, *, refresh_token: str = "refresh-old"
             )
         )
         await session.commit()
+
+
+async def _advertise_imported_account_model() -> None:
+    registry = get_model_registry()
+    models = [registry.get_models_with_fallback()["gpt-5.4"]]
+    async with SessionLocal() as session:
+        account_ids = (await session.execute(select(Account.id))).scalars().all()
+    await registry.update(
+        {"plus": models}, per_account_results={account_id: ("plus", models) for account_id in account_ids}
+    )
 
 
 async def _insert_claim(account_id: str, *, claimed_by: str, expires_in_seconds: float) -> None:
@@ -1194,6 +1205,8 @@ async def test_proxy_401_with_foreign_claim_fails_over_without_reauth_write(asyn
 
     monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
 
+    await _advertise_imported_account_model()
+
     async with async_client.stream(
         "POST",
         "/backend-api/codex/responses",
@@ -1299,6 +1312,8 @@ async def test_proxy_preflight_claim_timeout_fails_over_and_releases_lease(async
         )
 
     monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    await _advertise_imported_account_model()
 
     async with async_client.stream(
         "POST",
@@ -1413,6 +1428,8 @@ async def test_proxy_preflight_permanent_refresh_releases_lease_before_failover(
 
     monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
 
+    await _advertise_imported_account_model()
+
     async with async_client.stream(
         "POST",
         "/backend-api/codex/responses",
@@ -1525,6 +1542,8 @@ async def test_proxy_post_401_permanent_refresh_releases_lease_before_failover(a
 
     monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
 
+    await _advertise_imported_account_model()
+
     async with async_client.stream(
         "POST",
         "/backend-api/codex/responses",
@@ -1603,6 +1622,8 @@ async def test_proxy_preflight_claim_timeout_exhaustion_reports_upstream_unavail
         )
 
     monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    await _advertise_imported_account_model()
 
     async with async_client.stream(
         "POST",
@@ -1712,6 +1733,8 @@ async def test_proxy_pinned_stream_claim_timeout_stays_on_owner_and_reports_upst
 
     monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
 
+    await _advertise_imported_account_model()
+
     async with async_client.stream(
         "POST",
         "/backend-api/codex/responses",
@@ -1806,6 +1829,8 @@ async def test_proxy_post_401_forced_refresh_claim_timeout_exhaustion_reports_up
         yield ""  # pragma: no cover - makes this an async generator
 
     monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    await _advertise_imported_account_model()
 
     async with async_client.stream(
         "POST",
@@ -1927,6 +1952,8 @@ async def test_proxy_pinned_stream_post_401_claim_timeout_stays_on_owner_and_rep
         yield ""  # pragma: no cover - makes this an async generator
 
     monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    await _advertise_imported_account_model()
 
     async with async_client.stream(
         "POST",
@@ -2764,6 +2791,8 @@ async def test_proxy_preflight_genuine_transport_error_penalizes_account(async_c
 
     monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
 
+    await _advertise_imported_account_model()
+
     async with async_client.stream(
         "POST",
         "/backend-api/codex/responses",
@@ -2839,6 +2868,8 @@ async def test_proxy_post_401_forced_refresh_genuine_transport_error_penalizes_a
         yield ""  # pragma: no cover - makes this an async generator
 
     monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    await _advertise_imported_account_model()
 
     async with async_client.stream(
         "POST",
@@ -2929,6 +2960,8 @@ async def test_proxy_preflight_genuine_transport_error_releases_lease_before_fai
         )
 
     monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    await _advertise_imported_account_model()
 
     async with async_client.stream(
         "POST",
@@ -3035,6 +3068,8 @@ async def test_proxy_post_401_forced_refresh_genuine_transport_error_releases_le
         )
 
     monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+
+    await _advertise_imported_account_model()
 
     async with async_client.stream(
         "POST",

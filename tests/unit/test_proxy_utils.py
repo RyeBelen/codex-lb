@@ -64,9 +64,11 @@ from app.core.utils.sse import parse_sse_data_json
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus, ModelSource, StickySessionKind
 from app.modules.accounts import auth_manager as auth_manager_module
+from app.modules.accounts.access_repository import AccountAccessRepository
 from app.modules.accounts.repository import AccountsRepository
 from app.modules.api_keys.repository import ApiKeysRepository
 from app.modules.api_keys.service import ApiKeyData, ApiKeyUsageReservationData
+from app.modules.model_routing.repository import ModelRoutingRepository
 from app.modules.proxy import affinity as proxy_affinity
 from app.modules.proxy import api as proxy_api
 from app.modules.proxy import helpers as proxy_helpers_module
@@ -124,6 +126,21 @@ def _share_proxy_dashboard_caps_with_load_balancer(monkeypatch: pytest.MonkeyPat
             return await proxy_service.get_settings_cache().get()
 
     monkeypatch.setattr(load_balancer_module, "get_settings_cache", lambda: _SettingsCache())
+
+
+@pytest.fixture(autouse=True)
+def _allow_default_proxy_test_routing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep proxy unit tests independent of persisted access/catalog state."""
+
+    registry = SimpleNamespace(
+        plan_types_for_model=lambda _model: None,
+        is_suppressed_model=lambda _model: False,
+    )
+    monkeypatch.setattr(AccountAccessRepository, "denied_account_ids", AsyncMock(return_value=set()))
+    monkeypatch.setattr(AccountAccessRepository, "is_denied", AsyncMock(return_value=False))
+    monkeypatch.setattr(ModelRoutingRepository, "scope", AsyncMock(return_value=None))
+    monkeypatch.setattr(load_balancer_module, "get_model_registry", lambda: registry)
+    monkeypatch.setattr(proxy_support, "get_model_registry", lambda: registry)
 
 
 class _ScriptedDownstreamWebSocket:

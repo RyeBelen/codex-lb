@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+from dataclasses import replace
 from typing import cast
 
 import pytest
@@ -9,6 +10,7 @@ from fastapi.responses import JSONResponse
 
 import app.modules.proxy.api as proxy_api_module
 import app.modules.proxy.service as proxy_module
+from app.core.openai.model_registry import get_model_registry
 from app.core.openai.requests import ResponsesRequest
 
 pytestmark = pytest.mark.integration
@@ -41,6 +43,10 @@ async def _import_account(async_client, account_id: str, email: str) -> None:
     files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
     response = await async_client.post("/api/accounts/import", files=files)
     assert response.status_code == 200
+    registry = get_model_registry()
+    models = [registry.get_models_with_fallback()[slug] for slug in ("gpt-5.2", "gpt-5.6-sol")]
+    models = [replace(model, raw={**model.raw, "service_tiers": [{"slug": "priority"}]}) for model in models]
+    await registry.update({"plus": models}, per_account_results={response.json()["accountId"]: ("plus", models)})
 
 
 def _completed_event(response_id: str) -> str:

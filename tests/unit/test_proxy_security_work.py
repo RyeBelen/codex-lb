@@ -11,6 +11,8 @@ import anyio
 import pytest
 from fastapi import WebSocket
 
+from app.modules.accounts.access_repository import AccountAccessRepository
+from app.modules.model_routing.repository import ModelRoutingRepository
 from app.modules.proxy import service as proxy_service
 from app.modules.proxy._service.support import (
     _websocket_request_can_replay_before_visible_output,
@@ -208,6 +210,8 @@ def test_http_bridge_buffers_entire_reasoning_prelude_before_security_decision()
 async def test_direct_websocket_security_replay_reacquires_create_admission(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(AccountAccessRepository, "is_denied", AsyncMock(return_value=False))
+    monkeypatch.setattr(ModelRoutingRepository, "scope", AsyncMock(return_value=None))
     settings = _make_proxy_settings()
     settings.stream_idle_timeout_seconds = 300.0
     settings.proxy_downstream_websocket_idle_timeout_seconds = 120.0

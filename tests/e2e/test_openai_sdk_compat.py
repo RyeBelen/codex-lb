@@ -274,7 +274,7 @@ async def sdk_client(
     await setup_dashboard_password(e2e_client)
     await enable_api_key_auth(e2e_client)
     created = await create_api_key(e2e_client, name="e2e-sdk-compat")
-    await import_test_account(
+    account_id = await import_test_account(
         e2e_client,
         account_id="acc_e2e_compat",
         email="e2e-compat@example.com",
@@ -307,7 +307,7 @@ async def sdk_client(
             ),
         ],
     }
-    result = registry.update(snapshot)
+    result = registry.update(snapshot, per_account_results={account_id: ("plus", snapshot["plus"])})
     if hasattr(result, "__await__"):
         await result
 

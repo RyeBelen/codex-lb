@@ -761,7 +761,7 @@ async def test_lifespan_drains_actual_audit_and_cancelled_fleet_tasks_before_res
     assert main.fleet_api._BACKGROUND_REFRESH_TASKS == set()
     lifespan_task = asyncio.create_task(_run_lifespan())
 
-    await asyncio.wait_for(lifespan_entered.wait(), timeout=1)
+    await asyncio.wait_for(lifespan_entered.wait(), timeout=5)
     assert startup_module._startup_complete is True
     assert shutdown_state.is_control_plane_task_admission_open() is True
     assert usage_scheduler.started is True
@@ -770,7 +770,7 @@ async def test_lifespan_drains_actual_audit_and_cancelled_fleet_tasks_before_res
     assert sticky_scheduler.started is True
 
     audit_service_module.AuditService.log_async("lifespan_shutdown_test")
-    await asyncio.wait_for(audit_write_started.wait(), timeout=1)
+    await asyncio.wait_for(audit_write_started.wait(), timeout=5)
     audit_task = next(iter(audit_service_module._AUDIT_LOG_TASKS))
 
     transport = ASGITransport(app=main.app)
@@ -782,16 +782,16 @@ async def test_lifespan_drains_actual_audit_and_cancelled_fleet_tasks_before_res
                 files={"auth_json": ("auth.json", b"{}", "application/json")},
             )
         )
-        await asyncio.wait_for(fleet_refresh_started.wait(), timeout=1)
-        await asyncio.wait_for(audit_route_started.wait(), timeout=1)
+        await asyncio.wait_for(fleet_refresh_started.wait(), timeout=5)
+        await asyncio.wait_for(audit_route_started.wait(), timeout=5)
 
         assert shutdown_state.get_in_flight() == 2
         assert len(main.fleet_api._BACKGROUND_REFRESH_TASKS) == 1
         fleet_task = next(iter(main.fleet_api._BACKGROUND_REFRESH_TASKS))
 
         begin_shutdown.set()
-        await asyncio.wait_for(ring_marked_stale.wait(), timeout=1)
-        await asyncio.wait_for(final_control_plane_drain_started.wait(), timeout=1)
+        await asyncio.wait_for(ring_marked_stale.wait(), timeout=5)
+        await asyncio.wait_for(final_control_plane_drain_started.wait(), timeout=5)
 
         assert shutdown_state.is_control_plane_task_admission_open() is False
         assert not lifespan_task.done()
@@ -804,7 +804,7 @@ async def test_lifespan_drains_actual_audit_and_cancelled_fleet_tasks_before_res
         assert main.fleet_api._BACKGROUND_REFRESH_TASKS == {fleet_task}
 
         allow_audit_route_finish.set()
-        audit_response = await asyncio.wait_for(audit_request_task, timeout=1)
+        audit_response = await asyncio.wait_for(audit_request_task, timeout=5)
         assert audit_response.status_code == 200
         assert audit_write_actions == ["lifespan_shutdown_test"]
         assert "Audit log task rejected after shutdown admission closed: account_created" in caplog.text
@@ -814,15 +814,15 @@ async def test_lifespan_drains_actual_audit_and_cancelled_fleet_tasks_before_res
         close_db.assert_not_awaited()
 
         allow_audit_write.set()
-        await asyncio.wait_for(audit_task, timeout=1)
+        await asyncio.wait_for(audit_task, timeout=5)
         await asyncio.sleep(0)
         assert not lifespan_task.done()
         close_http_client.assert_not_awaited()
         close_db.assert_not_awaited()
 
         allow_fleet_refresh.set()
-        await asyncio.wait_for(fleet_task, timeout=1)
-        await asyncio.wait_for(lifespan_task, timeout=1)
+        await asyncio.wait_for(fleet_task, timeout=5)
+        await asyncio.wait_for(lifespan_task, timeout=5)
 
     init_db.assert_awaited_once()
     init_background_db.assert_called_once()

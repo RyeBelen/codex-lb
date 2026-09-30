@@ -24,7 +24,7 @@ from sqlalchemy import select, update
 import app.modules.proxy.load_balancer as load_balancer_module
 import app.modules.proxy.service as proxy_module
 from app.core.config.settings import Settings
-from app.core.openai.model_registry import ModelRegistry
+from app.core.openai.model_registry import ModelRegistry, get_model_registry
 from app.core.utils.request_id import (
     reset_request_id,
     reset_request_scope_id,
@@ -74,6 +74,15 @@ async def _cleanup_http_bridge_sessions(app_instance):
     for inflight_future in inflight_sessions:
         if not inflight_future.done():
             inflight_future.cancel()
+
+
+@pytest.fixture
+def synthetic_bridge_catalog(monkeypatch):
+    # Synthetic sessions omit persisted catalogs; these tests cover session coordination.
+    monkeypatch.setattr(
+        "app.modules.proxy._service.http_bridge.helpers._http_bridge_session_supports_service_tier",
+        lambda *args, **kwargs: True,
+    )
 
 
 def _encode_jwt(payload: dict) -> str:
@@ -150,6 +159,12 @@ async def _import_account(async_client, account_id: str, email: str, *, plan_typ
     response = await async_client.post("/api/accounts/import", files=files)
     assert response.status_code == 200
     return response.json()["accountId"]
+
+
+async def _advertise_account_models(account_id: str, *slugs: str) -> None:
+    registry = get_model_registry()
+    models = [replace(registry.get_models_with_fallback()["gpt-5.4"], slug=slug) for slug in slugs]
+    await registry.update({"plus": models}, per_account_results={account_id: ("plus", models)})
 
 
 async def _get_account(account_id: str) -> Account:
@@ -3040,7 +3055,11 @@ async def test_v1_responses_forwards_hard_continuation_with_canonical_prompt_cac
 
 
 @pytest.mark.asyncio
-async def test_v1_responses_http_bridge_waits_for_inflight_recreation_on_missing_turn_state_alias(app_instance):
+async def test_v1_responses_http_bridge_waits_for_inflight_recreation_on_missing_turn_state_alias(
+    app_instance,
+    monkeypatch,
+    synthetic_bridge_catalog,
+):
     service = get_proxy_service_for_app(app_instance)
     service._http_bridge_sessions.clear()
     service._http_bridge_turn_state_index.clear()
@@ -3283,7 +3302,9 @@ async def test_v1_responses_http_bridge_turn_state_alias_respects_api_key_isolat
 
 @pytest.mark.asyncio
 async def test_v1_responses_http_bridge_closes_disallowed_session_before_owner_mismatch_retry(
-    app_instance, monkeypatch
+    app_instance,
+    monkeypatch,
+    synthetic_bridge_catalog,
 ):
     _install_bridge_settings_with_limits(
         monkeypatch,
@@ -3951,6 +3972,7 @@ async def test_v1_responses_http_bridge_reconnect_uses_refreshed_api_key_assignm
         "acc_http_bridge_assignment_refresh",
         "http-bridge-assignment-refresh@example.com",
     )
+    await _advertise_account_models(account_id, "gpt-5.4")
     account = await _get_account(account_id)
     service = get_proxy_service_for_app(app_instance)
     selection_assigned_account_ids: list[list[str]] = []
@@ -4051,6 +4073,10 @@ async def test_v1_responses_http_bridge_reconnect_uses_refreshed_api_key_assignm
         idle_ttl_seconds=120.0,
         max_sessions=8,
     )
+
+    # Complete the first handoff before testing a later request with refreshed assignments.
+    assert bridge_session.unanchored_reservation_id is not None
+    _release_http_bridge_unanchored_handoff(bridge_session, request_scope_id=bridge_session.unanchored_reservation_id)
 
     reused_session = await service._get_or_create_http_bridge_session(
         key,
@@ -6804,6 +6830,7 @@ async def test_v1_responses_http_bridge_reuses_session_across_model_change_for_p
         "acc_http_bridge_model_change",
         "http-bridge-model-change@example.com",
     )
+    await _advertise_account_models(account_id, "gpt-5.1", "gpt-5.4")
     account = await _get_account(account_id)
     fake_upstream = _FakeBridgeUpstreamWebSocket()
     connect_calls: list[tuple[str | None, str | None]] = []
@@ -10769,6 +10796,7 @@ async def test_codex_responses_http_bridge_replaces_retired_gate_without_client_
         "acc-http-bridge-retired-gate-replace",
         "http-bridge-retired-gate-replace@example.com",
     )
+    await _advertise_account_models(account_id, "gpt-5.6-sol")
     account = await _get_account(account_id)
     service = get_proxy_service_for_app(app_instance)
     replacement_upstream = _FakeBridgeUpstreamWebSocket()
@@ -11114,7 +11142,9 @@ async def test_v1_responses_http_bridge_creates_different_session_keys_in_parall
 
 
 @pytest.mark.asyncio
-async def test_v1_responses_http_bridge_singleflights_same_session_key_during_creation(app_instance, monkeypatch):
+async def test_v1_responses_http_bridge_singleflights_same_session_key_during_creation(
+    app_instance, monkeypatch, synthetic_bridge_catalog
+):
     service = get_proxy_service_for_app(app_instance)
     service._http_bridge_sessions.clear()
     service._http_bridge_inflight_sessions.clear()
@@ -11660,6 +11690,7 @@ async def test_v1_responses_http_bridge_reserved_handoff_forks_before_submit(
 async def test_v1_responses_http_bridge_reused_unanchored_refresh_reserves_canonical_handoff(
     app_instance,
     monkeypatch,
+    synthetic_bridge_catalog,
 ):
     service = get_proxy_service_for_app(app_instance)
     service._http_bridge_sessions.clear()
@@ -11754,6 +11785,7 @@ async def test_v1_responses_http_bridge_reused_unanchored_refresh_reserves_canon
 async def test_v1_responses_http_bridge_cancellation_during_durable_refresh_releases_reservation(
     app_instance,
     monkeypatch,
+    synthetic_bridge_catalog,
 ):
     service = get_proxy_service_for_app(app_instance)
     service._http_bridge_sessions.clear()
@@ -12065,7 +12097,9 @@ async def test_v1_responses_http_bridge_forks_follower_when_account_assignment_c
 
 
 @pytest.mark.asyncio
-async def test_v1_responses_http_bridge_singleflights_stale_session_replacement(app_instance, monkeypatch):
+async def test_v1_responses_http_bridge_singleflights_stale_session_replacement(
+    app_instance, monkeypatch, synthetic_bridge_catalog
+):
     service = get_proxy_service_for_app(app_instance)
     service._http_bridge_sessions.clear()
     service._http_bridge_inflight_sessions.clear()

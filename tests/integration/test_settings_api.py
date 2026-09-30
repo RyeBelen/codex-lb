@@ -705,6 +705,7 @@ async def test_upstream_proxy_endpoint_update_preserves_password_and_invalidates
     async with SessionLocal() as session:
         row = await session.get(ProxyEndpoint, endpoint_id)
         assert row is not None
+        assert row.password_encrypted is not None
         assert TokenEncryptor().decrypt(row.password_encrypted) == "secret"
 
     switched = await async_client.put(
@@ -724,6 +725,7 @@ async def test_upstream_proxy_endpoint_update_preserves_password_and_invalidates
     async with SessionLocal() as session:
         row = await session.get(ProxyEndpoint, endpoint_id)
         assert row is not None
+        assert row.password_encrypted is not None
         assert TokenEncryptor().decrypt(row.password_encrypted) == "secret"
 
     cleared = await async_client.put(

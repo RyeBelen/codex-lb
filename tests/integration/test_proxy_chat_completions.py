@@ -9,7 +9,8 @@ from starlette.responses import JSONResponse
 
 import app.modules.proxy.api as proxy_api
 import app.modules.proxy.service as proxy_module
-from app.db.models import ApiKeyUsageReservation
+from app.core.openai.model_registry import get_model_registry
+from app.db.models import Account, ApiKeyUsageReservation
 from app.db.session import SessionLocal
 
 pytestmark = pytest.mark.integration
@@ -37,6 +38,17 @@ def _make_auth_json(account_id: str, email: str) -> dict:
     }
 
 
+async def _advertise_imported_account_model(model: str) -> None:
+    registry = get_model_registry()
+    models = [registry.get_models_with_fallback()[model]]
+    async with SessionLocal() as session:
+        accounts = (await session.execute(select(Account))).scalars().all()
+    await registry.update(
+        {account.plan_type: models for account in accounts},
+        per_account_results={account.id: (account.plan_type, models) for account in accounts},
+    )
+
+
 @pytest.mark.asyncio
 async def test_v1_chat_completions_stream(async_client, monkeypatch):
     email = "chatstream@example.com"
@@ -45,6 +57,7 @@ async def test_v1_chat_completions_stream(async_client, monkeypatch):
     files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
     response = await async_client.post("/api/accounts/import", files=files)
     assert response.status_code == 200
+    await _advertise_imported_account_model("gpt-5.2")
 
     async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
         yield 'data: {"type":"response.output_text.delta","delta":"hi"}\n\n'
@@ -69,6 +82,7 @@ async def test_v1_chat_completions_stream_truncated_eof_emits_error_and_done(asy
     files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
     imported = await async_client.post("/api/accounts/import", files=files)
     assert imported.status_code == 200
+    await _advertise_imported_account_model("gpt-5.2")
 
     async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
         del payload, headers, access_token, account_id, base_url, raise_for_status
@@ -98,6 +112,7 @@ async def test_v1_chat_completions_stream_terminal_error_without_payload_uses_de
     files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
     imported = await async_client.post("/api/accounts/import", files=files)
     assert imported.status_code == 200
+    await _advertise_imported_account_model("gpt-5.2")
 
     async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
         del payload, headers, access_token, account_id, base_url, raise_for_status
@@ -123,6 +138,7 @@ async def test_v1_chat_completions_omits_synthesized_tools(async_client, monkeyp
     files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
     response = await async_client.post("/api/accounts/import", files=files)
     assert response.status_code == 200
+    await _advertise_imported_account_model("gpt-5.2")
 
     seen_payload: dict[str, object] = {}
 
@@ -247,6 +263,7 @@ async def test_v1_chat_completions_non_stream_forces_stream(async_client, monkey
     files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
     response = await async_client.post("/api/accounts/import", files=files)
     assert response.status_code == 200
+    await _advertise_imported_account_model("gpt-5.2")
 
     observed_stream: dict[str, bool | None] = {"value": None}
 
@@ -275,6 +292,7 @@ async def test_v1_chat_completions_non_stream_truncated_eof_returns_502(async_cl
     files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
     imported = await async_client.post("/api/accounts/import", files=files)
     assert imported.status_code == 200
+    await _advertise_imported_account_model("gpt-5.2")
 
     async def passthrough_probe(stream, **_kwargs):
         return stream, None
@@ -308,6 +326,7 @@ async def test_v1_chat_completions_non_stream_rate_limit_closes_stream_and_retur
     files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
     imported = await async_client.post("/api/accounts/import", files=files)
     assert imported.status_code == 200
+    await _advertise_imported_account_model("gpt-5.2")
 
     settings = await async_client.put(
         "/api/settings",
@@ -372,6 +391,7 @@ async def test_v1_chat_completions_non_stream_deduplicates_tool_call_snapshots(a
     files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
     response = await async_client.post("/api/accounts/import", files=files)
     assert response.status_code == 200
+    await _advertise_imported_account_model("gpt-5.2")
 
     async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
         yield (
@@ -420,6 +440,7 @@ async def test_v1_chat_completions_stream_deduplicates_tool_call_snapshots(async
     files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
     response = await async_client.post("/api/accounts/import", files=files)
     assert response.status_code == 200
+    await _advertise_imported_account_model("gpt-5.2")
 
     async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
         yield (
@@ -486,6 +507,7 @@ async def test_v1_chat_completions_stream_skips_incompatible_snapshot_rewrites(
     files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
     response = await async_client.post("/api/accounts/import", files=files)
     assert response.status_code == 200
+    await _advertise_imported_account_model("gpt-5.2")
 
     async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
         yield (
@@ -545,6 +567,7 @@ async def test_v1_chat_completions_stream_preserves_tool_call_delta_before_failu
     files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
     response = await async_client.post("/api/accounts/import", files=files)
     assert response.status_code == 200
+    await _advertise_imported_account_model("gpt-5.2")
 
     async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
         yield (
@@ -604,6 +627,7 @@ async def test_v1_chat_completions_stream_returns_json_for_startup_failure(async
     files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
     response = await async_client.post("/api/accounts/import", files=files)
     assert response.status_code == 200
+    await _advertise_imported_account_model("gpt-5.2")
 
     async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
         yield 'event: response.created\ndata: {"type":"response.created","response":{"id":"resp_1"}}\n\n'
@@ -638,6 +662,7 @@ async def test_v1_chat_completions_cursor_context_limit_returns_usage_stream(asy
     files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
     response = await async_client.post("/api/accounts/import", files=files)
     assert response.status_code == 200
+    await _advertise_imported_account_model("gpt-5.2")
 
     async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
         yield 'event: response.created\ndata: {"type":"response.created","response":{"id":"resp_1"}}\n\n'
@@ -685,6 +710,7 @@ async def test_v1_chat_completions_cursor_context_limit_non_stream_returns_json(
     files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
     response = await async_client.post("/api/accounts/import", files=files)
     assert response.status_code == 200
+    await _advertise_imported_account_model("gpt-5.2")
 
     async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
         yield 'event: response.created\ndata: {"type":"response.created","response":{"id":"resp_1"}}\n\n'
@@ -728,6 +754,7 @@ async def test_v1_chat_completions_stream_include_usage(async_client, monkeypatc
     files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
     response = await async_client.post("/api/accounts/import", files=files)
     assert response.status_code == 200
+    await _advertise_imported_account_model("gpt-5.2")
 
     async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
         yield 'data: {"type":"response.output_text.delta","delta":"hi"}\n\n'

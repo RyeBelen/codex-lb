@@ -10,6 +10,7 @@ import pytest
 from httpx import ASGITransport
 
 import app.modules.proxy.service as proxy_module
+from app.core.openai.model_registry import get_model_registry
 
 pytestmark = pytest.mark.integration
 
@@ -93,6 +94,9 @@ async def test_openai_client_responses_stream_backend_codex_base_url(app_instanc
         files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
         response = await admin_client.post("/api/accounts/import", files=files)
         assert response.status_code == 200
+        registry = get_model_registry()
+        models = [registry.get_models_with_fallback()["gpt-5.5"]]
+        await registry.update({"plus": models}, per_account_results={response.json()["accountId"]: ("plus", models)})
 
     async with httpx2.AsyncClient(
         transport=httpx2.ASGITransport(app=app_instance),
@@ -129,6 +133,9 @@ async def test_openai_client_chat_completions_create(app_instance, monkeypatch):
         files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
         response = await admin_client.post("/api/accounts/import", files=files)
         assert response.status_code == 200
+        registry = get_model_registry()
+        models = [registry.get_models_with_fallback()["gpt-5.2"]]
+        await registry.update({"plus": models}, per_account_results={response.json()["accountId"]: ("plus", models)})
 
     async with httpx2.AsyncClient(
         transport=httpx2.ASGITransport(app=app_instance), base_url="http://testserver/v1"

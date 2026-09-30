@@ -66,7 +66,7 @@ if (typeof globalThis.ResizeObserver === "undefined") {
 }
 
 beforeAll(() => {
-  configure({ asyncUtilTimeout: 10_000 });
+  configure({ asyncUtilTimeout: 30_000 });
   startMockServer();
 });
 

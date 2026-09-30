@@ -165,7 +165,7 @@ def create_api_key():
 
 @pytest.fixture
 def import_test_account():
-    async def _import(client: AsyncClient, *, account_id: str, email: str) -> None:
+    async def _import(client: AsyncClient, *, account_id: str, email: str) -> str:
         files = {
             "auth_json": (
                 "auth.json",
@@ -175,20 +175,26 @@ def import_test_account():
         }
         response = await client.post("/api/accounts/import", files=files)
         assert response.status_code == 200
+        return response.json()["accountId"]
 
     return _import
 
 
 @pytest.fixture
 def populate_test_registry():
-    async def _populate(models: Sequence[str] | None = None) -> list[str]:
+    async def _populate(models: Sequence[str] | None = None, *, account_ids: Sequence[str] = ()) -> list[str]:
         model_ids = list(models or [DEFAULT_MODEL])
         registry = get_model_registry()
         snapshot = {
             "plus": [_make_upstream_model(slug) for slug in model_ids],
             "pro": [_make_upstream_model(slug) for slug in model_ids],
         }
-        await _maybe_await(registry.update(snapshot))
+        await _maybe_await(
+            registry.update(
+                snapshot,
+                per_account_results={account_id: ("plus", snapshot["plus"]) for account_id in account_ids},
+            )
+        )
         return model_ids
 
     return _populate

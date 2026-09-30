@@ -16,6 +16,7 @@ async def test_proxy_chat_completions_flow(
     enable_api_key_auth,
     create_api_key,
     import_test_account,
+    populate_test_registry,
 ):
     await setup_dashboard_password(client)
     await enable_api_key_auth(client)
@@ -26,11 +27,12 @@ async def test_proxy_chat_completions_flow(
             {"limitType": "total_tokens", "limitWindow": "weekly", "maxValue": 1000},
         ],
     )
-    await import_test_account(
+    account_id = await import_test_account(
         client,
         account_id="acc_e2e_proxy",
         email="e2e-proxy@example.com",
     )
+    await populate_test_registry(account_ids=[account_id])
 
     async def fake_stream(payload, headers, access_token, account_id, base_url=None, raise_for_status=False):
         yield 'data: {"type":"response.output_text.delta","delta":"hi"}\n\n'

@@ -13,12 +13,21 @@ from app.core.crypto import TokenEncryptor
 from app.core.openai.requests import ResponsesRequest
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus
+from app.modules.accounts.access_repository import AccountAccessRepository
+from app.modules.model_routing.repository import ModelRoutingRepository
 from app.modules.proxy import service as proxy_service
 from app.modules.proxy.load_balancer import AccountSelection
 from app.modules.proxy.repo_bundle import ProxyRepoFactory, ProxyRepositories
 from app.modules.proxy.service import ProxyService
 
 pytestmark = pytest.mark.unit
+
+
+@pytest.fixture(autouse=True)
+def _stub_persisted_account_policy(monkeypatch: pytest.MonkeyPatch) -> None:
+    """These transport tests supply accounts directly without a policy database."""
+    monkeypatch.setattr(AccountAccessRepository, "is_denied", AsyncMock(return_value=False))
+    monkeypatch.setattr(ModelRoutingRepository, "scope", AsyncMock(return_value=None))
 
 
 class _SettingsCache:

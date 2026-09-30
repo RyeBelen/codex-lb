@@ -179,8 +179,10 @@ def test_realtime_revocation_blocks_frames_and_reattachment(app_instance, monkey
         assert created.status_code == 201, created.text
         released.clear()
         with client.websocket_connect(path, headers=headers) as ws:
-            send = ws.send_bytes if binary else ws.send_text
-            send(b"first" if binary else "first")
+            if binary:
+                ws.send_bytes(b"first")
+            else:
+                ws.send_text("first")
             assert ws.receive_text() == "accepted"
             if restriction == "model":
                 assert (
@@ -190,7 +192,10 @@ def test_realtime_revocation_blocks_frames_and_reattachment(app_instance, monkey
                     == 200
                 )
             assert client.put(access_path, json=revoked).status_code == 200
-            send(b"forbidden" if binary else "forbidden")
+            if binary:
+                ws.send_bytes(b"forbidden")
+            else:
+                ws.send_text("forbidden")
             closed = ws.receive()
             assert closed["type"] == "websocket.close"
             assert len(upstream.frames) == 1

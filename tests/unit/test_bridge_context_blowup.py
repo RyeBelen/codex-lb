@@ -307,6 +307,10 @@ class TestRetryHelperPreservesPreviousResponseId:
         send_text = AsyncMock()
         session.upstream = cast(Any, SimpleNamespace(send_text=send_text, close=AsyncMock()))
         monkeypatch.setattr(service, "_reconnect_http_bridge_session", AsyncMock())
+        require_access = AsyncMock()
+        monkeypatch.setattr(
+            "app.modules.proxy._service.http_bridge.request_submit.require_account_access", require_access
+        )
 
         result = await service._retry_http_bridge_request_on_fresh_upstream(
             session=session,
@@ -316,6 +320,7 @@ class TestRetryHelperPreservesPreviousResponseId:
         )
 
         assert result is True
+        require_access.assert_awaited_once_with("acc-1", request_state.api_key, model="gpt-5.4")
         send_text.assert_awaited_once()
         send_text_await = send_text.await_args
         assert send_text_await is not None

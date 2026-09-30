@@ -17,11 +17,20 @@ from app.core import shutdown as shutdown_state
 from app.core.clients.proxy_websocket import UpstreamWebSocket
 from app.core.utils.time import utcnow
 from app.db.models import Account
+from app.modules.accounts.access_repository import AccountAccessRepository
 from app.modules.api_keys.service import ApiKeyData, ApiKeyUsageReservationData
+from app.modules.model_routing.repository import ModelRoutingRepository
 from app.modules.proxy import service as proxy_service
 from app.modules.proxy._service.websocket import mixin as websocket_mixin
 
 pytestmark = pytest.mark.unit
+
+
+@pytest.fixture(autouse=True)
+def _stub_persisted_account_policy(monkeypatch: pytest.MonkeyPatch) -> None:
+    """These transport tests supply accounts directly without a policy database."""
+    monkeypatch.setattr(AccountAccessRepository, "is_denied", AsyncMock(return_value=False))
+    monkeypatch.setattr(ModelRoutingRepository, "scope", AsyncMock(return_value=None))
 
 
 class _RequestLogsRecorder:

@@ -63,6 +63,20 @@ async def _import_account(async_client, account_id: str, email: str) -> str:
     return response.json()["accountId"]
 
 
+async def _advertise_imported_account_model() -> None:
+    from app.core.openai.model_registry import get_model_registry
+    from app.db.models import Account
+
+    registry = get_model_registry()
+    models = [registry.get_models_with_fallback()["gpt-5.2"]]
+    async with SessionLocal() as session:
+        accounts = (await session.execute(select(Account))).scalars().all()
+    await registry.update(
+        {account.plan_type: models for account in accounts},
+        per_account_results={account.id: (account.plan_type, models) for account in accounts},
+    )
+
+
 @pytest.mark.asyncio
 async def test_backend_files_create_forwards_payload_and_returns_upstream_json(async_client, monkeypatch):
     await _import_account(async_client, "acc_files_create", "files-create@example.com")
@@ -770,6 +784,7 @@ async def test_v1_responses_file_id_pin_overrides_prompt_cache_key(async_client,
     await _import_account(async_client, "acc_pck_a", "pck-a@example.com")
     await _import_account(async_client, "acc_pck_b", "pck-b@example.com")
 
+    await _advertise_imported_account_model()
     create_account_holder: dict[str, str] = {}
     stream_account_ids: list[str] = []
 
@@ -887,6 +902,7 @@ async def test_backend_responses_file_pin_does_not_rewrite_existing_thread_row(
         file_owner_chatgpt_id,
         "file-pin-file-owner@example.com",
     )
+    await _advertise_imported_account_model()
     process_session = "file-pin-process"
     thread_headers = {"session-id": process_session, "thread-id": "file-pin-thread"}
     sibling_headers = {"session-id": process_session, "thread-id": "file-pin-sibling"}

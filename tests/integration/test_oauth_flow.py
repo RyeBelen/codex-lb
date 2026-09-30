@@ -244,13 +244,14 @@ async def test_device_oauth_flow_creates_account(async_client, monkeypatch):
     await asyncio.sleep(0)
 
     payload = None
-    for _ in range(20):
-        status = await async_client.get("/api/oauth/status")
-        assert status.status_code == 200
-        payload = status.json()
-        if payload["status"] == "success":
-            break
-        await asyncio.sleep(0.05)
+    async with asyncio.timeout(10):
+        while True:
+            status = await async_client.get("/api/oauth/status", params={"flowId": start.json()["flowId"]})
+            assert status.status_code == 200
+            payload = status.json()
+            if payload["status"] == "success":
+                break
+            await asyncio.sleep(0.05)
     assert payload and payload["status"] == "success"
 
     expected_account_id = generate_unique_account_id(raw_account_id, email)

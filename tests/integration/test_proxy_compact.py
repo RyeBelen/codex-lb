@@ -3,6 +3,7 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
+from dataclasses import replace
 from datetime import timedelta, timezone
 from types import SimpleNamespace
 from typing import cast
@@ -16,8 +17,10 @@ import app.modules.proxy.service as proxy_module
 from app.core.auth import generate_unique_account_id
 from app.core.clients.proxy import ProxyResponseError
 from app.core.errors import openai_error
+from app.core.openai.model_registry import get_model_registry
 from app.core.openai.models import CompactResponsePayload, OpenAIResponsePayload
 from app.core.openai.requests import ResponsesCompactRequest
+from app.core.types import JsonValue
 from app.core.utils.time import utcnow
 from app.db.models import Account, AccountStatus, StickySessionKind
 from app.db.session import SessionLocal
@@ -31,15 +34,24 @@ from tests.integration.compact_test_helpers import _make_auth_json
 pytestmark = pytest.mark.integration
 
 
+async def _advertise_imported_account_model(model: str) -> None:
+    registry = get_model_registry()
+    models = [replace(registry.get_models_with_fallback()["gpt-5.4"], slug=model)]
+    async with SessionLocal() as session:
+        accounts = (await session.execute(select(Account))).scalars().all()
+    await registry.update(
+        {account.plan_type: models for account in accounts},
+        per_account_results={account.id: (account.plan_type, models) for account in accounts},
+    )
+
+
 @pytest.mark.asyncio
 async def test_proxy_compact_forwarded_bridge_settlement_failure_surfaces_code_and_releases_reservation(
     async_client,
     monkeypatch,
 ):
-    """A forwarded owner must not report compact success when its sole API-key
-    usage settlement fails. After cleanup-ready, the receiver keeps HTTP 200
-    and surfaces `usage_settlement_failed` on the SSE body so origin cannot
-    replay. A fresh repository still releases the held quota."""
+    """A forwarded trigger keeps its upstream lifecycle when API-key usage
+    settlement fails, and a fresh repository still releases the held quota."""
     from app.core.config.settings import get_settings
     from app.core.openai.requests import ResponsesCompactRequest, ResponsesRequest
     from app.db.models import ApiKeyUsageReservation
@@ -118,29 +130,34 @@ async def test_proxy_compact_forwarded_bridge_settlement_failure_surfaces_code_a
         context=context,
     )
 
-    compact_calls: list[str | None] = []
+    stream_calls: list[tuple[list[object], str | None]] = []
 
-    async def fake_compact(payload, request_headers, access_token, account_id):
-        del payload, request_headers, access_token
-        compact_calls.append(account_id)
-        return CompactResponsePayload.model_validate(
-            {
-                "object": "response.compaction",
+    async def fake_stream(payload, request_headers, access_token, account_id, **kwargs):
+        del request_headers, access_token, kwargs
+        stream_calls.append((cast(list[object], payload.to_payload()["input"]), account_id))
+        compaction_item: dict[str, JsonValue] = {
+            "id": "cmp_forwarded_settlement_failure",
+            "type": "compaction",
+            "status": "completed",
+            "encrypted_content": "enc_forwarded_settlement_failure",
+        }
+        completed_event: dict[str, JsonValue] = {
+            "type": "response.completed",
+            "sequence_number": 7,
+            "response": {
+                "id": "resp_forwarded_settlement_failure",
+                "object": "response",
+                "status": "completed",
                 "model": compact_model.model,
-                "output": [
-                    {
-                        "id": "cmp_forwarded_settlement_failure",
-                        "type": "compaction",
-                        "encrypted_content": "enc_forwarded_settlement_failure",
-                    }
-                ],
-                "usage": {
-                    "input_tokens": 7,
-                    "output_tokens": 3,
-                    "total_tokens": 10,
-                },
-            }
-        )
+                "output": [compaction_item],
+                "usage": {"input_tokens": 7, "output_tokens": 3, "total_tokens": 10},
+            },
+        }
+        yield proxy_module.format_sse_event(completed_event)
+
+    async def fail_compact(*args, **kwargs):
+        del args, kwargs
+        pytest.fail("terminal compaction triggers must use the Responses stream")
 
     finalize_attempts: list[str] = []
 
@@ -150,7 +167,8 @@ async def test_proxy_compact_forwarded_bridge_settlement_failure_surfaces_code_a
         raise RuntimeError("compact settlement persistence failed")
 
     handle_stream_error = AsyncMock(return_value={"failure_class": "upstream"})
-    monkeypatch.setattr(proxy_module, "core_compact_responses", fake_compact)
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fake_stream)
+    monkeypatch.setattr(proxy_module, "core_compact_responses", fail_compact)
     monkeypatch.setattr(ApiKeysService, "finalize_usage_reservation", fail_finalize)
     monkeypatch.setattr(proxy_module.ProxyService, "_handle_stream_error", handle_stream_error)
 
@@ -162,9 +180,16 @@ async def test_proxy_compact_forwarded_bridge_settlement_failure_surfaces_code_a
 
     assert response.status_code == 200, response.text
     assert "text/event-stream" in response.headers.get("content-type", "")
-    assert "response.failed" in response.text
-    assert "usage_settlement_failed" in response.text
-    assert compact_calls == [raw_account_id]
+    assert "response.completed" in response.text
+    assert stream_calls == [
+        (
+            [{"role": "user", "content": "hello"}, {"type": "compaction_trigger"}],
+            raw_account_id,
+        )
+    ]
+    assert "cmp_forwarded_settlement_failure" in response.text
+    assert '"status":"completed"' in response.text
+    assert "enc_forwarded_settlement_failure" in response.text
     assert finalize_attempts == [reservation.reservation_id]
     handle_stream_error.assert_not_awaited()
 
@@ -360,6 +385,7 @@ async def test_proxy_compact_preserves_historical_code_mode_side_effect_pair_bef
     files = {"auth_json": ("auth.json", json.dumps(_make_auth_json(raw_account_id, email)), "application/json")}
     response = await async_client.post("/api/accounts/import", files=files)
     assert response.status_code == 200
+    await _advertise_imported_account_model("gpt-5.6-sol")
 
     seen_payloads: list[dict[str, object]] = []
 
@@ -421,6 +447,7 @@ async def test_proxy_compact_omits_oversized_optional_tool_tail_before_upstream(
         files={"auth_json": ("auth.json", json.dumps(_make_auth_json(raw_account_id, email)), "application/json")},
     )
     assert response.status_code == 200
+    await _advertise_imported_account_model("gpt-5.6-sol")
 
     seen_payloads: list[dict[str, object]] = []
 
@@ -724,6 +751,7 @@ async def test_proxy_compact_normalizes_summary_output_for_codex_remote_v2(async
     files = {"auth_json": ("auth.json", json.dumps(auth_json), "application/json")}
     response = await async_client.post("/api/accounts/import", files=files)
     assert response.status_code == 200
+    await _advertise_imported_account_model("gpt-5.5")
 
     async def fake_compact(payload, headers, access_token, account_id):
         del payload, headers, access_token, account_id
@@ -1336,6 +1364,7 @@ async def test_backend_compact_permanent_forced_refresh_failure_fails_over(async
     monkeypatch.setattr(proxy_module.ProxyService, "_ensure_fresh_with_budget", fake_ensure_fresh)
     monkeypatch.setattr(proxy_module, "core_compact_responses", fake_compact)
 
+    await _advertise_imported_account_model("gpt-5.6-sol")
     payload = {"model": "gpt-5.6-sol", "instructions": "hi", "input": []}
     response = await async_client.post("/backend-api/codex/responses/compact", json=payload)
 
@@ -1565,35 +1594,19 @@ async def test_proxy_compact_preflight_permanent_refresh_settles_reservation(asy
 
 @pytest.mark.asyncio
 async def test_proxy_compact_forwarded_bridge_preflight_budget_exhausted_settles_reservation(async_client, monkeypatch):
-    """Regression (route-level, forwarded bridge path): a compact request that
-    reaches the OWNER instance via the internal bridge forward — where
-    ``owns_reservation`` is false so ``compact_responses`` is the SOLE settler —
-    and whose preflight budget is exhausted MUST settle (release) the API-key
-    usage reservation before the forwarded stream emits the terminal
-    ``response.failed`` / ``upstream_request_timeout`` event, so held API-key
-    quota is not leaked.
+    """A forwarded trigger whose stream budget is exhausted releases its
+    API-key usage reservation before emitting the terminal timeout event.
 
     This drives the REAL external surface, not a handcrafted service call: it
     POSTs a signed forwarded request to the internal bridge endpoint
     (``/internal/bridge/responses``) carrying a real ``ApiKeyUsageReservation``
     (the reservation the ORIGIN instance created via ``_enforce_request_limits``,
     reproduced here through the api-keys service). ``internal_bridge_responses``
-    parses the forward, sets ``skip_limit_enforcement`` + the
-    ``api_key_reservation_override``, and ``_stream_responses`` extracts the
-    terminal ``compaction_trigger`` and calls ``compact_responses`` with
-    ``owns_reservation`` false — so ``_compact_or_stream_responses``'s ``finally``
-    does NOT release the reservation and ``compact_responses`` alone must settle
-    it. On this forwarded streaming surface the owner reports the failure as the
-    terminal SSE event rather than a direct JSON ``502`` envelope, but the
-    settlement invariant is the same: pre-fix the budget-exhausted terminal
-    raised via ``_raise_proxy_budget_exhausted`` without settling (through the
-    outer ``except ProxyResponseError`` handler and the log-only ``finally``),
-    leaving the reservation row ``reserved`` (leaked held quota); post-fix the
-    row is ``released``. PR #1254 fixed the sibling transport-failure /
-    permanent-refresh preflight raises but left the budget-exhausted terminal
-    out of scope; this completes that invariant.
+    parses the forward, sets ``skip_limit_enforcement`` and the reservation
+    override, and forwards the terminal ``compaction_trigger`` unchanged through
+    the Responses stream. The receiver owns settlement after handoff, so the row
+    must be ``released`` when the stream reports budget exhaustion.
     """
-    import app.modules.proxy._service.compact as compact_module
     from app.core.config.settings import get_settings
     from app.core.openai.requests import ResponsesCompactRequest, ResponsesRequest
     from app.db.models import ApiKeyUsageReservation
@@ -1611,9 +1624,8 @@ async def test_proxy_compact_forwarded_bridge_preflight_budget_exhausted_settles
     )
     assert response.status_code == 200
 
-    # Enable API-key auth so the owner instance validates the forwarded key and
-    # compact_responses receives a non-None api_key (otherwise the settle no-ops
-    # and there is no reservation to leak).
+    # Enable API-key auth so the owner validates the forwarded key and receives
+    # the reservation that it must settle.
     settings_resp = await async_client.put(
         "/api/settings",
         json={
@@ -1654,9 +1666,8 @@ async def test_proxy_compact_forwarded_bridge_preflight_budget_exhausted_settles
         assert row.status == "reserved"
 
     # Build the signed forward the origin would send to this (owner) instance: a
-    # ResponsesRequest whose input ends with a compaction_trigger (so the owner
-    # extracts the compact payload), targeting this instance, carrying the
-    # reservation override (owns_reservation=false on the owner).
+    # ResponsesRequest whose input ends with a compaction_trigger, targeting
+    # this instance and carrying the reservation override.
     forwarded_payload = ResponsesRequest.model_validate(
         {
             "model": "gpt-5.1",
@@ -1682,11 +1693,23 @@ async def test_proxy_compact_forwarded_bridge_preflight_budget_exhausted_settles
         context=context,
     )
 
-    # Force the compact preflight budget to read as exhausted (account selection
-    # uses the real service.py deadline, so a healthy account is still selected;
-    # the first compact-module budget check then trips the budget-exhausted
-    # terminal before any upstream/freshness work runs).
-    monkeypatch.setattr(compact_module, "_remaining_budget_seconds", lambda deadline: 0.0)
+    stream_calls: list[tuple[list[object], str | None]] = []
+
+    async def fail_stream(payload, request_headers, access_token, account_id, **kwargs):
+        del request_headers, access_token, kwargs
+        stream_calls.append((cast(list[object], payload.to_payload()["input"]), account_id))
+        raise ProxyResponseError(
+            502,
+            openai_error("upstream_request_timeout", "Upstream request budget exhausted"),
+        )
+        yield ""  # pragma: no cover - makes this an async generator
+
+    async def fail_compact(*args, **kwargs):
+        del args, kwargs
+        pytest.fail("terminal compaction triggers must use the Responses stream")
+
+    monkeypatch.setattr(proxy_module, "core_stream_responses", fail_stream)
+    monkeypatch.setattr(proxy_module, "core_compact_responses", fail_compact)
 
     response = await async_client.post(
         "/internal/bridge/responses",
@@ -1701,6 +1724,12 @@ async def test_proxy_compact_forwarded_bridge_preflight_budget_exhausted_settles
     assert "text/event-stream" in response.headers.get("content-type", "")
     assert "response.failed" in response.text
     assert "upstream_request_timeout" in response.text
+    assert stream_calls == [
+        (
+            [{"role": "user", "content": "hello"}, {"type": "compaction_trigger"}],
+            raw_account_id,
+        )
+    ]
 
     async with SessionLocal() as session:
         row = await session.get(ApiKeyUsageReservation, reservation.reservation_id)
