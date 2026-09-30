@@ -40,6 +40,7 @@ export type AccountActionsProps = {
   onResetCredit: (accountId: string) => void;
   showResetCreditExpiryBadge?: boolean;
   onSecurityWorkAuthorizedChange: (accountId: string, enabled: boolean) => void;
+  onAutoResetWhenWeeklyExhaustedChange: (accountId: string, enabled: boolean) => void;
   onLimitWarmupChange: (accountId: string, enabled: boolean) => void;
   onRoutingPolicyChange: (
     accountId: string,
@@ -60,6 +61,7 @@ export function AccountActions({
   onResetCredit,
   showResetCreditExpiryBadge = true,
   onSecurityWorkAuthorizedChange,
+  onAutoResetWhenWeeklyExhaustedChange,
   onLimitWarmupChange,
   onRoutingPolicyChange,
 }: AccountActionsProps) {
@@ -128,6 +130,34 @@ export function AccountActions({
           disabled={busy || readOnly}
           onCheckedChange={(checked) =>
             onSecurityWorkAuthorizedChange(account.accountId, checked)
+          }
+        />
+      </label>
+
+      <label
+        htmlFor={`auto-reset-weekly-exhausted-${account.accountId}`}
+        className="flex min-w-0 items-start justify-between gap-3 rounded-md border px-3 py-2"
+      >
+        <span className="min-w-0 space-y-1">
+          <span className="flex items-center gap-2 text-xs font-medium">
+            <RotateCcw className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+            <span>{t("accounts.actions.autoResetWeeklyEmpty")}</span>
+          </span>
+          <span
+            id={`auto-reset-weekly-exhausted-help-${account.accountId}`}
+            className="block text-xs text-muted-foreground"
+          >
+            {t("accounts.actions.autoResetWeeklyEmptyHelp")}
+          </span>
+        </span>
+        <Switch
+          id={`auto-reset-weekly-exhausted-${account.accountId}`}
+          aria-describedby={`auto-reset-weekly-exhausted-help-${account.accountId}`}
+          className="mt-0.5 shrink-0"
+          checked={account.autoRedeemResetCreditsWhenWeeklyExhausted ?? false}
+          disabled={busy || readOnly}
+          onCheckedChange={(checked) =>
+            onAutoResetWhenWeeklyExhaustedChange(account.accountId, checked)
           }
         />
       </label>

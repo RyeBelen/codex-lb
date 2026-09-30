@@ -261,6 +261,7 @@ describe("RecentRequestsTable", () => {
              planType: "plus",
              status: "active",
              limitWarmupEnabled: false,
+             autoRedeemResetCreditsWhenWeeklyExhausted: false,
              additionalQuotas: [],
            },
          ]}

@@ -58,6 +58,7 @@ describe("AccountSummarySchema", () => {
     expect(parsed.windowMinutesSecondary).toBe(10080);
     expect(parsed.windowMinutesMonthly).toBe(43200);
     expect(parsed.requestUsage?.totalCostUsd).toBe(0.02);
+    expect(parsed.autoRedeemResetCreditsWhenWeeklyExhausted).toBe(false);
   });
 
   it("parses manual routing policy", () => {

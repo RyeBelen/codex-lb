@@ -1024,9 +1024,15 @@ export const handlers = [
     }
     const payload = (await request.json()) as {
       securityWorkAuthorized?: boolean;
+      autoRedeemResetCreditsWhenWeeklyExhausted?: boolean;
     };
     if (typeof payload.securityWorkAuthorized === "boolean") {
       account.securityWorkAuthorized = payload.securityWorkAuthorized;
+    }
+    if (typeof payload.autoRedeemResetCreditsWhenWeeklyExhausted === "boolean") {
+      account.autoRedeemResetCreditsWhenWeeklyExhausted = (
+        payload.autoRedeemResetCreditsWhenWeeklyExhausted
+      );
     }
     return HttpResponse.json({ status: "updated" });
   }),

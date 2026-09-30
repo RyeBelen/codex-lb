@@ -291,6 +291,7 @@ def _account_to_summary(
         deactivation_reason=account.deactivation_reason,
         auth=auth_status,
         limit_warmup_enabled=bool(account.limit_warmup_enabled),
+        auto_redeem_reset_credits_when_weekly_exhausted=bool(account.auto_redeem_reset_credits_when_weekly_exhausted),
         limit_warmup=_limit_warmup_to_status(limit_warmup),
         is_email_duplicate=is_email_duplicate,
         available_reset_credits=reset_credits_snapshot.available_count if reset_credits_snapshot else 0,

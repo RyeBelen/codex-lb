@@ -6,7 +6,7 @@ import random
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 from unittest.mock import AsyncMock
 
 import pytest
@@ -38,12 +38,20 @@ class StubEncryptor(TokenEncryptor):
 
 
 class _FakeDashboardSettings:
-    def __init__(self, *, auto_redeem_reset_credits_before_expiry: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        auto_redeem_reset_credits_before_expiry: bool = False,
+    ) -> None:
         self.auto_redeem_reset_credits_before_expiry = auto_redeem_reset_credits_before_expiry
 
 
 class _FakeSettingsRepository:
-    def __init__(self, *, auto_redeem_reset_credits_before_expiry: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        auto_redeem_reset_credits_before_expiry: bool = False,
+    ) -> None:
         self._settings = _FakeDashboardSettings(
             auto_redeem_reset_credits_before_expiry=auto_redeem_reset_credits_before_expiry,
         )
@@ -57,11 +65,13 @@ def _make_account(
     *,
     status: AccountStatus = AccountStatus.ACTIVE,
     chatgpt_account_id: str | None = "workspace-x",
+    early_reset: bool = False,
 ) -> Account:
     return Account(
         id=account_id,
         chatgpt_account_id=chatgpt_account_id,
         email=f"{account_id}@example.com",
+        auto_redeem_reset_credits_when_weekly_exhausted=early_reset,
         plan_type="plus",
         access_token_encrypted=account_id.encode(),
         refresh_token_encrypted=b"refresh",
@@ -836,6 +846,9 @@ def _patch_dashboard_settings(monkeypatch: pytest.MonkeyPatch, *, auto_redeem: b
 
     monkeypatch.setattr(scheduler_module, "get_background_session", _fake_background_session)
     monkeypatch.setattr(
+        scheduler_module, "AccountsRepository", lambda _: SimpleNamespace(list_accounts=AsyncMock(return_value=[]))
+    )
+    monkeypatch.setattr(
         scheduler_module,
         "SettingsRepository",
         lambda session: _FakeSettingsRepository(auto_redeem_reset_credits_before_expiry=auto_redeem),
@@ -925,3 +938,203 @@ def test_build_scheduler_wires_enabled_setting(monkeypatch: pytest.MonkeyPatch) 
 
     assert scheduler.enabled is False
     assert scheduler.interval_seconds == 123
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("legacy", "early", "expiry_seconds", "exhausted", "calls", "guarded"),
+    [
+        (False, False, 60, True, 0, False),
+        (True, False, 6 * 86400, True, 0, False),
+        (False, True, 6 * 86400, True, 1, True),
+        (False, True, 7 * 86400, True, 1, True),
+        (False, True, 7 * 86400 + 1, True, 0, False),
+        (False, True, -1, True, 0, False),
+        (False, True, 6 * 86400, False, 0, False),
+        (True, True, 240, False, 1, False),
+        (True, True, 6 * 86400, True, 1, True),
+    ],
+)
+async def test_weekly_empty_scheduler_trigger_matrix(
+    monkeypatch,
+    legacy,
+    early,
+    expiry_seconds,
+    exhausted,
+    calls,
+    guarded,
+) -> None:
+    now = datetime(2026, 9, 30, tzinfo=UTC)
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return now
+
+    monkeypatch.setattr(scheduler_module, "datetime", Clock)
+    candidate = AsyncMock(return_value=exhausted)
+    redeem = AsyncMock()
+    monkeypatch.setattr(scheduler_module, "_has_exhausted_weekly_usage", candidate)
+    monkeypatch.setattr(scheduler_module, "_auto_redeem_reset_credit", redeem)
+    await refresh_reset_credits_for_accounts(
+        accounts=[_make_account("weekly", early_reset=early)],
+        encryptor=StubEncryptor(),
+        store=RateLimitResetCreditsStore(),
+        fetch_fn=AsyncMock(return_value=_response(expires_at=now + timedelta(seconds=expiry_seconds))),
+        auto_redeem_before_expiry=legacy,
+        auto_redeem_window_seconds=300,
+    )
+    assert redeem.await_count == calls
+    if calls:
+        assert redeem.call_args.kwargs["require_weekly_exhausted"] is guarded
+    if not early or expiry_seconds > 7 * 86400 or expiry_seconds < 0 or (legacy and expiry_seconds <= 300):
+        candidate.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("slot", "minutes", "used", "reset_delta", "eligible"),
+    [
+        ("secondary", 10080, 100.0, 90000, True),
+        ("primary", 10080, 100.0, 90000, True),
+        ("primary", 300, 100.0, 90000, False),
+        ("secondary", 43200, 100.0, 90000, False),
+        ("secondary", 10080, 99.99, 90000, False),
+        ("secondary", 10080, float("nan"), 90000, False),
+        ("secondary", 10080, float("inf"), 90000, False),
+        ("secondary", 10080, 100.0, -1, False),
+        ("secondary", 10080, 100.0, None, False),
+    ],
+)
+async def test_weekly_candidate_uses_normalized_unrounded_quota(
+    monkeypatch,
+    slot,
+    minutes,
+    used,
+    reset_delta,
+    eligible,
+) -> None:
+    from app.db.models import UsageHistory
+
+    row = UsageHistory(
+        account_id="weekly",
+        used_percent=used,
+        window_minutes=minutes,
+        reset_at=int(datetime.now(UTC).timestamp()) + reset_delta if reset_delta is not None else None,
+        recorded_at=datetime.now(UTC),
+    )
+    repo = SimpleNamespace(
+        latest_entry_for_account=AsyncMock(
+            side_effect=[row if slot == "primary" else None, row if slot == "secondary" else None]
+        )
+    )
+
+    @asynccontextmanager
+    async def session():
+        yield None
+
+    monkeypatch.setattr(scheduler_module, "get_background_session", session)
+    monkeypatch.setattr(scheduler_module, "UsageRepository", lambda _: repo)
+    assert await scheduler_module._has_exhausted_weekly_usage("weekly") is eligible
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "outcome", ["exhausted", "recovered", "missing", "failed", "elapsed", "near", "paused", "deleted", "opted_out"]
+)
+async def test_early_reset_requires_fresh_weekly_evidence(monkeypatch, outcome) -> None:
+    from app.core.usage.types import UsageWindowRow
+    from app.modules.usage.updater import AccountRefreshResult
+
+    account = _make_account("weekly", early_reset=True)
+    current = _make_account("weekly", early_reset=True)
+    weekly = UsageWindowRow(
+        account_id=account.id,
+        used_percent=20 if outcome == "recovered" else 100,
+        reset_at=int(datetime.now(UTC).timestamp())
+        + (-1 if outcome == "elapsed" else 3600 if outcome == "near" else 90000),
+        window_minutes=10080,
+    )
+    result = AccountRefreshResult(
+        usage_written=True, fetch_succeeded=outcome != "failed", weekly_window=None if outcome == "missing" else weekly
+    )
+    updater = SimpleNamespace(force_refresh_result=AsyncMock(return_value=result))
+    repo = SimpleNamespace(get_by_id=AsyncMock(return_value=current))
+
+    async def reload(_):
+        if outcome == "paused":
+            current.status = AccountStatus.PAUSED
+        if outcome == "deleted":
+            current.delete_requested_at = datetime.now(UTC)
+        if outcome == "opted_out":
+            current.auto_redeem_reset_credits_when_weekly_exhausted = False
+
+    @asynccontextmanager
+    async def session():
+        yield SimpleNamespace(refresh=reload)
+
+    monkeypatch.setattr(scheduler_module, "get_background_session", session)
+    monkeypatch.setattr(scheduler_module, "AccountsRepository", lambda _: repo)
+    monkeypatch.setattr(scheduler_module, "UsageUpdater", lambda *a, **k: updater)
+    monkeypatch.setattr(scheduler_module, "detach_session_objects", lambda _: None)
+    checked = await scheduler_module._refresh_exhausted_weekly_account(account)
+    assert (checked is not None) is (outcome == "exhausted")
+    if checked is not None:
+        assert checked.account is current
+    updater.force_refresh_result.assert_awaited_once_with(current, ignore_refresh_disabled=True)
+
+
+@pytest.mark.asyncio
+async def test_disabled_start_warns_for_weekly_only_opt_in(monkeypatch, caplog):
+    _patch_dashboard_settings(monkeypatch, auto_redeem=False)
+    monkeypatch.setattr(
+        scheduler_module,
+        "AccountsRepository",
+        lambda _: SimpleNamespace(list_accounts=AsyncMock(return_value=[_make_account("weekly", early_reset=True)])),
+    )
+    with caplog.at_level(logging.WARNING):
+        await RateLimitResetCreditsRefreshScheduler(interval_seconds=60, enabled=False).start()
+    assert "auto_redeem_reset_credits_when_weekly_exhausted" in caplog.text
+    assert "rate_limit_reset_credits_refresh_enabled=false" in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("seconds", "eligible"), [(86399, False), (86400, True), (86401, True), (float("inf"), False), (None, False)]
+)
+def test_weekly_natural_reset_boundary(monkeypatch, seconds, eligible):
+    from app.core.usage.types import UsageWindowRow
+
+    now = datetime(2026, 10, 1, tzinfo=UTC)
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return now
+
+    monkeypatch.setattr(scheduler_module, "datetime", Clock)
+    row = UsageWindowRow(
+        account_id="weekly",
+        used_percent=100,
+        window_minutes=10080,
+        reset_at=cast(int, now.timestamp() + seconds) if seconds is not None else None,
+    )
+    assert scheduler_module._weekly_usage_is_exhausted(row) is eligible
+
+
+@pytest.mark.asyncio
+async def test_weekly_scheduler_filters_account_opt_in(monkeypatch):
+    opted_in = _make_account("on", early_reset=True)
+    opted_out = _make_account("off")
+    redeem = AsyncMock()
+    candidate = AsyncMock(return_value=True)
+    monkeypatch.setattr(scheduler_module, "_auto_redeem_reset_credit", redeem)
+    monkeypatch.setattr(scheduler_module, "_has_exhausted_weekly_usage", candidate)
+    await refresh_reset_credits_for_accounts(
+        accounts=[opted_in, opted_out],
+        encryptor=StubEncryptor(),
+        store=RateLimitResetCreditsStore(),
+        fetch_fn=AsyncMock(return_value=_response_expiring_in(6 * 86400)),
+    )
+    candidate.assert_awaited_once_with("on")
+    redeem.assert_awaited_once()
+    assert redeem.call_args.args[0] is opted_in

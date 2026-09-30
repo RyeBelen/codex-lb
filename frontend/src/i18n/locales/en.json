@@ -4,6 +4,8 @@
   "accounts.actions.forceProbe": "Force probe",
   "accounts.actions.resetWithCount": "Reset ({{count}})",
   "accounts.actions.routingPolicy": "Routing policy",
+  "accounts.actions.autoResetWeeklyEmpty": "Auto-reset when weekly quota is empty",
+  "accounts.actions.autoResetWeeklyEmptyHelp": "Use an expiring reset credit when weekly quota is 0%, the credit expires within 7 days, and the weekly refresh is at least 24 hours away. The global five-minute fallback is independent.",
   "accounts.actions.trustedAccess": "Trusted Access for Cyber",
   "accounts.addDialog.description": "Choose how to add a Codex account.",
   "accounts.addDialog.importDescription": "Import an exported auth.json file",

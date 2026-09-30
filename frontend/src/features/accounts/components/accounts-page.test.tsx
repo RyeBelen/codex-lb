@@ -91,6 +91,7 @@ function account(overrides: Partial<AccountSummary>): AccountSummary {
     status: "active",
     additionalQuotas: [],
     limitWarmupEnabled: false,
+    autoRedeemResetCreditsWhenWeeklyExhausted: false,
     ...overrides,
   };
 }

@@ -135,6 +135,12 @@ class Account(Base):
         server_default=false(),
         nullable=False,
     )
+    auto_redeem_reset_credits_when_weekly_exhausted: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        server_default=false(),
+        nullable=False,
+    )
     security_work_authorized: Mapped[bool] = mapped_column(
         Boolean,
         default=False,
@@ -693,7 +699,9 @@ class ResetCreditRedeemRequest(Base):
     Written inside the per-account serialized redeem section BEFORE the
     upstream consume call so a retry carrying the same redeem_request_id —
     served by ANY replica — resolves to the originally selected credit and
-    never burns a second one. Rows are purged opportunistically after 24h.
+    never burns a second one. Manual rows are retained for 24 hours;
+    automatic rows are retained for eight days so the seven-day eligibility
+    window cannot select the same account/expiry-date request twice.
     """
 
     __tablename__ = "reset_credit_redeem_requests"

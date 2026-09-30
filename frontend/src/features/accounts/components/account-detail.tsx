@@ -48,6 +48,7 @@ export type AccountDetailProps = {
     routingPolicy: AccountRoutingPolicy,
   ) => void;
   onSecurityWorkAuthorizedChange: (accountId: string, enabled: boolean) => void;
+  onAutoResetWhenWeeklyExhaustedChange: (accountId: string, enabled: boolean) => void;
   upstreamProxyAdmin?: UpstreamProxyAdmin | null;
   onProxyBindingSave?: (accountId: string, payload: AccountProxyBindingRequest) => Promise<unknown>;
   onProxyEndpointTest?: (endpointId: string) => Promise<UpstreamProxyEndpointTestResponse>;
@@ -74,6 +75,7 @@ export function AccountDetail({
   onLimitWarmupChange,
   onRoutingPolicyChange,
   onSecurityWorkAuthorizedChange,
+  onAutoResetWhenWeeklyExhaustedChange,
   upstreamProxyAdmin = null,
   onProxyBindingSave,
   onProxyEndpointTest,
@@ -191,6 +193,7 @@ export function AccountDetail({
         onLimitWarmupChange={onLimitWarmupChange}
         onRoutingPolicyChange={onRoutingPolicyChange}
         onSecurityWorkAuthorizedChange={onSecurityWorkAuthorizedChange}
+        onAutoResetWhenWeeklyExhaustedChange={onAutoResetWhenWeeklyExhaustedChange}
       />
     </div>
   );

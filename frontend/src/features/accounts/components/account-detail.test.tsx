@@ -34,6 +34,7 @@ describe("AccountDetail", () => {
         onLimitWarmupChange={vi.fn()}
         onRoutingPolicyChange={onRoutingPolicyChange}
         onSecurityWorkAuthorizedChange={vi.fn()}
+        onAutoResetWhenWeeklyExhaustedChange={vi.fn()}
       />,
     );
 
@@ -65,6 +66,7 @@ describe("AccountDetail", () => {
         onLimitWarmupChange={vi.fn()}
         onRoutingPolicyChange={vi.fn()}
         onSecurityWorkAuthorizedChange={vi.fn()}
+        onAutoResetWhenWeeklyExhaustedChange={vi.fn()}
         onProxyBindingSave={onProxyBindingSave}
         upstreamProxyAdmin={createUpstreamProxyAdmin({
           bindings: [{ accountId: "acc_primary", poolId: "pool_primary", isActive: true }],
@@ -99,6 +101,7 @@ describe("AccountDetail", () => {
         onLimitWarmupChange={vi.fn()}
         onRoutingPolicyChange={vi.fn()}
         onSecurityWorkAuthorizedChange={vi.fn()}
+        onAutoResetWhenWeeklyExhaustedChange={vi.fn()}
         resetCredits={{ availableCount: 2 }}
       />,
     );

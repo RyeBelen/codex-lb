@@ -75,6 +75,7 @@ FetchFn = Callable[..., Awaitable[ResetCreditsResponse]]
 ConsumeFn = Callable[..., Awaitable[ConsumeResetCreditResponse]]
 RefreshUsageFn = Callable[[Account], Awaitable[None]]
 ResolveRouteFn = Callable[[Account], Awaitable[ResolvedUpstreamRoute | None]]
+CheckEligibilityFn = Callable[[Account], Awaitable["ResetCreditEligibility | None"]]
 
 _NON_REDEEMABLE_STATUSES = frozenset({AccountStatus.PAUSED, AccountStatus.REAUTH_REQUIRED, AccountStatus.DEACTIVATED})
 
@@ -104,6 +105,12 @@ class ConsumeResetCreditResponseSchema(DashboardModel):
     code: str | None = None
     windows_reset: int | None = None
     redeemed_at: datetime | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ResetCreditEligibility:
+    account: Account
+    valid_until: datetime
 
 
 @dataclass(frozen=True, slots=True)
@@ -220,6 +227,8 @@ async def _redeem_soonest_reset_credit(
     skip_if_redeem_request_pinned: bool = False,
     expected_credit_id: str | None = None,
     expected_credit_expires_at: datetime | None = None,
+    check_eligibility: CheckEligibilityFn | None = None,
+    credit_expiry_window_seconds: float | None = None,
 ) -> _RedeemResetCreditOutcome:
     _assert_account_can_redeem_reset_credit(account)
     effective_fetch_fn = fetch_fn or fetch_reset_credits
@@ -240,6 +249,8 @@ async def _redeem_soonest_reset_credit(
                 skip_if_redeem_request_pinned=skip_if_redeem_request_pinned,
                 expected_credit_id=expected_credit_id,
                 expected_credit_expires_at=expected_credit_expires_at,
+                check_eligibility=check_eligibility,
+                credit_expiry_window_seconds=credit_expiry_window_seconds,
             )
     except RedeemClaimTimeoutError as exc:
         raise DashboardConflictError(
@@ -321,6 +332,8 @@ async def _redeem_soonest_reset_credit_locked(
     skip_if_redeem_request_pinned: bool,
     expected_credit_id: str | None,
     expected_credit_expires_at: datetime | None,
+    check_eligibility: CheckEligibilityFn | None = None,
+    credit_expiry_window_seconds: float | None = None,
 ) -> _RedeemResetCreditOutcome:
     redeem_account = account
     if auth_manager is not None:
@@ -388,6 +401,35 @@ async def _redeem_soonest_reset_credit_locked(
         await store.set(account.id, build_snapshot(credits_response))
         raise DashboardConflictError("Target reset credit changed", code="target_reset_credit_changed")
     else:
+        eligibility: ResetCreditEligibility | None = None
+        if check_eligibility is not None:
+            eligibility = await check_eligibility(redeem_account)
+            if eligibility is None:
+                raise DashboardConflictError(
+                    "Account no longer qualifies for automatic reset", code="reset_credit_auto_ineligible"
+                )
+            redeem_account = eligibility.account
+            _assert_account_can_redeem_reset_credit(redeem_account)
+            access_token = encryptor.decrypt(redeem_account.access_token_encrypted)
+            if resolve_route is not None:
+                route = await resolve_route(redeem_account)
+        # Route resolution and usage/credit refresh can cross either deadline.
+        # Evaluate both again at the last decision point before the durable pin.
+        if eligibility is not None and datetime.now(timezone.utc) > eligibility.valid_until:
+            raise DashboardConflictError(
+                "Weekly refresh is less than 24 hours away", code="reset_credit_auto_ineligible"
+            )
+        if credit_expiry_window_seconds is not None:
+            expires_at = credit.expires_at
+            if expires_at is not None and expires_at.tzinfo is None:
+                expires_at = expires_at.replace(tzinfo=timezone.utc)
+            if (
+                expires_at is None
+                or not 0 < (expires_at - datetime.now(timezone.utc)).total_seconds() <= credit_expiry_window_seconds
+            ):
+                raise DashboardConflictError(
+                    "Reset credit is outside automatic expiry window", code="reset_credit_auto_ineligible"
+                )
         # Pin the selected credit before the consume: a synthesized or
         # client-supplied id is now always recorded, so a lost consume response
         # leaves a durable pin any replica can reuse.

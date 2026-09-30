@@ -4,6 +4,8 @@
   "accounts.actions.forceProbe": "강제 probe",
   "accounts.actions.resetWithCount": "Reset ({{count}})",
   "accounts.actions.routingPolicy": "Routing policy",
+  "accounts.actions.autoResetWeeklyEmpty": "주간 할당량이 비었을 때 자동 reset",
+  "accounts.actions.autoResetWeeklyEmptyHelp": "주간 할당량이 0%이고 credit이 7일 이내에 만료되며 주간 refresh가 24시간 이상 남았을 때 만료 예정 reset credit을 사용합니다. 글로벌 5분 fallback은 독립적으로 작동합니다.",
   "accounts.actions.trustedAccess": "Trusted access",
   "accounts.addDialog.description": "Codex Account 추가 방식을 선택하세요.",
   "accounts.addDialog.importDescription": "내보낸 auth.json 파일을 가져옵니다.",

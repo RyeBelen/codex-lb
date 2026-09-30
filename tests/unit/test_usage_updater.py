@@ -5178,3 +5178,44 @@ async def test_refresh_accounts_does_not_repeat_post_reset_quota_probe(monkeypat
 
     updater = UsageUpdater(StubUsageRepository(), accounts_repo=None)
     await updater.refresh_accounts([acc], latest_usage={acc.id: latest})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("slot", "seconds", "expected"),
+    [
+        ("secondary_window", 604800, True),
+        ("primary_window", 604800, True),
+        ("primary_window", 18000, False),
+        ("primary_window", 2592000, False),
+        (None, None, False),
+    ],
+)
+async def test_force_refresh_returns_weekly_evidence_only_from_current_response(monkeypatch, slot, seconds, expected):
+    rate_limit = (
+        {}
+        if slot is None
+        else {
+            slot: {
+                "used_percent": 100,
+                "reset_at": 2000000000,
+                "limit_window_seconds": seconds,
+            }
+        }
+    )
+
+    async def fetch(**_):
+        return UsagePayload.model_validate({"rate_limit": rate_limit})
+
+    monkeypatch.setattr("app.modules.usage.updater.fetch_usage", fetch)
+    repo = StubUsageRepository(return_rows=True)
+    account = _make_account("weekly_evidence", "workspace_evidence", email="evidence@example.com")
+    # A prior exhausted weekly row must not substitute for missing fresh evidence.
+    await repo.add_entry(account.id, 100, window="secondary", reset_at=2000000000, window_minutes=10080)
+    result = await UsageUpdater(repo, accounts_repo=None).force_refresh_result(account, ignore_refresh_disabled=True)
+    assert result.fetch_succeeded
+    assert (result.weekly_window is not None) is expected
+    if expected:
+        assert result.weekly_window is not None
+        assert result.weekly_window.used_percent == 100
+        assert result.weekly_window.window_minutes == 10080

@@ -25,6 +25,7 @@ from app.core.crypto import TokenEncryptor
 from app.core.plan_types import ACCOUNT_PLAN_TYPES, coerce_account_plan_type, normalize_account_plan_type
 from app.core.upstream_proxy import ResolvedUpstreamRoute, UpstreamProxyRouteError, resolve_upstream_route
 from app.core.usage.models import AdditionalRateLimitPayload, UsagePayload, UsageWindow
+from app.core.usage.types import UsageWindowRow
 from app.core.utils.request_id import get_request_id
 from app.core.utils.shared_future import wait_on_shared_future
 from app.core.utils.time import utcnow
@@ -135,6 +136,7 @@ class AccountsRepositoryWithStatusComparePort(AccountsRepositoryPort, Protocol):
 class AccountRefreshResult:
     usage_written: bool
     fetch_succeeded: bool = True
+    weekly_window: UsageWindowRow | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -758,7 +760,23 @@ class UsageUpdater:
         )
         usage_written = any(_usage_entry_written(entry) for entry in entries)
         await self._recover_quota_status_from_usage(account, primary=primary, secondary=secondary, monthly=monthly)
-        return AccountRefreshResult(usage_written=usage_written)
+        # Return evidence from this response, never an older persisted window
+        # when upstream omits weekly usage during a forced refresh.
+        rows = {
+            window.window: UsageWindowRow(
+                account_id=account.id,
+                used_percent=window.used_percent,
+                reset_at=window.reset_at,
+                window_minutes=window.window_minutes,
+            )
+            for window in snapshot_windows
+        }
+        _, weekly_rows = usage_core.normalize_weekly_only_rows(
+            [rows["primary"]] if "primary" in rows else [],
+            [rows["secondary"]] if "secondary" in rows else [],
+        )
+        weekly = next((row for row in weekly_rows if usage_core.is_weekly_window_minutes(row.window_minutes)), None)
+        return AccountRefreshResult(usage_written=usage_written, weekly_window=weekly)
 
     async def _deactivate_for_client_error(self, account: Account, exc: UsageFetchError) -> None:
         if not self._auth_manager:

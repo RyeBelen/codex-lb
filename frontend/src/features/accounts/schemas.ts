@@ -118,6 +118,7 @@ export const AccountSummarySchema = z.object({
   auth: AccountAuthSchema.nullable().optional(),
   additionalQuotas: z.array(AccountAdditionalQuotaSchema).default([]),
   limitWarmupEnabled: z.boolean().default(false),
+  autoRedeemResetCreditsWhenWeeklyExhausted: z.boolean().default(false),
   limitWarmup: AccountLimitWarmupStatusSchema.nullable().optional(),
   isEmailDuplicate: z.boolean().optional(),
   availableResetCredits: z.number().nullable().optional(),
@@ -285,6 +286,7 @@ export const AccountRoutingPolicyUpdateResponseSchema = z.object({
 
 export const AccountUpdateRequestSchema = z.object({
   securityWorkAuthorized: z.boolean().optional(),
+  autoRedeemResetCreditsWhenWeeklyExhausted: z.boolean().optional(),
 });
 
 export const OauthStartRequestSchema = z.object({

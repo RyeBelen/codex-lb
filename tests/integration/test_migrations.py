@@ -996,6 +996,62 @@ async def test_reset_credit_redeem_tables_migration_upgrade_and_downgrade(tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_account_weekly_empty_preference_migration_backfills_and_round_trips(tmp_path):
+    from alembic import command
+    from sqlalchemy import inspect as sa_inspect
+
+    from app.db.migrate import _build_alembic_config
+
+    db_url = f"sqlite+aiosqlite:///{tmp_path / 'account-weekly-empty-preference.sqlite'}"
+    parent_revision = "20260914_000000_add_model_account_routing"
+    revision = "20260930_000000_add_weekly_empty_auto_redeem"
+    column = "auto_redeem_reset_credits_when_weekly_exhausted"
+
+    def _account_columns(sync_conn) -> set[str]:
+        return {item["name"] for item in sa_inspect(sync_conn).get_columns("accounts")}
+
+    await to_thread.run_sync(lambda: run_upgrade(db_url, parent_revision, bootstrap_legacy=True))
+    engine = create_async_engine(db_url)
+    try:
+        async with engine.begin() as conn:
+            assert column not in await conn.run_sync(_account_columns)
+            await conn.execute(
+                text(
+                    """
+                    INSERT INTO accounts (
+                        id, codex_installation_id, email, plan_type,
+                        access_token_encrypted, refresh_token_encrypted, id_token_encrypted,
+                        last_refresh, status
+                    ) VALUES (
+                        'account-existing', 'installation-existing', 'existing@example.com', 'plus',
+                        X'01', X'02', X'03', CURRENT_TIMESTAMP, 'active'
+                    )
+                    """
+                )
+            )
+
+        await to_thread.run_sync(lambda: run_upgrade(db_url, revision, bootstrap_legacy=False))
+        async with engine.connect() as conn:
+            assert column in await conn.run_sync(_account_columns)
+            assert (
+                await conn.execute(text(f"SELECT {column} FROM accounts WHERE id = 'account-existing'"))
+            ).scalar_one() == 0
+
+        await to_thread.run_sync(lambda: command.downgrade(_build_alembic_config(db_url), parent_revision))
+        async with engine.connect() as conn:
+            assert column not in await conn.run_sync(_account_columns)
+
+        await to_thread.run_sync(lambda: run_upgrade(db_url, revision, bootstrap_legacy=False))
+        async with engine.connect() as conn:
+            assert column in await conn.run_sync(_account_columns)
+            assert (
+                await conn.execute(text(f"SELECT {column} FROM accounts WHERE id = 'account-existing'"))
+            ).scalar_one() == 0
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_model_registry_snapshot_migration_upgrade_and_downgrade(tmp_path):
     from alembic import command
     from sqlalchemy import inspect as sa_inspect
@@ -1895,9 +1951,7 @@ async def test_api_key_denied_models_migration_upgrade_and_downgrade(tmp_path):
     try:
         async with engine.connect() as conn:
             columns = await conn.run_sync(
-                lambda sync_conn: {
-                    column["name"]: column for column in sa_inspect(sync_conn).get_columns("api_keys")
-                }
+                lambda sync_conn: {column["name"]: column for column in sa_inspect(sync_conn).get_columns("api_keys")}
             )
         assert columns["denied_models"]["nullable"] is True
     finally:

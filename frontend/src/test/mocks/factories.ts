@@ -151,6 +151,7 @@ export function createAccountSummary(
 			idToken: { state: "parsed" },
 		},
 		limitWarmupEnabled: false,
+		autoRedeemResetCreditsWhenWeeklyExhausted: false,
 		limitWarmup: null,
 		...overrides,
 	});

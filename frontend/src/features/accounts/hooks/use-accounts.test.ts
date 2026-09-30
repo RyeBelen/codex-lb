@@ -28,6 +28,30 @@ function createWrapper(queryClient: QueryClient) {
 }
 
 describe("useAccounts", () => {
+  it("saves the weekly-empty opt-in without overwriting other preferences", async () => {
+    const queryClient = createTestQueryClient();
+    let requestBody: unknown;
+    server.use(
+      http.patch("/api/accounts/:accountId", async ({ request }) => {
+        requestBody = await request.json();
+        return HttpResponse.json({ status: "updated" });
+      }),
+    );
+    const { result } = renderHook(() => useAccounts(), {
+      wrapper: createWrapper(queryClient),
+    });
+
+    await waitFor(() => expect(result.current.accountsQuery.isSuccess).toBe(true));
+    await result.current.updateMutation.mutateAsync({
+      accountId: "acc_primary",
+      autoRedeemResetCreditsWhenWeeklyExhausted: true,
+    });
+
+    expect(requestBody).toEqual({
+      autoRedeemResetCreditsWhenWeeklyExhausted: true,
+    });
+  });
+
   it("loads accounts and invalidates related queries after mutations", async () => {
     const queryClient = createTestQueryClient();
     const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");

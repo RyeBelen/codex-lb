@@ -1527,3 +1527,147 @@ async def test_consume_refuses_read_only_guest(app_instance, async_client) -> No
 
 async def _raise_not_called(*args: Any, **kwargs: Any) -> Any:
     raise AssertionError("consume_fn must not be called when no credit is available")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("eligible", [False, True])
+async def test_automatic_eligibility_is_checked_inside_lock_before_pin(monkeypatch, eligible):
+    from contextlib import asynccontextmanager
+    from datetime import UTC, timedelta
+    from unittest.mock import AsyncMock
+
+    store = RateLimitResetCreditsStore()
+    credit = _credit("weekly", expires_at=(datetime.now(UTC) + timedelta(days=6)).isoformat())
+    await store.set("acc_1", _snapshot([credit]))
+    events = []
+
+    @asynccontextmanager
+    async def locked(*args, **kwargs):
+        events.append("lock")
+        yield
+        events.append("unlock")
+
+    async def check(account):
+        assert events == ["lock"]
+        events.append("check")
+        return (
+            reset_credits_api.ResetCreditEligibility(account, datetime.now(UTC) + timedelta(hours=1))
+            if eligible
+            else None
+        )
+
+    async def pin(*args):
+        events.append("pin")
+        return credit.id
+
+    consume = AsyncMock(
+        return_value=ConsumeResetCreditResponse.model_validate(
+            {"code": "reset", "windows_reset": 1, "credit": {"id": "weekly"}}
+        )
+    )
+    monkeypatch.setattr(reset_credits_api, "serialize_reset_credit_redeem", locked)
+    monkeypatch.setattr(reset_credits_api, "pin_redeem_request", pin)
+
+    async def redeem():
+        return await _redeem_soonest_reset_credit(
+            account=_account(),
+            store=store,
+            encryptor=StubEncryptor(),
+            fetch_fn=_static_fetch_fn(_response([credit])),
+            consume_fn=consume,
+            check_eligibility=check,
+            credit_expiry_window_seconds=604800,
+        )
+
+    if eligible:
+        await redeem()
+        assert events == ["lock", "check", "pin", "unlock"]
+        consume.assert_awaited_once()
+    else:
+        with pytest.raises(DashboardConflictError) as exc:
+            await redeem()
+        assert exc.value.code == "reset_credit_auto_ineligible"
+        assert "pin" not in events
+        consume.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("seconds", [-1, 604801])
+async def test_automatic_credit_window_is_rechecked_before_pin(monkeypatch, seconds):
+    from datetime import UTC, timedelta
+    from unittest.mock import AsyncMock
+
+    store = RateLimitResetCreditsStore()
+    credit = _credit("weekly", expires_at=(datetime.now(UTC) + timedelta(seconds=seconds)).isoformat())
+    await store.set("acc_1", _snapshot([credit]))
+    pin, consume = AsyncMock(), AsyncMock()
+    monkeypatch.setattr(reset_credits_api, "pin_redeem_request", pin)
+    with pytest.raises(DashboardConflictError) as exc:
+        await _redeem_soonest_reset_credit(
+            account=_account(),
+            store=store,
+            encryptor=StubEncryptor(),
+            fetch_fn=_static_fetch_fn(_response([credit])),
+            consume_fn=consume,
+            credit_expiry_window_seconds=604800,
+        )
+    assert exc.value.code == "reset_credit_auto_ineligible"
+    pin.assert_not_awaited()
+    consume.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("delay_phase", ["credits", "route"])
+async def test_early_redemption_rechecks_weekly_deadline_after_network_work(monkeypatch, delay_phase):
+    from datetime import UTC, timedelta
+    from unittest.mock import AsyncMock
+
+    now = datetime(2026, 10, 1, tzinfo=UTC)
+    valid_until = now + timedelta(seconds=1)
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return now
+
+    monkeypatch.setattr(reset_credits_api, "datetime", Clock)
+    credit = _credit("weekly", expires_at=(now + timedelta(days=6)).isoformat())
+    store = RateLimitResetCreditsStore()
+    await store.set("acc_1", _snapshot([credit]))
+
+    async def fetch(*args, **kwargs):
+        nonlocal now
+        if delay_phase == "credits":
+            now += timedelta(seconds=2)
+        return _response([credit])
+
+    async def eligible(account):
+        if now > valid_until:
+            return None
+        return reset_credits_api.ResetCreditEligibility(account, valid_until)
+
+    route_calls = 0
+
+    async def route(account):
+        nonlocal route_calls, now
+        route_calls += 1
+        if delay_phase == "route" and route_calls == 2:
+            now += timedelta(seconds=2)
+        return None
+
+    pin, consume = AsyncMock(), AsyncMock()
+    monkeypatch.setattr(reset_credits_api, "pin_redeem_request", pin)
+    with pytest.raises(DashboardConflictError) as exc:
+        await _redeem_soonest_reset_credit(
+            account=_account(),
+            store=store,
+            encryptor=StubEncryptor(),
+            fetch_fn=fetch,
+            consume_fn=consume,
+            resolve_route=route,
+            check_eligibility=eligible,
+            credit_expiry_window_seconds=604800,
+        )
+    assert exc.value.code == "reset_credit_auto_ineligible"
+    pin.assert_not_awaited()
+    consume.assert_not_awaited()

@@ -81,6 +81,23 @@ async function interceptApi(
       return fulfill(route, createConversationDetails({ conversationId: "conv_abc" }));
     }
     if (p === "/api/accounts") return fulfill(route, { accounts: accountList });
+    const accountAccessMatch = p.match(/^\/api\/accounts\/([^/]+)\/api-key-access$/);
+    if (accountAccessMatch) {
+      return fulfill(route, {
+        accountId: decodeURIComponent(accountAccessMatch[1]),
+        restricted: false,
+        apiKeyIds: [],
+      });
+    }
+    const allowedModelsMatch = p.match(/^\/api\/accounts\/([^/]+)\/allowed-models$/);
+    if (allowedModelsMatch) {
+      return fulfill(route, {
+        accountId: decodeURIComponent(allowedModelsMatch[1]),
+        allowedModels: [],
+        availableModels: [],
+        catalogAvailable: true,
+      });
+    }
     const trendsMatch = p.match(/^\/api\/accounts\/([^/]+)\/trends$/);
     if (trendsMatch) {
       const trends = accountTrends[trendsMatch[1]];
@@ -109,6 +126,7 @@ async function interceptApi(
   });
 
   await page.route("**/health", (route) => fulfill(route, { status: "ok" }));
+  await page.route("**/health/ready", (route) => fulfill(route, { status: "ok" }));
 }
 
 // ── Theme ──
@@ -227,6 +245,32 @@ test("dashboard conversation details dialog", async ({ page }) => {
 
 test("accounts — light", async ({ page }) => {
   await capture(page, { file: "accounts.jpg", theme: "light", route: "/accounts" });
+});
+
+test("account weekly-empty auto-reset — before", async ({ page }) => {
+  await capture(page, {
+    file: "account-weekly-empty-before.jpg",
+    theme: "light",
+    route: "/accounts",
+    fullPage: true,
+    beforeScreenshot: async (currentPage) => {
+      const label = currentPage.getByText("Auto-reset when weekly quota is empty");
+      await label.waitFor();
+      await label.evaluate((element) => element.closest("label")?.remove());
+    },
+  });
+});
+
+test("account weekly-empty auto-reset — after", async ({ page }) => {
+  await capture(page, {
+    file: "account-weekly-empty-after.jpg",
+    theme: "light",
+    route: "/accounts",
+    fullPage: true,
+    beforeScreenshot: async (currentPage) => {
+      await currentPage.getByText("Auto-reset when weekly quota is empty").waitFor();
+    },
+  });
 });
 
 test("accounts — dark", async ({ page }) => {

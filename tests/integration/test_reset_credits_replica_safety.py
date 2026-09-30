@@ -54,6 +54,13 @@ async def _clear_reset_credit_store():
     await get_rate_limit_reset_credits_store().invalidate()
 
 
+@pytest.fixture
+async def sqlite_redeem_claims() -> None:
+    async with SessionLocal() as session:
+        if session.get_bind().dialect.name != "sqlite":
+            pytest.skip("SQLite redemption leases; PostgreSQL uses advisory transaction locks")
+
+
 def _encode_jwt(payload: dict[str, object]) -> str:
     raw = json.dumps(payload, separators=(",", ":")).encode("utf-8")
     body = base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
@@ -259,7 +266,7 @@ async def test_dashboard_redeem_with_request_id_but_no_pin_returns_409_on_empty_
 
 
 @pytest.mark.asyncio
-async def test_redeem_claim_serializes_two_holders_across_sessions(async_client) -> None:
+async def test_redeem_claim_serializes_two_holders_across_sessions(sqlite_redeem_claims, async_client) -> None:
     account_id = await _import_account(
         async_client,
         email="claim-serialize@example.com",
@@ -276,7 +283,7 @@ async def test_redeem_claim_serializes_two_holders_across_sessions(async_client)
 
 
 @pytest.mark.asyncio
-async def test_acquire_redeem_claim_times_out_while_peer_holds(async_client) -> None:
+async def test_acquire_redeem_claim_times_out_while_peer_holds(sqlite_redeem_claims, async_client) -> None:
     account_id = await _import_account(
         async_client,
         email="claim-timeout@example.com",
@@ -297,7 +304,7 @@ async def test_acquire_redeem_claim_times_out_while_peer_holds(async_client) -> 
 
 
 @pytest.mark.asyncio
-async def test_expired_redeem_claim_is_taken_over(async_client) -> None:
+async def test_expired_redeem_claim_is_taken_over(sqlite_redeem_claims, async_client) -> None:
     account_id = await _import_account(
         async_client,
         email="claim-expired@example.com",
@@ -319,7 +326,7 @@ async def test_expired_redeem_claim_is_taken_over(async_client) -> None:
 
 
 @pytest.mark.asyncio
-async def test_redeem_claim_heartbeat_keeps_live_claim_from_takeover(async_client) -> None:
+async def test_redeem_claim_heartbeat_keeps_live_claim_from_takeover(sqlite_redeem_claims, async_client) -> None:
     """A renewed lease outlives its original expiry; without the heartbeat the
     claim would be taken over mid-section by a second process."""
     account_id = await _import_account(
@@ -353,7 +360,9 @@ async def test_redeem_claim_heartbeat_keeps_live_claim_from_takeover(async_clien
 
 
 @pytest.mark.asyncio
-async def test_dashboard_consume_outliving_the_lease_keeps_the_claim(async_client, monkeypatch) -> None:
+async def test_dashboard_consume_outliving_the_lease_keeps_the_claim(
+    sqlite_redeem_claims, async_client, monkeypatch
+) -> None:
     """A redemption slower than one lease is not taken over by a peer process."""
     account_id = await _import_account(
         async_client,
@@ -478,7 +487,7 @@ async def test_concurrent_dashboard_consumes_contend_on_db_claim(async_client, m
 
 
 @pytest.mark.asyncio
-async def test_dashboard_consume_succeeds_over_expired_claim(async_client, monkeypatch) -> None:
+async def test_dashboard_consume_succeeds_over_expired_claim(sqlite_redeem_claims, async_client, monkeypatch) -> None:
     account_id = await _import_account(
         async_client,
         email="claim-lease@example.com",
@@ -514,6 +523,96 @@ async def test_dashboard_consume_succeeds_over_expired_claim(async_client, monke
 
 
 # --- durable ledger primitives ---
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("age", [timedelta(hours=25), timedelta(days=7)])
+async def test_automatic_redeem_pin_survives_past_manual_ttl(async_client, age: timedelta) -> None:
+    account_id = await _import_account(
+        async_client,
+        email=f"auto-ledger-{int(age.total_seconds())}@example.com",
+        account_id=f"acc_auto_ledger_{int(age.total_seconds())}",
+    )
+    request_id = "auto-reset-credit:2026-08-01"
+
+    async with SessionLocal() as session:
+        session.add(
+            ResetCreditRedeemRequest(
+                account_id=account_id,
+                redeem_request_id=request_id,
+                credit_id="auto-credit",
+                created_at=datetime.now(UTC) - age,
+            )
+        )
+        await session.commit()
+
+    assert await get_pinned_redeem_credit_id(account_id, request_id) == "auto-credit"
+
+
+@pytest.mark.asyncio
+async def test_manual_pin_purge_preserves_automatic_pin(async_client) -> None:
+    account_id = await _import_account(
+        async_client,
+        email="manual-purge-auto-ledger@example.com",
+        account_id="acc_manual_purge_auto_ledger",
+    )
+    auto_request_id = "auto-reset-credit:2026-08-01"
+
+    async with SessionLocal() as session:
+        session.add_all(
+            [
+                ResetCreditRedeemRequest(
+                    account_id=account_id,
+                    redeem_request_id=auto_request_id,
+                    credit_id="auto-credit",
+                    created_at=datetime.now(UTC) - timedelta(days=2),
+                ),
+                ResetCreditRedeemRequest(
+                    account_id=account_id,
+                    redeem_request_id="expired-manual",
+                    credit_id="manual-credit",
+                    created_at=datetime.now(UTC) - timedelta(hours=25),
+                ),
+            ]
+        )
+        await session.commit()
+
+    assert await pin_redeem_request(account_id, "fresh-manual", "fresh-credit") == "fresh-credit"
+    assert await get_pinned_redeem_credit_id(account_id, auto_request_id) == "auto-credit"
+    assert await get_pinned_redeem_credit_id(account_id, "expired-manual") is None
+
+
+@pytest.mark.asyncio
+async def test_automatic_redeem_pin_expires_after_eight_days(async_client) -> None:
+    account_id = await _import_account(
+        async_client,
+        email="expired-auto-ledger@example.com",
+        account_id="acc_expired_auto_ledger",
+    )
+    request_id = "auto-reset-credit:2026-08-01"
+
+    async with SessionLocal() as session:
+        session.add(
+            ResetCreditRedeemRequest(
+                account_id=account_id,
+                redeem_request_id=request_id,
+                credit_id="expired-auto-credit",
+                created_at=datetime.now(UTC) - timedelta(days=8, minutes=1),
+            )
+        )
+        await session.commit()
+
+    assert await get_pinned_redeem_credit_id(account_id, request_id) is None
+    assert await pin_redeem_request(account_id, "manual-trigger", "manual-credit") == "manual-credit"
+
+    async with SessionLocal() as session:
+        assert (
+            await session.get(
+                ResetCreditRedeemRequest,
+                {"account_id": account_id, "redeem_request_id": request_id},
+            )
+            is None
+        )
 
 
 @pytest.mark.asyncio
@@ -587,8 +686,8 @@ async def test_pin_redeem_request_reused_after_ttl_repins_new_credit(async_clien
 
 
 @pytest.mark.asyncio
-async def test_get_pinned_redeem_credit_id_ignores_expired_rows(async_client) -> None:
-    """An expired pin (older than the 24h TTL) must read as absent so the
+async def test_manual_redeem_pin_retains_24_hour_ttl(async_client) -> None:
+    """An expired manual pin (older than the 24h TTL) must read as absent so the
     caller re-selects and re-pins a fresh credit instead of retargeting the
     stale credit id. The read TTL matches ``pin_redeem_request``'s purge TTL,
     so the row reads as absent even before any purge write runs."""
@@ -775,3 +874,22 @@ async def test_peer_replica_store_is_cleared_after_consume_via_invalidation_bus(
     # Replica B converges within one poll tick instead of waiting for its next
     # (up to 60s) refresh tick.
     assert replica_b_store.get(account_id) is None
+
+
+@pytest.mark.asyncio
+async def test_manual_prefix_case_variant_has_matching_read_and_purge_ttl(async_client):
+    account_id = await _import_account(async_client, email="case-prefix@example.com", account_id="case-prefix")
+    request_id = "AUTO-RESET-CREDIT:manual-id"
+    async with SessionLocal() as session:
+        session.add(
+            ResetCreditRedeemRequest(
+                account_id=account_id,
+                redeem_request_id=request_id,
+                credit_id="old",
+                created_at=datetime.now(UTC) - timedelta(hours=25),
+            )
+        )
+        await session.commit()
+    assert await get_pinned_redeem_credit_id(account_id, request_id) is None
+    assert await pin_redeem_request(account_id, request_id, "new") == "new"
+    assert await get_pinned_redeem_credit_id(account_id, request_id) == "new"

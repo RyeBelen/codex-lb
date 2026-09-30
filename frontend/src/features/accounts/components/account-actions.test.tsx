@@ -22,6 +22,7 @@ describe("AccountActions", () => {
         onExportAuth={vi.fn()}
         onResetCredit={vi.fn()}
         onSecurityWorkAuthorizedChange={vi.fn()}
+        onAutoResetWhenWeeklyExhaustedChange={vi.fn()}
         onLimitWarmupChange={vi.fn()}
         onRoutingPolicyChange={onRoutingPolicyChange}
       />,
@@ -31,6 +32,80 @@ describe("AccountActions", () => {
     expect(
       screen.getByRole("combobox", { name: "Routing policy" }),
     ).toHaveTextContent("Normal");
+  });
+
+  it("shows the weekly-empty rules and saves the per-account opt-in", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    const account = createAccountSummary({
+      autoRedeemResetCreditsWhenWeeklyExhausted: false,
+    });
+
+    render(
+      <AccountActions
+        account={account}
+        busy={false}
+        onPause={vi.fn()}
+        onResume={vi.fn()}
+        onProbe={vi.fn()}
+        onDelete={vi.fn()}
+        onReauth={vi.fn()}
+        onExportAuth={vi.fn()}
+        onResetCredit={vi.fn()}
+        onSecurityWorkAuthorizedChange={vi.fn()}
+        onAutoResetWhenWeeklyExhaustedChange={onChange}
+        onLimitWarmupChange={vi.fn()}
+        onRoutingPolicyChange={vi.fn()}
+      />,
+    );
+
+    const toggle = screen.getByRole("switch", {
+      name: /Auto-reset when weekly quota is empty/,
+    });
+    expect(toggle).not.toBeChecked();
+    expect(screen.getByText(/weekly quota is 0%/)).toHaveTextContent(
+      "credit expires within 7 days",
+    );
+    expect(screen.getByText(/weekly quota is 0%/)).toHaveTextContent(
+      "weekly refresh is at least 24 hours away",
+    );
+    expect(screen.getByText(/weekly quota is 0%/)).toHaveTextContent(
+      "global five-minute fallback is independent",
+    );
+
+    await user.click(toggle);
+
+    expect(onChange).toHaveBeenCalledWith(account.accountId, true);
+  });
+
+  it.each([
+    ["busy", true, false],
+    ["read-only", false, true],
+  ] as const)("disables weekly-empty opt-in while %s", (_mode, busy, readOnly) => {
+    render(
+      <AccountActions
+        account={createAccountSummary()}
+        busy={busy}
+        readOnly={readOnly}
+        onPause={vi.fn()}
+        onResume={vi.fn()}
+        onProbe={vi.fn()}
+        onDelete={vi.fn()}
+        onReauth={vi.fn()}
+        onExportAuth={vi.fn()}
+        onResetCredit={vi.fn()}
+        onSecurityWorkAuthorizedChange={vi.fn()}
+        onAutoResetWhenWeeklyExhaustedChange={vi.fn()}
+        onLimitWarmupChange={vi.fn()}
+        onRoutingPolicyChange={vi.fn()}
+      />,
+    );
+
+    expect(
+      screen.getByRole("switch", {
+        name: /Auto-reset when weekly quota is empty/,
+      }),
+    ).toBeDisabled();
   });
 
   it("renders re-authenticate action for re-auth required accounts", () => {
@@ -49,6 +124,7 @@ describe("AccountActions", () => {
         onExportAuth={vi.fn()}
         onResetCredit={vi.fn()}
         onSecurityWorkAuthorizedChange={vi.fn()}
+        onAutoResetWhenWeeklyExhaustedChange={vi.fn()}
         onLimitWarmupChange={vi.fn()}
         onRoutingPolicyChange={vi.fn()}
       />,
@@ -82,6 +158,7 @@ describe("AccountActions", () => {
         onExportAuth={vi.fn()}
         onResetCredit={vi.fn()}
         onSecurityWorkAuthorizedChange={vi.fn()}
+        onAutoResetWhenWeeklyExhaustedChange={vi.fn()}
         onLimitWarmupChange={vi.fn()}
         onRoutingPolicyChange={vi.fn()}
       />,
@@ -112,6 +189,7 @@ describe("AccountActions", () => {
           onExportAuth={vi.fn()}
           onResetCredit={vi.fn()}
           onSecurityWorkAuthorizedChange={vi.fn()}
+          onAutoResetWhenWeeklyExhaustedChange={vi.fn()}
           onLimitWarmupChange={vi.fn()}
           onRoutingPolicyChange={vi.fn()}
         />,
@@ -144,6 +222,7 @@ describe("AccountActions", () => {
         onExportAuth={vi.fn()}
         onResetCredit={vi.fn()}
         onSecurityWorkAuthorizedChange={vi.fn()}
+        onAutoResetWhenWeeklyExhaustedChange={vi.fn()}
         onLimitWarmupChange={vi.fn()}
         onRoutingPolicyChange={vi.fn()}
       />,
@@ -177,6 +256,7 @@ describe("AccountActions", () => {
         onExportAuth={vi.fn()}
         onResetCredit={onResetCredit}
         onSecurityWorkAuthorizedChange={vi.fn()}
+        onAutoResetWhenWeeklyExhaustedChange={vi.fn()}
         onLimitWarmupChange={vi.fn()}
         onRoutingPolicyChange={vi.fn()}
       />,
@@ -209,6 +289,7 @@ describe("AccountActions", () => {
           onResetCredit={vi.fn()}
           showResetCreditExpiryBadge={false}
           onSecurityWorkAuthorizedChange={vi.fn()}
+          onAutoResetWhenWeeklyExhaustedChange={vi.fn()}
           onLimitWarmupChange={vi.fn()}
           onRoutingPolicyChange={vi.fn()}
         />,
@@ -244,6 +325,7 @@ describe("AccountActions", () => {
           onExportAuth={vi.fn()}
           onResetCredit={onResetCredit}
           onSecurityWorkAuthorizedChange={vi.fn()}
+          onAutoResetWhenWeeklyExhaustedChange={vi.fn()}
           onLimitWarmupChange={vi.fn()}
           onRoutingPolicyChange={vi.fn()}
         />,
@@ -274,6 +356,7 @@ describe("AccountActions", () => {
         onExportAuth={vi.fn()}
         onResetCredit={vi.fn()}
         onSecurityWorkAuthorizedChange={vi.fn()}
+        onAutoResetWhenWeeklyExhaustedChange={vi.fn()}
         onLimitWarmupChange={vi.fn()}
         onRoutingPolicyChange={vi.fn()}
       />,

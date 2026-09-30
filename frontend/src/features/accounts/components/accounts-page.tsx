@@ -238,6 +238,12 @@ export function AccountsPage() {
                 securityWorkAuthorized: enabled,
               })
             }
+            onAutoResetWhenWeeklyExhaustedChange={(accountId, enabled) =>
+              void updateMutation.mutateAsync({
+                accountId,
+                autoRedeemResetCreditsWhenWeeklyExhausted: enabled,
+              })
+            }
             upstreamProxyAdmin={upstreamProxyQuery.data ?? null}
             onProxyBindingSave={(accountId, payload) =>
               accountBindingMutation.mutateAsync({ accountId, payload })

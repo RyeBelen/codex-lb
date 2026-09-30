@@ -4,6 +4,8 @@
   "accounts.actions.forceProbe": "强制探测",
   "accounts.actions.resetWithCount": "重置 ({{count}})",
   "accounts.actions.routingPolicy": "路由策略",
+  "accounts.actions.autoResetWeeklyEmpty": "每周配额用尽时自动重置",
+  "accounts.actions.autoResetWeeklyEmptyHelp": "当每周配额为 0%、重置券将在 7 天内过期，且距离每周刷新至少还有 24 小时时，使用即将过期的重置券。全局 5 分钟兜底机制独立运行。",
   "accounts.actions.trustedAccess": "受信任访问",
   "accounts.addDialog.description": "选择添加 Codex 账户的方式。",
   "accounts.addDialog.importDescription": "导入已导出的 auth.json 文件。",

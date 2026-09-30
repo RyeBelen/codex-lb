@@ -22,7 +22,7 @@ import logging
 import uuid
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import delete, select, update
+from sqlalchemy import and_, delete, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
@@ -36,6 +36,8 @@ REDEEM_CLAIM_RENEW_INTERVAL_SECONDS = 10.0
 REDEEM_CLAIM_RETRY_INTERVAL_SECONDS = 0.1
 REDEEM_CLAIM_TIMEOUT_SECONDS = 15.0
 REDEEM_REQUEST_TTL = timedelta(hours=24)
+AUTO_REDEEM_REQUEST_PREFIX = "auto-reset-credit:"
+AUTO_REDEEM_REQUEST_TTL = timedelta(days=8)
 
 
 class RedeemClaimTimeoutError(Exception):
@@ -190,20 +192,23 @@ async def release_redeem_claim(account_id: str, holder_id: str) -> None:
 async def get_pinned_redeem_credit_id(account_id: str, redeem_request_id: str) -> str | None:
     """Read the credit pinned to this redeem_request_id by any replica.
 
-    Rows older than the 24h TTL are ignored (the read TTL matches the purge
-    TTL applied by ``pin_redeem_request``), so an expired pin reads as absent.
+    Expired rows are ignored (the read TTL matches the purge TTL applied by
+    ``pin_redeem_request``), so an expired pin reads as absent. Automatic
+    requests remain pinned for eight days; other requests remain pinned for
+    24 hours.
     The caller then re-selects a fresh credit and re-pins it via
     ``pin_redeem_request`` instead of forwarding the redemption for a stale
     credit id that the purge path would otherwise drop.
     """
     now = datetime.now(UTC)
+    ttl = AUTO_REDEEM_REQUEST_TTL if redeem_request_id.startswith(AUTO_REDEEM_REQUEST_PREFIX) else REDEEM_REQUEST_TTL
     session = SessionLocal()
     try:
         return await session.scalar(
             select(ResetCreditRedeemRequest.credit_id).where(
                 ResetCreditRedeemRequest.account_id == account_id,
                 ResetCreditRedeemRequest.redeem_request_id == redeem_request_id,
-                ResetCreditRedeemRequest.created_at >= now - REDEEM_REQUEST_TTL,
+                ResetCreditRedeemRequest.created_at >= now - ttl,
             )
         )
     finally:
@@ -214,11 +219,10 @@ async def pin_redeem_request(account_id: str, redeem_request_id: str, credit_id:
     """Durably pin the selected credit to this redeem request; first writer wins.
 
     Returns the authoritative credit id (the previously pinned one on
-    conflict). Rows older than the 24h TTL for this account are purged in the
-    same transaction BEFORE the insert, so a ``redeem_request_id`` reused after
-    its prior row has aged past the TTL is re-pinned to the new credit instead
-    of colliding with the stale row via ``ON CONFLICT DO NOTHING`` and losing
-    the new pin.
+    conflict). Expired rows for this account are purged in the same transaction
+    BEFORE the insert, so a ``redeem_request_id`` reused after its prior row has
+    aged past its TTL is re-pinned to the new credit instead of colliding with
+    the stale row via ``ON CONFLICT DO NOTHING`` and losing the new pin.
     """
     now = datetime.now(UTC)
     session = SessionLocal()
@@ -229,6 +233,12 @@ async def pin_redeem_request(account_id: str, redeem_request_id: str, credit_id:
             "credit_id": credit_id,
             "created_at": now,
         }
+        # Match Python's case-sensitive prefix check on SQLite as well as
+        # PostgreSQL; SQLite LIKE (used by startswith) is case-insensitive.
+        is_automatic = (
+            func.substr(ResetCreditRedeemRequest.redeem_request_id, 1, len(AUTO_REDEEM_REQUEST_PREFIX))
+            == AUTO_REDEEM_REQUEST_PREFIX
+        )
         # Purge expired rows first: an expired row for the SAME
         # (account_id, redeem_request_id) would otherwise absorb the insert
         # below via ON CONFLICT DO NOTHING and then be deleted, leaving the new
@@ -236,7 +246,16 @@ async def pin_redeem_request(account_id: str, redeem_request_id: str, credit_id:
         await session.execute(
             delete(ResetCreditRedeemRequest).where(
                 ResetCreditRedeemRequest.account_id == account_id,
-                ResetCreditRedeemRequest.created_at < now - REDEEM_REQUEST_TTL,
+                or_(
+                    and_(
+                        is_automatic,
+                        ResetCreditRedeemRequest.created_at < now - AUTO_REDEEM_REQUEST_TTL,
+                    ),
+                    and_(
+                        ~is_automatic,
+                        ResetCreditRedeemRequest.created_at < now - REDEEM_REQUEST_TTL,
+                    ),
+                ),
             )
         )
         dialect = session.get_bind().dialect.name

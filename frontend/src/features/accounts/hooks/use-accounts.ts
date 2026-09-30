@@ -212,8 +212,19 @@ export function useAccountMutations() {
   });
 
   const updateMutation = useMutation({
-    mutationFn: ({ accountId, securityWorkAuthorized }: { accountId: string; securityWorkAuthorized: boolean }) =>
-      updateAccount(accountId, { securityWorkAuthorized }),
+    mutationFn: ({
+      accountId,
+      securityWorkAuthorized,
+      autoRedeemResetCreditsWhenWeeklyExhausted,
+    }: {
+      accountId: string;
+      securityWorkAuthorized?: boolean;
+      autoRedeemResetCreditsWhenWeeklyExhausted?: boolean;
+    }) =>
+      updateAccount(accountId, {
+        securityWorkAuthorized,
+        autoRedeemResetCreditsWhenWeeklyExhausted,
+      }),
     onSuccess: () => {
       toast.success(t("accounts.toasts.updated"));
       void invalidateAccountRelatedQueries(queryClient);

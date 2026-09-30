@@ -60,6 +60,10 @@ _DUPLICATE_ACCOUNT_SUFFIX = "__copy"
 ACCOUNT_PENDING_DELETION_REASON = "pending_deletion"
 
 
+class AccountPreferencePollingDisabledError(Exception):
+    """Raised when a guarded preference update would newly enable auto-redemption."""
+
+
 def credentials_replaced_since_wipe(
     access_token_encrypted: bytes,
     refresh_token_encrypted: bytes,
@@ -763,20 +767,48 @@ class AccountsRepository:
             await self._session.commit()
             return updated_id is not None
 
-    async def update_security_work_authorized(self, account_id: str, enabled: bool) -> bool:
+    async def update_preferences(
+        self,
+        account_id: str,
+        *,
+        security_work_authorized: bool | None = None,
+        auto_redeem_reset_credits_when_weekly_exhausted: bool | None = None,
+        reset_credit_polling_enabled: bool,
+    ) -> bool:
+        values = {}
+        if security_work_authorized is not None:
+            values["security_work_authorized"] = security_work_authorized
+        if auto_redeem_reset_credits_when_weekly_exhausted is not None:
+            values["auto_redeem_reset_credits_when_weekly_exhausted"] = auto_redeem_reset_credits_when_weekly_exhausted
+        if not values:
+            return False
         async with sqlite_writer_section():
-            result = await self._session.execute(
+            statement = (
                 update(Account)
                 .where(Account.id == account_id)
                 # Marked-for-deletion rows are gone from the operator's
                 # perspective: ID-based mutations must report not-found, as the
                 # synchronous delete did once the row was removed.
                 .where(Account.delete_requested_at.is_(None))
-                .values(security_work_authorized=enabled)
+                .values(**values)
                 .returning(Account.id)
             )
+            guarded_enable = (
+                auto_redeem_reset_credits_when_weekly_exhausted is True and not reset_credit_polling_enabled
+            )
+            if guarded_enable:
+                statement = statement.where(Account.auto_redeem_reset_credits_when_weekly_exhausted.is_(True))
+            result = await self._session.execute(statement)
+            updated_id = result.scalar_one_or_none()
+            if updated_id is None and guarded_enable:
+                visible_id = await self._session.scalar(
+                    select(Account.id).where(Account.id == account_id).where(Account.delete_requested_at.is_(None))
+                )
+                if visible_id is not None:
+                    await self._session.rollback()
+                    raise AccountPreferencePollingDisabledError
             await self._session.commit()
-            return result.scalar_one_or_none() is not None
+            return updated_id is not None
 
     async def update_status_if_current(
         self,

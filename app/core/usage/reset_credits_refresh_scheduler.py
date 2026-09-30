@@ -4,12 +4,14 @@ import asyncio
 import contextlib
 import hashlib
 import logging
+import math
 import random
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
-from typing import Any
+from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING, Any
 
+from app.core import usage as usage_core
 from app.core.clients.rate_limit_reset_credits import (
     RateLimitResetCreditsSnapshot,
     ResetCreditFetchError,
@@ -20,7 +22,9 @@ from app.core.clients.rate_limit_reset_credits import (
 )
 from app.core.config.settings import get_settings
 from app.core.crypto import TokenEncryptor
+from app.core.exceptions import DashboardConflictError
 from app.core.upstream_proxy import ResolvedUpstreamRoute, UpstreamProxyRouteError
+from app.core.usage.types import UsageWindowRow
 from app.db.models import Account, AccountStatus
 from app.db.session import detach_session_objects, get_background_session
 from app.modules.accounts.auth_manager import AuthManager
@@ -31,8 +35,12 @@ from app.modules.rate_limit_reset_credits.store import (
     get_rate_limit_reset_credits_store,
 )
 from app.modules.settings.repository import SettingsRepository
+from app.modules.usage.mappers import usage_history_to_window_row
 from app.modules.usage.repository import AdditionalUsageRepository, UsageRepository
 from app.modules.usage.updater import UsageUpdater, _resolve_upstream_route_for_account
+
+if TYPE_CHECKING:
+    from app.modules.rate_limit_reset_credits.api import ResetCreditEligibility
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +56,8 @@ ResolveRouteFn = Callable[[Account], Awaitable[ResolvedUpstreamRoute | None]]
 _TICK_JITTER_LOW = 0.9
 _TICK_JITTER_HIGH = 1.1
 _AUTO_REDEEM_WINDOW_SECONDS = 5 * 60
+_WEEKLY_EMPTY_REDEEM_WINDOW_SECONDS = 7 * 24 * 60 * 60
+_MIN_WEEKLY_RESET_SECONDS = 24 * 60 * 60
 
 
 @dataclass(slots=True)
@@ -84,14 +94,18 @@ class RateLimitResetCreditsRefreshScheduler:
         try:
             async with get_background_session() as session:
                 dashboard_settings = await SettingsRepository(session).get_or_create()
-                auto_redeem_enabled = dashboard_settings.auto_redeem_reset_credits_before_expiry
+                auto_redeem_enabled = dashboard_settings.auto_redeem_reset_credits_before_expiry or any(
+                    account.auto_redeem_reset_credits_when_weekly_exhausted
+                    for account in await AccountsRepository(session).list_accounts()
+                )
         except Exception:
             logger.exception("Reset credits auto-redeem conflict check failed")
             return
         if auto_redeem_enabled:
             logger.warning(
                 "rate_limit_reset_credits_refresh_enabled=false disables automatic reset-credit "
-                "redemption, but dashboard setting auto_redeem_reset_credits_before_expiry is "
+                "redemption, but auto_redeem_reset_credits_before_expiry or "
+                "auto_redeem_reset_credits_when_weekly_exhausted is "
                 "enabled; credits will expire without redemption until polling is re-enabled"
             )
 
@@ -249,11 +263,19 @@ async def _refresh_account_reset_credits(
             account.id,
         )
         return
-    if auto_redeem_before_expiry and _should_auto_redeem_snapshot(
+    last_minute = auto_redeem_before_expiry and _should_auto_redeem_snapshot(
         snapshot,
         window_seconds=auto_redeem_window_seconds,
-    ):
+    )
+    early_weekly = (
+        account.auto_redeem_reset_credits_when_weekly_exhausted
+        and not last_minute
+        and _should_auto_redeem_snapshot(snapshot, window_seconds=_WEEKLY_EMPTY_REDEEM_WINDOW_SECONDS)
+    )
+    if last_minute or early_weekly:
         try:
+            if early_weekly and not await _has_exhausted_weekly_usage(account.id):
+                return
             await _auto_redeem_reset_credit(
                 account,
                 snapshot=snapshot,
@@ -262,7 +284,10 @@ async def _refresh_account_reset_credits(
                 fetch_fn=fetch_fn,
                 redeem_fn=redeem_fn,
                 resolve_route=auto_redeem_resolve_route or resolve_route,
+                require_weekly_exhausted=early_weekly,
             )
+        except DashboardConflictError as exc:
+            logger.info("Automatic reset credit skipped account_id=%s reason=%s", account.id, exc)
         except Exception:
             logger.warning(
                 "Automatic reset credit redeem failed account_id=%s",
@@ -294,6 +319,7 @@ async def _auto_redeem_reset_credit(
     fetch_fn: ResetCreditsFetchFn,
     redeem_fn: ResetCreditsRedeemFn | None,
     resolve_route: ResolveRouteFn | None,
+    require_weekly_exhausted: bool = False,
 ) -> None:
     from app.modules.rate_limit_reset_credits.api import (
         ResetCreditRedeemRequestAlreadyPinned,
@@ -326,7 +352,11 @@ async def _auto_redeem_reset_credit(
                 account.id,
             )
             return
-        if latest_account.status in _RESET_CREDITS_SKIP_STATUSES or not latest_account.chatgpt_account_id:
+        if (
+            latest_account.status in _RESET_CREDITS_SKIP_STATUSES
+            or not latest_account.chatgpt_account_id
+            or latest_account.delete_requested_at is not None
+        ):
             logger.info(
                 "Skipping automatic reset credit redeem because account is no longer eligible "
                 "account_id=%s status=%s has_chatgpt_account_id=%s",
@@ -348,6 +378,8 @@ async def _auto_redeem_reset_credit(
                 skip_if_redeem_request_pinned=True,
                 expected_credit_id=target_credit.id,
                 expected_credit_expires_at=target_credit.expires_at,
+                check_eligibility=_refresh_exhausted_weekly_account if require_weekly_exhausted else None,
+                credit_expiry_window_seconds=_WEEKLY_EMPTY_REDEEM_WINDOW_SECONDS if require_weekly_exhausted else None,
             )
         except ResetCreditRedeemRequestAlreadyPinned as exc:
             logger.info(
@@ -356,6 +388,73 @@ async def _auto_redeem_reset_credit(
                 exc.account_id,
                 exc.credit_id,
             )
+
+
+def _weekly_usage_is_exhausted(row: UsageWindowRow | None) -> bool:
+    return (
+        row is not None
+        and usage_core.is_weekly_window_minutes(row.window_minutes)
+        and row.used_percent is not None
+        and math.isfinite(row.used_percent)
+        and row.used_percent >= 100.0
+        and row.reset_at is not None
+        and math.isfinite(row.reset_at)
+        and row.reset_at - datetime.now(UTC).timestamp() >= _MIN_WEEKLY_RESET_SECONDS
+    )
+
+
+async def _has_exhausted_weekly_usage(account_id: str) -> bool:
+    async with get_background_session() as session:
+        repo = UsageRepository(session)
+        primary = await repo.latest_entry_for_account(account_id, window="primary")
+        secondary = await repo.latest_entry_for_account(account_id, window="secondary")
+        _, weekly = usage_core.normalize_weekly_only_rows(
+            [usage_history_to_window_row(primary)] if primary is not None else [],
+            [usage_history_to_window_row(secondary)] if secondary is not None else [],
+        )
+        return any(_weekly_usage_is_exhausted(row) for row in weekly)
+
+
+async def _refresh_exhausted_weekly_account(account: Account) -> ResetCreditEligibility | None:
+    from app.modules.rate_limit_reset_credits.api import ResetCreditEligibility
+
+    # This separate session may commit usage/auth updates without releasing the
+    # caller's PostgreSQL transaction-scoped redemption lock.
+    async with get_background_session() as session:
+        repo = AccountsRepository(session)
+        current = await repo.get_by_id(account.id)
+        if (
+            current is None
+            or not current.auto_redeem_reset_credits_when_weekly_exhausted
+            or current.status in _RESET_CREDITS_SKIP_STATUSES
+            or current.delete_requested_at is not None
+            or not current.chatgpt_account_id
+        ):
+            return None
+        result = await UsageUpdater(
+            UsageRepository(session),
+            repo,
+            AdditionalUsageRepository(session),
+            auth_manager=AuthManager(repo),
+        ).force_refresh_result(current, ignore_refresh_disabled=True)
+        if not result.fetch_succeeded:
+            return None
+        get_account_selection_cache().invalidate()
+        await session.refresh(current)
+        if (
+            not current.auto_redeem_reset_credits_when_weekly_exhausted
+            or not _weekly_usage_is_exhausted(result.weekly_window)
+            or current.status in _RESET_CREDITS_SKIP_STATUSES
+            or current.delete_requested_at is not None
+            or not current.chatgpt_account_id
+            or current.chatgpt_account_id != account.chatgpt_account_id
+        ):
+            return None
+        weekly = result.weekly_window
+        assert weekly is not None and weekly.reset_at is not None
+        valid_until = datetime.fromtimestamp(weekly.reset_at, UTC) - timedelta(seconds=_MIN_WEEKLY_RESET_SECONDS)
+        detach_session_objects(session)
+        return ResetCreditEligibility(account=current, valid_until=valid_until)
 
 
 def _auto_redeem_request_id(account: Account, snapshot: RateLimitResetCreditsSnapshot) -> str | None:

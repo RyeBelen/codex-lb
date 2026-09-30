@@ -24,6 +24,8 @@ function account(overrides: Partial<AccountSummary> & Pick<AccountSummary, "acco
     displayName: overrides.displayName ?? overrides.email,
     planType: overrides.planType ?? "plus",
     limitWarmupEnabled: overrides.limitWarmupEnabled ?? false,
+    autoRedeemResetCreditsWhenWeeklyExhausted:
+      overrides.autoRedeemResetCreditsWhenWeeklyExhausted ?? false,
     limitWarmup: overrides.limitWarmup ?? null,
     usage: overrides.usage ?? null,
     resetAtPrimary: overrides.resetAtPrimary ?? null,

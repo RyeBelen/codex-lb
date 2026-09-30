@@ -133,6 +133,7 @@ class AccountSummary(DashboardModel):
     deactivation_reason: str | None = None
     auth: AccountAuthStatus | None = None
     limit_warmup_enabled: bool = False
+    auto_redeem_reset_credits_when_weekly_exhausted: bool = False
     limit_warmup: AccountLimitWarmupStatus | None = None
     # True when another account row in the same response shares this real email,
     # ChatGPT account identity, and workspace slot.
@@ -189,6 +190,7 @@ class AccountOpenCodeAuthExportResponse(DashboardModel):
 
 class AccountUpdateRequest(DashboardModel):
     security_work_authorized: bool | None = None
+    auto_redeem_reset_credits_when_weekly_exhausted: bool | None = None
 
 
 class AccountUpdateResponse(DashboardModel):

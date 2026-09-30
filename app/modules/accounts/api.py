@@ -12,6 +12,7 @@ from app.core.auth.dependencies import (
 )
 from app.core.auth.refresh import RefreshError
 from app.core.clients.usage import UsageFetchError
+from app.core.config.settings import get_settings
 from app.core.exceptions import (
     DashboardBadRequestError,
     DashboardConflictError,
@@ -24,7 +25,10 @@ from app.core.multipart_fields import required_upload
 from app.core.upstream_proxy import UpstreamProxyRouteError
 from app.dependencies import AccountsContext, get_accounts_context, get_proxy_service_for_app
 from app.modules.accounts.access_repository import AccountAccessPolicy, UnknownAccessKeyError
-from app.modules.accounts.repository import AccountIdentityConflictError
+from app.modules.accounts.repository import (
+    AccountIdentityConflictError,
+    AccountPreferencePollingDisabledError,
+)
 from app.modules.accounts.schemas import (
     AccountAccessRequest,
     AccountAccessResponse,
@@ -346,10 +350,20 @@ async def update_account(
     changed_fields = [field for field, value in payload.model_dump(exclude_unset=True).items() if value is not None]
     if not changed_fields:
         raise DashboardBadRequestError("No supported account fields to update", code="empty_account_update")
-    success = await context.service.update_account(
-        account_id,
-        security_work_authorized=payload.security_work_authorized,
-    )
+    reset_credit_polling_enabled = get_settings().rate_limit_reset_credits_refresh_enabled
+    try:
+        success = await context.service.update_account(
+            account_id,
+            security_work_authorized=payload.security_work_authorized,
+            auto_redeem_reset_credits_when_weekly_exhausted=(payload.auto_redeem_reset_credits_when_weekly_exhausted),
+            reset_credit_polling_enabled=reset_credit_polling_enabled,
+        )
+    except AccountPreferencePollingDisabledError as exc:
+        raise DashboardBadRequestError(
+            "autoRedeemResetCreditsWhenWeeklyExhausted requires reset-credit polling; "
+            "set CODEX_LB_RATE_LIMIT_RESET_CREDITS_REFRESH_ENABLED=true first",
+            code="reset_credit_polling_disabled",
+        ) from exc
     if not success:
         raise DashboardNotFoundError("Account not found", code="account_not_found")
     AuditService.log_async(
