@@ -1,9 +1,12 @@
 import { screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { HttpResponse, http } from "msw";
 import { describe, expect, it, vi } from "vitest";
 
 import { renderWithProviders } from "@/test/utils";
 import type { ModelSource } from "@/features/model-sources/schemas";
+import { createApiKey } from "@/test/mocks/factories";
+import { server } from "@/test/mocks/server";
 
 import { ModelSourceEditDialog } from "./model-source-edit-dialog";
 
@@ -21,6 +24,7 @@ function createModelSource(overrides: Partial<ModelSource> = {}): ModelSource {
     supportsEmbeddings: false,
     timeoutSeconds: null,
     maxConcurrency: null,
+    allowedApiKeyIds: [],
     createdAt: "2026-07-03T00:00:00Z",
     updatedAt: "2026-07-03T00:00:00Z",
     models: [
@@ -49,6 +53,66 @@ function createModelSource(overrides: Partial<ModelSource> = {}): ModelSource {
 }
 
 describe("ModelSourceEditDialog", () => {
+  it("round-trips available keys and lets operators remove unavailable selections", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    server.use(
+      http.get("/api/api-keys/", () =>
+        HttpResponse.json([
+          createApiKey({ id: "key_one", name: "Personal", keyPrefix: "sk-safe-one" }),
+          createApiKey({ id: "key_two", name: "Shared", keyPrefix: "sk-safe-two" }),
+        ]),
+      ),
+    );
+
+    renderWithProviders(
+      <ModelSourceEditDialog
+        open
+        busy={false}
+        source={createModelSource({ allowedApiKeyIds: ["key_one", "key_deleted"] })}
+        onOpenChange={vi.fn()}
+        onSubmit={onSubmit}
+      />,
+    );
+
+    expect(screen.getByRole("dialog")).toHaveClass(
+      "max-h-[calc(100dvh-2rem)]",
+      "overflow-y-auto",
+    );
+    expect(await screen.findByRole("checkbox", { name: /Personal sk-safe-one/ })).toBeChecked();
+    expect(screen.getByRole("checkbox", { name: /Unavailable API key \(key_deleted\)/ })).toBeChecked();
+
+    await user.click(screen.getByRole("checkbox", { name: /Unavailable API key \(key_deleted\)/ }));
+    await user.click(screen.getByRole("checkbox", { name: /Shared sk-safe-two/ }));
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+    expect(onSubmit.mock.calls[0][1].allowedApiKeyIds).toEqual(["key_one", "key_two"]);
+  });
+
+  it("preserves saved selections when API keys fail to load", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    server.use(http.get("/api/api-keys/", () => new HttpResponse(null, { status: 500 })));
+
+    renderWithProviders(
+      <ModelSourceEditDialog
+        open
+        busy={false}
+        source={createModelSource({ allowedApiKeyIds: ["key_saved"] })}
+        onOpenChange={vi.fn()}
+        onSubmit={onSubmit}
+      />,
+    );
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("Saved selections are unchanged");
+    expect(screen.getByRole("checkbox", { name: /Unavailable API key \(key_saved\)/ })).toBeChecked();
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+    expect(onSubmit.mock.calls[0][1].allowedApiKeyIds).toEqual(["key_saved"]);
+  });
+
   it("prefills existing fields including pricing and models", () => {
     renderWithProviders(
       <ModelSourceEditDialog

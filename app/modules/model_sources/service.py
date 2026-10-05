@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import json
 import uuid
+from collections.abc import Sequence
 from urllib.parse import urlparse
 
 from app.core.crypto import TokenEncryptor
 from app.db.models import ModelSource, ModelSourceModel
+from app.modules.model_sources.access import source_allowed_api_key_ids
 from app.modules.model_sources.repository import ModelSourcesRepository
 from app.modules.model_sources.schemas import (
     ModelSourceCreateRequest,
@@ -45,6 +47,7 @@ class ModelSourcesService:
         return await self._repository.list_enabled_sources()
 
     async def create_source(self, payload: ModelSourceCreateRequest) -> ModelSourceResponse:
+        allowed_api_key_ids = await self._validate_allowed_api_key_ids(payload.allowed_api_key_ids)
         model_rows = _model_inputs_to_rows(payload.models)
         row = ModelSource(
             id=f"src_{uuid.uuid4().hex}",
@@ -52,6 +55,7 @@ class ModelSourcesService:
             kind=MODEL_SOURCE_KIND_OPENAI_COMPATIBLE,
             base_url=_normalize_base_url(payload.base_url),
             api_key_encrypted=_encrypt_optional(self._encryptor, payload.api_key),
+            allowed_api_key_ids_json=json.dumps(allowed_api_key_ids),
             is_enabled=True,
             health_status=MODEL_SOURCE_HEALTH_UNKNOWN,
             supports_chat_completions=payload.supports_chat_completions,
@@ -75,6 +79,11 @@ class ModelSourcesService:
             raise ModelSourceNotFoundError(f"Model source not found: {source_id}")
 
         fields = payload.model_fields_set
+        if "allowed_api_key_ids" in fields:
+            ids = await self._validate_allowed_api_key_ids(
+                payload.allowed_api_key_ids, retained_ids=source_allowed_api_key_ids(row)
+            )
+            row.allowed_api_key_ids_json = json.dumps(ids)
         if "name" in fields and payload.name is not None:
             row.name = _normalize_name(payload.name)
         if "base_url" in fields and payload.base_url is not None:
@@ -121,6 +130,13 @@ class ModelSourcesService:
         deleted = await self._repository.delete(source_id)
         if not deleted:
             raise ModelSourceNotFoundError(f"Model source not found: {source_id}")
+
+    async def _validate_allowed_api_key_ids(self, ids: list[str], *, retained_ids: Sequence[str] = ()) -> list[str]:
+        selected = sorted(set(ids))
+        new_ids = sorted(set(selected) - set(retained_ids))
+        if new_ids and await self._repository.missing_api_key_ids(new_ids):
+            raise ModelSourceValidationError("Selected API key does not exist")
+        return selected
 
 
 def _normalize_name(value: str) -> str:
@@ -222,6 +238,7 @@ def _to_response(row: ModelSource) -> ModelSourceResponse:
         name=row.name,
         kind=row.kind,
         base_url=row.base_url,
+        allowed_api_key_ids=source_allowed_api_key_ids(row),
         is_enabled=row.is_enabled,
         health_status=row.health_status,
         supports_chat_completions=row.supports_chat_completions,

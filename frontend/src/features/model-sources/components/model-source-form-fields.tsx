@@ -5,6 +5,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { FormControl, FormField, FormItem, FormLabel, FormMessage } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { ModelSourceApiKeyWhitelist } from "@/features/model-sources/components/model-source-api-key-whitelist";
 import type {
   ModelSourceDraft,
   ModelSourceFormValues,
@@ -84,6 +85,11 @@ export function ModelSourceFormFields({
             <FormMessage />
           </FormItem>
         )}
+      />
+
+      <ModelSourceApiKeyWhitelist
+        selectedIds={draft.allowedApiKeyIds}
+        onChange={(allowedApiKeyIds) => updateDraft({ allowedApiKeyIds })}
       />
 
       <FormField

@@ -432,6 +432,7 @@ class _AliasSourceCatalog:
                 self,
                 candidate: str,
                 *,
+                api_key_id: str | None = None,
                 allowed_source_ids=None,  # noqa: ANN001
                 require_streaming: bool = False,
                 only_disabled: bool = False,

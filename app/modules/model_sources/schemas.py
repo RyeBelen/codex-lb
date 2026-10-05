@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Annotated
 
 from pydantic import Field
 
@@ -34,6 +35,7 @@ class ModelSourceCreateRequest(DashboardModel):
     name: str = Field(min_length=1, max_length=128)
     base_url: str = Field(min_length=1, max_length=2048)
     api_key: str | None = Field(default=None, min_length=1)
+    allowed_api_key_ids: list[Annotated[str, Field(min_length=1, max_length=128)]] = Field(default_factory=list)
     supports_chat_completions: bool = True
     supports_responses: bool = False
     supports_audio_transcriptions: bool = False
@@ -47,6 +49,7 @@ class ModelSourceUpdateRequest(DashboardModel):
     name: str | None = Field(default=None, min_length=1, max_length=128)
     base_url: str | None = Field(default=None, min_length=1, max_length=2048)
     api_key: str | None = Field(default=None, min_length=1)
+    allowed_api_key_ids: list[Annotated[str, Field(min_length=1, max_length=128)]] = Field(default_factory=list)
     is_enabled: bool | None = None
     supports_chat_completions: bool | None = None
     supports_responses: bool | None = None
@@ -62,6 +65,7 @@ class ModelSourceResponse(DashboardModel):
     name: str
     kind: str
     base_url: str
+    allowed_api_key_ids: list[str] = Field(default_factory=list)
     is_enabled: bool
     health_status: str
     supports_chat_completions: bool

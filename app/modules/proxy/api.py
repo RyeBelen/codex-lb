@@ -196,6 +196,7 @@ from app.modules.api_keys.service import (
 )
 from app.modules.firewall.repository import FirewallRepository
 from app.modules.firewall.service import FirewallRepositoryPort, FirewallService
+from app.modules.model_sources.access import source_allows_api_key
 from app.modules.model_sources.catalog import (
     source_model_audio_cost_usd,
     source_model_cost_usd,
@@ -3976,6 +3977,9 @@ async def _list_enabled_source_catalog_models(
     assigned_source_ids = _allowed_source_ids_for_api_key(api_key)
     if assigned_source_ids is not None:
         sources = [source for source in sources if source.id in assigned_source_ids]
+    sources = [
+        source for source in sources if source_allows_api_key(source, api_key.id if api_key is not None else None)
+    ]
     return source_models_to_upstream_models(sources)
 
 
@@ -4562,6 +4566,7 @@ async def _select_chat_model_source(
                 continue
             source = await repository.find_chat_source_for_model(
                 candidate,
+                api_key_id=api_key.id if api_key is not None else None,
                 allowed_source_ids=assigned_source_ids,
                 require_streaming=require_streaming,
                 only_disabled=only_disabled,
@@ -4708,6 +4713,7 @@ async def _select_embeddings_model_source(model: str, api_key: ApiKeyData | None
     async with get_background_session() as session:
         source = await ModelSourcesRepository(session).find_embeddings_source_for_model(
             model,
+            api_key_id=api_key.id if api_key is not None else None,
             allowed_source_ids=assigned_source_ids,
         )
         detach_session_objects(session)
@@ -4723,6 +4729,7 @@ async def _select_audio_transcriptions_model_source(model: str, api_key: ApiKeyD
     async with get_background_session() as session:
         source = await ModelSourcesRepository(session).find_audio_transcriptions_source_for_model(
             model,
+            api_key_id=api_key.id if api_key is not None else None,
             allowed_source_ids=assigned_source_ids,
         )
         detach_session_objects(session)

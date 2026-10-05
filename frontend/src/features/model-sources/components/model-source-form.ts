@@ -24,10 +24,10 @@ export const modelSourceFormSchema = z.object({
 
 export type ModelSourceFormValues = z.infer<typeof modelSourceFormSchema>;
 
-// Per-model settings the dialogs apply uniformly across every model ID entered
-// for the source. Pricing is USD per 1M tokens; blank means "unknown" (cost
-// settles at $0 for that model).
+// Shared source and per-model settings used by both dialogs. Pricing is USD per
+// 1M tokens; blank means "unknown" (cost settles at $0 for that model).
 export type ModelSourceDraft = {
+  allowedApiKeyIds: string[];
   supportsChatCompletions: boolean;
   supportsResponses: boolean;
   supportsAudioTranscriptions: boolean;
@@ -48,6 +48,7 @@ export type ModelSourceDraft = {
 };
 
 export const initialModelSourceDraft: ModelSourceDraft = {
+  allowedApiKeyIds: [],
   supportsChatCompletions: true,
   supportsResponses: false,
   supportsAudioTranscriptions: false,
@@ -260,6 +261,7 @@ export function draftFromSource(source: ModelSource): ModelSourceDraft {
   const firstModel = source.models[0];
   const reasoningMetadata = parseReasoningMetadata(firstModel?.rawMetadataJson);
   return {
+    allowedApiKeyIds: source.allowedApiKeyIds,
     supportsChatCompletions: source.supportsChatCompletions,
     supportsResponses: source.supportsResponses,
     supportsAudioTranscriptions: source.supportsAudioTranscriptions,

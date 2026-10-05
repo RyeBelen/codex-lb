@@ -1288,6 +1288,7 @@ class ModelSource(Base):
     )
     base_url: Mapped[str] = mapped_column(String, nullable=False)
     api_key_encrypted: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    allowed_api_key_ids_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     is_enabled: Mapped[bool] = mapped_column(Boolean, default=True, server_default=true(), nullable=False)
     health_status: Mapped[str] = mapped_column(
         String,

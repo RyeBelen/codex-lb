@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-from sqlalchemy import ColumnElement, and_, delete, or_, select
+from sqlalchemy import ColumnElement, Select, and_, delete, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.db.models import ModelSource, ModelSourceModel
+from app.db.models import ApiKey, ModelSource, ModelSourceModel
+from app.modules.model_sources.access import source_allows_api_key
 
 
 def _enablement_filter(only_disabled: bool) -> ColumnElement[bool]:
@@ -25,6 +26,17 @@ def _enablement_filter(only_disabled: bool) -> ColumnElement[bool]:
 class ModelSourcesRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
+
+    async def missing_api_key_ids(self, ids: list[str]) -> set[str]:
+        result = await self._session.execute(select(ApiKey.id).where(ApiKey.id.in_(ids)))
+        return set(ids) - set(result.scalars())
+
+    async def _first_accessible_source(
+        self, stmt: Select[tuple[ModelSource]], api_key_id: str | None
+    ) -> ModelSource | None:
+        # ponytail: scan matching sources; use indexed grants if candidate catalogs become large.
+        result = await self._session.execute(stmt)
+        return next((source for source in result.scalars() if source_allows_api_key(source, api_key_id)), None)
 
     async def list_sources(self) -> list[ModelSource]:
         result = await self._session.execute(
@@ -51,6 +63,7 @@ class ModelSourcesRepository:
         self,
         model: str,
         *,
+        api_key_id: str | None = None,
         allowed_source_ids: set[str] | None = None,
         require_streaming: bool = False,
         only_disabled: bool = False,
@@ -64,7 +77,6 @@ class ModelSourcesRepository:
             .where(ModelSourceModel.model == model)
             .where(_enablement_filter(only_disabled))
             .order_by(ModelSource.name, ModelSource.id)
-            .limit(1)
         )
         if require_streaming:
             stmt = stmt.where(ModelSourceModel.supports_streaming.is_(True))
@@ -72,13 +84,13 @@ class ModelSourcesRepository:
             if not allowed_source_ids:
                 return None
             stmt = stmt.where(ModelSource.id.in_(allowed_source_ids))
-        result = await self._session.execute(stmt)
-        return result.scalar_one_or_none()
+        return await self._first_accessible_source(stmt, api_key_id)
 
     async def find_responses_source_for_model(
         self,
         model: str,
         *,
+        api_key_id: str | None = None,
         allowed_source_ids: set[str] | None = None,
         require_streaming: bool = False,
         only_disabled: bool = False,
@@ -92,7 +104,6 @@ class ModelSourcesRepository:
             .where(ModelSourceModel.model == model)
             .where(_enablement_filter(only_disabled))
             .order_by(ModelSource.name, ModelSource.id)
-            .limit(1)
         )
         if require_streaming:
             stmt = stmt.where(ModelSourceModel.supports_streaming.is_(True))
@@ -100,13 +111,13 @@ class ModelSourcesRepository:
             if not allowed_source_ids:
                 return None
             stmt = stmt.where(ModelSource.id.in_(allowed_source_ids))
-        result = await self._session.execute(stmt)
-        return result.scalar_one_or_none()
+        return await self._first_accessible_source(stmt, api_key_id)
 
     async def find_audio_transcriptions_source_for_model(
         self,
         model: str,
         *,
+        api_key_id: str | None = None,
         allowed_source_ids: set[str] | None = None,
     ) -> ModelSource | None:
         stmt = (
@@ -119,19 +130,18 @@ class ModelSourcesRepository:
             .where(ModelSourceModel.model == model)
             .where(ModelSourceModel.is_enabled.is_(True))
             .order_by(ModelSource.name, ModelSource.id)
-            .limit(1)
         )
         if allowed_source_ids is not None:
             if not allowed_source_ids:
                 return None
             stmt = stmt.where(ModelSource.id.in_(allowed_source_ids))
-        result = await self._session.execute(stmt)
-        return result.scalar_one_or_none()
+        return await self._first_accessible_source(stmt, api_key_id)
 
     async def find_embeddings_source_for_model(
         self,
         model: str,
         *,
+        api_key_id: str | None = None,
         allowed_source_ids: set[str] | None = None,
     ) -> ModelSource | None:
         stmt = (
@@ -144,14 +154,12 @@ class ModelSourcesRepository:
             .where(ModelSourceModel.model == model)
             .where(ModelSourceModel.is_enabled.is_(True))
             .order_by(ModelSource.name, ModelSource.id)
-            .limit(1)
         )
         if allowed_source_ids is not None:
             if not allowed_source_ids:
                 return None
             stmt = stmt.where(ModelSource.id.in_(allowed_source_ids))
-        result = await self._session.execute(stmt)
-        return result.scalar_one_or_none()
+        return await self._first_accessible_source(stmt, api_key_id)
 
     async def create(self, row: ModelSource, *, commit: bool = True) -> ModelSource:
         self._session.add(row)

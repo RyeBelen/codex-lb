@@ -188,6 +188,7 @@ function ModelSourceEditForm({ source, busy, onSubmit, onClose }: ModelSourceEdi
       supportsResponses: draft.supportsResponses,
       supportsAudioTranscriptions: draft.supportsAudioTranscriptions,
       supportsEmbeddings: draft.supportsEmbeddings,
+      allowedApiKeyIds: draft.allowedApiKeyIds,
     };
 
     if (modelIdsChanged || hasAnyModelDraftChange(draftChangeFlags)) {
@@ -244,7 +245,7 @@ export function ModelSourceEditDialog({
   const { t } = useTranslation();
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-2xl">
+      <DialogContent className="max-h-[calc(100dvh-2rem)] overflow-y-auto sm:max-w-2xl">
         <DialogHeader>
 	          <DialogTitle>{t("modelSources.editDialog.title")}</DialogTitle>
 	          <DialogDescription>{t("modelSources.editDialog.description")}</DialogDescription>

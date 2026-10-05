@@ -63,6 +63,7 @@ async def select_responses_model_source(
                 continue
             source = await repository.find_responses_source_for_model(
                 candidate,
+                api_key_id=api_key.id if api_key is not None else None,
                 allowed_source_ids=assigned_source_ids,
                 require_streaming=require_streaming,
                 only_disabled=only_disabled,

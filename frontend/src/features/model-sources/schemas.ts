@@ -33,6 +33,7 @@ export const ModelSourceSchema = z.object({
   supportsEmbeddings: z.boolean().default(false),
   timeoutSeconds: z.number().int().positive().nullable().default(null),
   maxConcurrency: z.number().int().positive().nullable().default(null),
+  allowedApiKeyIds: z.array(z.string()).default([]),
   createdAt: z.iso.datetime({ offset: true }),
   updatedAt: z.iso.datetime({ offset: true }),
   models: z.array(ModelSourceModelSchema).default([]),
@@ -68,6 +69,7 @@ export const ModelSourceCreateRequestSchema = z.object({
   supportsEmbeddings: z.boolean().optional(),
   timeoutSeconds: z.number().int().positive().nullable().optional(),
   maxConcurrency: z.number().int().positive().nullable().optional(),
+  allowedApiKeyIds: z.array(z.string()).optional(),
   models: z.array(ModelSourceModelInputSchema).default([]),
 });
 
@@ -82,6 +84,7 @@ export const ModelSourceUpdateRequestSchema = z.object({
   supportsEmbeddings: z.boolean().optional(),
   timeoutSeconds: z.number().int().positive().nullable().optional(),
   maxConcurrency: z.number().int().positive().nullable().optional(),
+  allowedApiKeyIds: z.array(z.string()).optional(),
   models: z.array(ModelSourceModelInputSchema).optional(),
 });
 

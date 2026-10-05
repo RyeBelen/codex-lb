@@ -53,6 +53,7 @@ describe("ModelSourceSchema", () => {
     expect(parsed.id).toBe("src_vllm");
     expect(parsed.supportsAudioTranscriptions).toBe(true);
     expect(parsed.supportsEmbeddings).toBe(true);
+    expect(parsed.allowedApiKeyIds).toEqual([]);
     expect(parsed.models[0].model).toBe("local-coder");
   });
 
@@ -84,11 +85,13 @@ describe("ModelSourceCreateRequestSchema", () => {
       supportsResponses: true,
       supportsAudioTranscriptions: true,
       supportsEmbeddings: true,
+      allowedApiKeyIds: ["key_1"],
       models: [{ model: "deepseek-v4-flash" }],
     });
 
     expect(parsed.supportsAudioTranscriptions).toBe(true);
     expect(parsed.supportsEmbeddings).toBe(true);
+    expect(parsed.allowedApiKeyIds).toEqual(["key_1"]);
     expect(parsed.models[0].model).toBe("deepseek-v4-flash");
   });
 });
@@ -100,5 +103,11 @@ describe("ModelSourceUpdateRequestSchema", () => {
     });
 
     expect(parsed.isEnabled).toBe(false);
+  });
+
+  it("accepts explicitly clearing the API key whitelist", () => {
+    const parsed = ModelSourceUpdateRequestSchema.parse({ allowedApiKeyIds: [] });
+
+    expect(parsed.allowedApiKeyIds).toEqual([]);
   });
 });
