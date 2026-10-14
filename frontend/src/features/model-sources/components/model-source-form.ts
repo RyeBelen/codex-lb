@@ -11,7 +11,7 @@ export function createModelSourceFormSchema(t: TFunction) {
     name: z.string().min(1, t("modelSources.validation.nameRequired")),
     baseUrl: z.string().min(1, t("modelSources.validation.baseUrlRequired")),
     apiKey: z.string(),
-    models: z.string().min(1, t("modelSources.validation.modelsRequired")),
+    models: z.string(),
   });
 }
 
@@ -19,7 +19,7 @@ export const modelSourceFormSchema = z.object({
   name: z.string().min(1, "Name is required"),
   baseUrl: z.string().min(1, "Base URL is required"),
   apiKey: z.string(),
-  models: z.string().min(1, "At least one model is required"),
+  models: z.string(),
 });
 
 export type ModelSourceFormValues = z.infer<typeof modelSourceFormSchema>;
@@ -283,7 +283,7 @@ export function draftFromSource(source: ModelSource): ModelSourceDraft {
 }
 
 export function modelIdsToInput(source: ModelSource): string {
-  return source.models.map((model) => model.model).join(", ");
+  return source.autoDiscoverModels ? "" : source.models.map((model) => model.model).join(", ");
 }
 
 export function rawMetadataByModel(source: ModelSource): Record<string, string | null> {

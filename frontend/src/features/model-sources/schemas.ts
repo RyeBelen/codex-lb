@@ -31,6 +31,7 @@ export const ModelSourceSchema = z.object({
   supportsResponses: z.boolean(),
   supportsAudioTranscriptions: z.boolean().default(false),
   supportsEmbeddings: z.boolean().default(false),
+  autoDiscoverModels: z.boolean().default(false),
   timeoutSeconds: z.number().int().positive().nullable().default(null),
   maxConcurrency: z.number().int().positive().nullable().default(null),
   allowedApiKeyIds: z.array(z.string()).default([]),

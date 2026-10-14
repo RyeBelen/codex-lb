@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { renderHook, waitFor } from "@testing-library/react";
+import { act, renderHook, waitFor } from "@testing-library/react";
 import { createElement, type PropsWithChildren } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -36,10 +36,40 @@ function createWrapper(queryClient: QueryClient) {
 }
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.clearAllMocks();
 });
 
 describe("useModelSources", () => {
+  it("polls while an enabled automatic source exists and stops when it no longer does", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const queryClient = createTestQueryClient();
+    const automatic = createModelSource({ autoDiscoverModels: true, isEnabled: true });
+    const manual = createModelSource({ autoDiscoverModels: false, isEnabled: true });
+    const disabledAutomatic = createModelSource({
+      id: "source_disabled_auto",
+      autoDiscoverModels: true,
+      isEnabled: false,
+    });
+    modelSourceApiMocks.listModelSources
+      .mockResolvedValueOnce({ sources: [automatic] })
+      .mockResolvedValueOnce({ sources: [manual, disabledAutomatic] });
+
+    const { useModelSources } = await import("@/features/model-sources/hooks/use-model-sources");
+    const { result } = renderHook(() => useModelSources(), {
+      wrapper: createWrapper(queryClient),
+    });
+
+    await waitFor(() => expect(result.current.modelSourcesQuery.isSuccess).toBe(true));
+    expect(modelSourceApiMocks.listModelSources).toHaveBeenCalledTimes(1);
+
+    await act(() => vi.advanceTimersByTimeAsync(30_000));
+    await waitFor(() => expect(modelSourceApiMocks.listModelSources).toHaveBeenCalledTimes(2));
+
+    await act(() => vi.advanceTimersByTimeAsync(60_000));
+    expect(modelSourceApiMocks.listModelSources).toHaveBeenCalledTimes(2);
+  });
+
   it("invalidates source, key, and model picker queries after mutations", async () => {
     const queryClient = createTestQueryClient();
     const invalidateSpy = vi.spyOn(queryClient, "invalidateQueries");

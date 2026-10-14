@@ -9,6 +9,32 @@ import { server } from "@/test/mocks/server";
 import { renderWithProviders } from "@/test/utils";
 
 describe("ModelSourceCreateDialog", () => {
+  it("creates an automatic source when model IDs are blank", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+
+    renderWithProviders(
+      <ModelSourceCreateDialog
+        open
+        busy={false}
+        onOpenChange={vi.fn()}
+        onSubmit={onSubmit}
+      />,
+    );
+
+    await user.type(screen.getByLabelText("Name"), "Automatic source");
+    await user.type(screen.getByLabelText("Base URL"), "https://auto.example/v1");
+    await user.type(screen.getByLabelText("Models"), ",  ,");
+    expect(screen.getByText(/startup and every 5 minutes/)).toBeInTheDocument();
+    expect(screen.getByRole("checkbox", { name: "Streaming" })).toBeDisabled();
+    expect(screen.getByRole("checkbox", { name: "Responses" })).toBeEnabled();
+
+    await user.click(screen.getByRole("button", { name: "Create" }));
+
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+    expect(onSubmit.mock.calls[0][0].models).toEqual([]);
+  });
+
   it("submits selected API keys from a scrollable dialog", async () => {
     const user = userEvent.setup();
     const onSubmit = vi.fn().mockResolvedValue(undefined);

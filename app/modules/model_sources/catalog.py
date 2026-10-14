@@ -59,6 +59,7 @@ def _to_upstream_model(source: ModelSource, source_model: ModelSourceModel) -> U
 
     input_modalities = ("text", "image") if source_model.supports_vision else ("text",)
     display_name = source_model.display_name or source_model.model
+    description = raw.get("description")
     # The dashboard's single Reasoning switch is the master gate: it is the
     # only reasoning control an operator has in the UI, so a model with it off
     # must not advertise efforts it will never be allowed to use. Keeping the
@@ -73,7 +74,7 @@ def _to_upstream_model(source: ModelSource, source_model: ModelSourceModel) -> U
     return UpstreamModel(
         slug=source_model.model,
         display_name=display_name,
-        description=display_name,
+        description=description if isinstance(description, str) else display_name,
         context_window=context_window,
         input_modalities=input_modalities,
         supported_reasoning_levels=reasoning_levels,

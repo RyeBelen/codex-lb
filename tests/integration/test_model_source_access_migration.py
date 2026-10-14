@@ -22,7 +22,7 @@ def test_source_whitelist_migration_preserves_sources_and_roundtrips(tmp_path):
         )
         connection.execute("INSERT INTO model_source_models (source_id,model) VALUES ('src','local-model')")
     config = _build_alembic_config(url)
-    assert ScriptDirectory.from_config(config).get_heads() == ["20261005_000000_add_model_source_api_key_whitelist"]
+    assert ScriptDirectory.from_config(config).get_heads() == ["20261005_010000_add_source_catalog_discovery"]
     run_upgrade(url, "head", bootstrap_legacy=False)
     assert not check_schema_drift(url)
     with sqlite3.connect(path) as connection:

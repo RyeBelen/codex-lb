@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from sqlalchemy import ColumnElement, Select, and_, delete, or_, select
+from sqlalchemy import ColumnElement, Select, and_, delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -58,6 +58,65 @@ class ModelSourcesRepository:
             select(ModelSource).options(selectinload(ModelSource.models)).where(ModelSource.id == source_id)
         )
         return result.scalar_one_or_none()
+
+    async def list_automatic_sources(self) -> list[ModelSource]:
+        result = await self._session.execute(
+            select(ModelSource)
+            .where(ModelSource.is_enabled.is_(True), ModelSource.auto_discover_models.is_(True))
+            .where(ModelSource.kind == "openai_compatible")
+            .order_by(ModelSource.id)
+        )
+        return list(result.scalars().all())
+
+    async def advance_catalog_revision(self, source: ModelSource) -> None:
+        # Atomic increment also serializes operator model writes with discovery.
+        await self._session.execute(
+            update(ModelSource)
+            .where(ModelSource.id == source.id)
+            .values(catalog_revision=ModelSource.catalog_revision + 1)
+        )
+
+    async def apply_discovered_models(self, source_id: str, revision: int, models: list[ModelSourceModel]) -> bool:
+        # Lock/check before reading child rows: no edit can slip between the
+        # configuration check and catalog reconciliation (including on SQLite).
+        result = await self._session.execute(
+            update(ModelSource)
+            .where(
+                ModelSource.id == source_id,
+                ModelSource.catalog_revision == revision,
+                ModelSource.auto_discover_models.is_(True),
+                ModelSource.is_enabled.is_(True),
+            )
+            .values(updated_at=func.now())
+            .returning(ModelSource.id)
+        )
+        if result.scalar_one_or_none() is None:
+            await self._session.rollback()
+            return False
+        source = await self.get_by_id(source_id)
+        assert source is not None
+        existing = {row.model: row for row in source.models}
+        for incoming in models:
+            retained = existing.pop(incoming.model, None)
+            if retained is None:
+                incoming.source_id = source_id
+                self._session.add(incoming)
+                continue
+            retained.display_name = incoming.display_name
+            retained.context_window = incoming.context_window
+            retained.max_output_tokens = incoming.max_output_tokens
+            retained.supports_streaming = incoming.supports_streaming
+            retained.supports_tools = incoming.supports_tools
+            retained.supports_vision = incoming.supports_vision
+            retained.input_per_1m = incoming.input_per_1m
+            retained.cached_input_per_1m = incoming.cached_input_per_1m
+            retained.output_per_1m = incoming.output_per_1m
+            retained.audio_per_minute = incoming.audio_per_minute
+            retained.raw_metadata_json = incoming.raw_metadata_json
+        for missing in existing.values():
+            await self._session.delete(missing)
+        await self._session.commit()
+        return True
 
     async def find_chat_source_for_model(
         self,

@@ -1,6 +1,7 @@
-import type { Control } from "react-hook-form";
+import { useWatch, type Control } from "react-hook-form";
 import { useTranslation } from "react-i18next";
 
+import { Badge } from "@/components/ui/badge";
 import { Checkbox } from "@/components/ui/checkbox";
 import { FormControl, FormField, FormItem, FormLabel, FormMessage } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
@@ -11,6 +12,7 @@ import type {
   ModelSourceFormValues,
 } from "@/features/model-sources/components/model-source-form";
 import { parseReasoningEffortsInput } from "@/features/model-sources/components/model-source-form";
+import type { ModelSourceModel } from "@/features/model-sources/schemas";
 
 type ModelSourceFormFieldsProps = {
   control: Control<ModelSourceFormValues>;
@@ -18,17 +20,18 @@ type ModelSourceFormFieldsProps = {
   updateDraft: (patch: Partial<ModelSourceDraft>) => void;
   apiKeyLabel: string;
   apiKeyPlaceholder?: string;
+  discoveredModels?: ModelSourceModel[];
 };
 
 const CAPABILITY_TOGGLES = [
-  ["supportsChatCompletions", "modelSources.capabilities.chatCompletions"] as const,
-  ["supportsResponses", "modelSources.capabilities.responses"] as const,
-  ["supportsAudioTranscriptions", "modelSources.capabilities.audioTranscriptions"] as const,
-  ["supportsEmbeddings", "modelSources.capabilities.embeddings"] as const,
-  ["supportsStreaming", "modelSources.capabilities.streaming"] as const,
-  ["supportsTools", "modelSources.capabilities.tools"] as const,
-  ["supportsVision", "modelSources.capabilities.vision"] as const,
-  ["supportsReasoning", "modelSources.capabilities.reasoning"] as const,
+  ["supportsChatCompletions", "modelSources.capabilities.chatCompletions", false] as const,
+  ["supportsResponses", "modelSources.capabilities.responses", false] as const,
+  ["supportsAudioTranscriptions", "modelSources.capabilities.audioTranscriptions", false] as const,
+  ["supportsEmbeddings", "modelSources.capabilities.embeddings", false] as const,
+  ["supportsStreaming", "modelSources.capabilities.streaming", true] as const,
+  ["supportsTools", "modelSources.capabilities.tools", true] as const,
+  ["supportsVision", "modelSources.capabilities.vision", true] as const,
+  ["supportsReasoning", "modelSources.capabilities.reasoning", true] as const,
 ];
 
 const DEFAULT_REASONING_EFFORTS = ["low", "medium", "high"];
@@ -39,8 +42,11 @@ export function ModelSourceFormFields({
   updateDraft,
   apiKeyLabel,
   apiKeyPlaceholder,
+  discoveredModels,
 }: ModelSourceFormFieldsProps) {
   const { t } = useTranslation();
+  const models = useWatch({ control, name: "models" });
+  const automatic = !models.split(/[\n,]/).some((model) => model.trim().length > 0);
   return (
     <>
       <div className="grid gap-3 sm:grid-cols-2">
@@ -101,10 +107,41 @@ export function ModelSourceFormFields({
             <FormControl>
               <Input {...field} placeholder="deepseek-v4-flash, local-coder" autoComplete="off" />
             </FormControl>
+            <p className="text-xs text-muted-foreground">
+              {t("modelSources.fields.modelsDescription")}
+            </p>
             <FormMessage />
           </FormItem>
         )}
       />
+
+      {automatic && discoveredModels ? (
+        <div className="space-y-2 rounded-md border bg-muted/30 p-3">
+          <div className="text-sm font-medium">{t("modelSources.fields.discoveredModels")}</div>
+          <p className="text-xs text-muted-foreground">
+            {t("modelSources.fields.discoveredModelsDescription")}
+          </p>
+          <div className="flex flex-wrap gap-1.5">
+            {discoveredModels.length > 0 ? (
+              discoveredModels.map((model) => (
+                <Badge key={model.id} variant={model.isEnabled ? "outline" : "secondary"}>
+                  {model.displayName || model.model}
+                </Badge>
+              ))
+            ) : (
+              <span className="text-xs text-muted-foreground">
+                {t("modelSources.fields.noDiscoveredModels")}
+              </span>
+            )}
+          </div>
+        </div>
+      ) : null}
+
+      {automatic ? (
+        <p className="text-xs text-muted-foreground">
+          {t("modelSources.fields.automaticMetadataDescription")}
+        </p>
+      ) : null}
 
       <div className="grid gap-3 sm:grid-cols-2">
         <div className="space-y-1">
@@ -114,6 +151,7 @@ export function ModelSourceFormFields({
             onChange={(event) => updateDraft({ contextWindow: event.target.value })}
             placeholder="e.g. 32768"
             inputMode="numeric"
+            disabled={automatic}
           />
         </div>
         <div className="space-y-1">
@@ -123,6 +161,7 @@ export function ModelSourceFormFields({
             onChange={(event) => updateDraft({ maxOutputTokens: event.target.value })}
             placeholder="e.g. 4096"
             inputMode="numeric"
+            disabled={automatic}
           />
         </div>
       </div>
@@ -140,6 +179,7 @@ export function ModelSourceFormFields({
               onChange={(event) => updateDraft({ inputPer1M: event.target.value })}
               placeholder="0.00"
               inputMode="decimal"
+              disabled={automatic}
             />
           </div>
           <div className="space-y-1">
@@ -149,6 +189,7 @@ export function ModelSourceFormFields({
               onChange={(event) => updateDraft({ cachedInputPer1M: event.target.value })}
               placeholder="0.00"
               inputMode="decimal"
+              disabled={automatic}
             />
           </div>
           <div className="space-y-1">
@@ -158,6 +199,7 @@ export function ModelSourceFormFields({
               onChange={(event) => updateDraft({ outputPer1M: event.target.value })}
               placeholder="0.00"
               inputMode="decimal"
+              disabled={automatic}
             />
           </div>
         </div>
@@ -176,16 +218,18 @@ export function ModelSourceFormFields({
               onChange={(event) => updateDraft({ audioPerMinute: event.target.value })}
               placeholder="0.00"
               inputMode="decimal"
+              disabled={automatic}
             />
           </div>
         </div>
       </div>
 
       <div className="grid gap-2 sm:grid-cols-2">
-	        {CAPABILITY_TOGGLES.map(([key, labelKey]) => (
+	        {CAPABILITY_TOGGLES.map(([key, labelKey, providerOwned]) => (
           <label key={key} className="flex items-center gap-2 rounded-md border p-2 text-sm">
             <Checkbox
               checked={draft[key]}
+              disabled={automatic && providerOwned}
               onCheckedChange={(checked) =>
                 updateDraft({
                   [key]: checked === true,
@@ -238,6 +282,7 @@ export function ModelSourceFormFields({
               }}
               placeholder={t("modelSources.fields.reasoningEffortsPlaceholder")}
               autoComplete="off"
+              disabled={automatic}
             />
           </div>
 
@@ -251,7 +296,7 @@ export function ModelSourceFormFields({
             <Select
               value={draft.defaultReasoningEffort}
               onValueChange={(value) => updateDraft({ defaultReasoningEffort: value })}
-              disabled={draft.reasoningEfforts.length === 0}
+              disabled={automatic || draft.reasoningEfforts.length === 0}
             >
               <SelectTrigger
                 id="model-source-default-reasoning-effort"

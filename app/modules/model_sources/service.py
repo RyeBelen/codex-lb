@@ -56,6 +56,8 @@ class ModelSourcesService:
             base_url=_normalize_base_url(payload.base_url),
             api_key_encrypted=_encrypt_optional(self._encryptor, payload.api_key),
             allowed_api_key_ids_json=json.dumps(allowed_api_key_ids),
+            auto_discover_models=not payload.models,
+            catalog_revision=0,
             is_enabled=True,
             health_status=MODEL_SOURCE_HEALTH_UNKNOWN,
             supports_chat_completions=payload.supports_chat_completions,
@@ -107,9 +109,12 @@ class ModelSourcesService:
 
         models_replaced = False
         try:
+            await self._repository.advance_catalog_revision(row)
             if "models" in fields and payload.models is not None:
-                await self._repository.replace_models(row, _model_inputs_to_rows(payload.models), commit=False)
-                models_replaced = True
+                row.auto_discover_models = not payload.models
+                if payload.models:
+                    await self._repository.replace_models(row, _model_inputs_to_rows(payload.models), commit=False)
+                    models_replaced = True
             await self._repository.commit()
         except Exception:
             await self._repository.rollback()
@@ -239,6 +244,7 @@ def _to_response(row: ModelSource) -> ModelSourceResponse:
         kind=row.kind,
         base_url=row.base_url,
         allowed_api_key_ids=source_allowed_api_key_ids(row),
+        auto_discover_models=row.auto_discover_models,
         is_enabled=row.is_enabled,
         health_status=row.health_status,
         supports_chat_completions=row.supports_chat_completions,

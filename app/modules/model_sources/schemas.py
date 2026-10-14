@@ -66,6 +66,7 @@ class ModelSourceResponse(DashboardModel):
     kind: str
     base_url: str
     allowed_api_key_ids: list[str] = Field(default_factory=list)
+    auto_discover_models: bool = False
     is_enabled: bool
     health_status: str
     supports_chat_completions: bool

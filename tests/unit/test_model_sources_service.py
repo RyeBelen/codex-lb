@@ -40,6 +40,9 @@ class _FakeRepository:
     async def commit(self) -> None:
         self.committed = True
 
+    async def advance_catalog_revision(self, source: ModelSource) -> None:
+        source.catalog_revision += 1
+
     async def rollback(self) -> None:
         self.rolled_back = True
 

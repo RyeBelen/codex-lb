@@ -20,6 +20,13 @@ export function useModelSources() {
   const { data, error, isFetching, isLoading, isPending, isSuccess, refetch } = useQuery({
     queryKey: ["model-sources", "list"],
     queryFn: listModelSources,
+    refetchInterval: (query) =>
+      query.state.data?.sources.some(
+        (source) => source.isEnabled && source.autoDiscoverModels,
+      )
+        ? 30_000
+        : false,
+    refetchIntervalInBackground: false,
   });
   const modelSourcesQuery = { data, error, isFetching, isLoading, isPending, isSuccess, refetch };
 

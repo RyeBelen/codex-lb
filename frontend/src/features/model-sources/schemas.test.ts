@@ -53,6 +53,7 @@ describe("ModelSourceSchema", () => {
     expect(parsed.id).toBe("src_vllm");
     expect(parsed.supportsAudioTranscriptions).toBe(true);
     expect(parsed.supportsEmbeddings).toBe(true);
+    expect(parsed.autoDiscoverModels).toBe(false);
     expect(parsed.allowedApiKeyIds).toEqual([]);
     expect(parsed.models[0].model).toBe("local-coder");
   });
@@ -64,6 +65,13 @@ describe("ModelSourceSchema", () => {
     const parsed = ModelSourceSchema.parse(withoutEmbeddings);
 
     expect(parsed.supportsEmbeddings).toBe(false);
+  });
+
+  it("accepts automatic discovery and defaults old fixtures to manual mode", () => {
+    expect(ModelSourceSchema.parse(BASE_SOURCE).autoDiscoverModels).toBe(false);
+    expect(
+      ModelSourceSchema.parse({ ...BASE_SOURCE, autoDiscoverModels: true }).autoDiscoverModels,
+    ).toBe(true);
   });
 });
 

@@ -22,6 +22,7 @@ function createModelSource(overrides: Partial<ModelSource> = {}): ModelSource {
     supportsResponses: false,
     supportsAudioTranscriptions: false,
     supportsEmbeddings: false,
+    autoDiscoverModels: false,
     timeoutSeconds: null,
     maxConcurrency: null,
     allowedApiKeyIds: [],
@@ -53,6 +54,99 @@ function createModelSource(overrides: Partial<ModelSource> = {}): ModelSource {
 }
 
 describe("ModelSourceEditDialog", () => {
+  it("keeps an automatic source blank and preserves its discovered cache on unrelated edits", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    const source = createModelSource({
+      autoDiscoverModels: true,
+      models: [
+        {
+          ...createModelSource().models[0],
+          displayName: "Discovered Coder",
+          supportsStreaming: true,
+          supportsTools: true,
+        },
+      ],
+    });
+
+    renderWithProviders(
+      <ModelSourceEditDialog
+        open
+        busy={false}
+        source={source}
+        onOpenChange={vi.fn()}
+        onSubmit={onSubmit}
+      />,
+    );
+
+    expect(screen.getByLabelText("Models")).toHaveValue("");
+    expect(screen.getByText("Discovered models")).toBeInTheDocument();
+    expect(screen.getByText("Discovered Coder")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("0.5")).toBeDisabled();
+    expect(screen.getByRole("checkbox", { name: "Streaming" })).toBeDisabled();
+    expect(screen.getByRole("checkbox", { name: "Tools" })).toBeDisabled();
+    expect(screen.getByRole("checkbox", { name: "Responses" })).toBeEnabled();
+
+    await user.clear(screen.getByLabelText("Name"));
+    await user.type(screen.getByLabelText("Name"), "Automatic source updated");
+    await user.click(screen.getByRole("checkbox", { name: "Responses" }));
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+    expect(onSubmit.mock.calls[0][1]).toMatchObject({
+      name: "Automatic source updated",
+      supportsResponses: true,
+    });
+    expect(onSubmit.mock.calls[0][1].models).toBeUndefined();
+  });
+
+  it("switches a manual source to automatic when model IDs are cleared", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+
+    renderWithProviders(
+      <ModelSourceEditDialog
+        open
+        busy={false}
+        source={createModelSource()}
+        onOpenChange={vi.fn()}
+        onSubmit={onSubmit}
+      />,
+    );
+
+    await user.clear(screen.getByLabelText("Models"));
+    expect(screen.getByDisplayValue("0.5")).toBeDisabled();
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+    expect(onSubmit.mock.calls[0][1].models).toEqual([]);
+  });
+
+  it("switches an automatic source to manual even when an entered ID matches its cache", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    const source = createModelSource({ autoDiscoverModels: true });
+
+    renderWithProviders(
+      <ModelSourceEditDialog
+        open
+        busy={false}
+        source={source}
+        onOpenChange={vi.fn()}
+        onSubmit={onSubmit}
+      />,
+    );
+
+    await user.type(screen.getByLabelText("Models"), "Qwen/Qwen3.6-27B-FP8");
+    expect(screen.getByDisplayValue("0.5")).toBeEnabled();
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+    expect(onSubmit.mock.calls[0][1].models).toEqual([
+      expect.objectContaining({ model: "Qwen/Qwen3.6-27B-FP8", inputPer1M: 0.5 }),
+    ]);
+  });
+
   it("round-trips available keys and lets operators remove unavailable selections", async () => {
     const user = userEvent.setup();
     const onSubmit = vi.fn().mockResolvedValue(undefined);

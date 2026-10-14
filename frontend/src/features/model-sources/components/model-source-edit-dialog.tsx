@@ -179,7 +179,8 @@ function ModelSourceEditForm({ source, busy, onSubmit, onClose }: ModelSourceEdi
     const draftChangeFlags = getModelDraftChangeFlags(draft, initialDraft);
     const sourceModelIds = source.models.map((model) => model.model);
     const modelNames = splitModelIds(values.models);
-    const modelIdsChanged = !modelIdsMatch(modelNames, sourceModelIds);
+    const configuredModelIds = source.autoDiscoverModels ? [] : sourceModelIds;
+    const modelIdsChanged = !modelIdsMatch(modelNames, configuredModelIds);
 
     const payload: ModelSourceUpdateRequest = {
       name: values.name,
@@ -222,6 +223,7 @@ function ModelSourceEditForm({ source, busy, onSubmit, onClose }: ModelSourceEdi
           control={form.control}
           draft={draft}
           updateDraft={updateDraft}
+	          discoveredModels={source.autoDiscoverModels ? source.models : undefined}
 	          apiKeyLabel={t("modelSources.fields.upstreamApiKey")}
 	          apiKeyPlaceholder={t("modelSources.editDialog.keepCurrentKey")}
         />

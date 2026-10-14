@@ -1,0 +1,9 @@
+# Verification
+
+- First focused backend run: 204 passed; one new assertion expected 404 for an excluded chat source. Existing fallback correctly returns 503/no_accounts; corrected expectation and asserted zero dispatch. That test passed in the extended run.
+- Extended source/scheduler/leader/registry/WebSocket/migration run: 139 passed, 5 PostgreSQL-only migration cases skipped. Seven startup cases exposed duplicate columns when reconciling legacy history against an already-current schema; fixed the unpublished migration with existence guards and initial-only backfill. All 8 affected startup cases then passed.
+- After migration fix, both discovery and whitelist migration roundtrip tests passed (2 tests), with single head and no schema drift. Isolated CLI upgrade head/check passed (migration_policy=ok, schema_drift=none).
+- Backend full `ty check`, scoped Ruff, proxy architecture and cancellation checks passed. Legacy SQLite expression-index reflection warnings remain in startup migration tests.
+- Frontend Model Source suite: 5 files / 28 tests passed. Native TypeScript build check, scoped ESLint, locale JSON and git diff whitespace checks passed. Chromium local-fixture QA at 390x844 passed automatic badge/catalog, disabled provider metadata, editable source protocols, vertical overflow/Save reachability and PATCH omission of models. Screenshot /tmp/clb-model-source-discovery-mobile.png predates only the final neutral cached-model copy substitution; all QA processes stopped.
+- Strict delta and all 60 main specifications validated before archival; final post-archive validation recorded in Maeve run.
+- Root reviewed full source/frontend change and shared source access/catalog/routing callers. No live provider calls, actual production credentials, external writes, commits, pushes or deployment occurred. Local verification uses SQLite and HTTP/browser fixtures; PostgreSQL-specific deployment is unverified. KO/ZH copy not native-speaker reviewed.

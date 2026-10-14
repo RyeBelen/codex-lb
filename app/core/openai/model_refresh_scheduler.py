@@ -30,6 +30,7 @@ from app.db.session import detach_session_objects, get_background_session
 from app.modules.accounts.auth_manager import AuthManager
 from app.modules.accounts.background_repository import BackgroundAccountsRepository
 from app.modules.accounts.repository import AccountsRepository
+from app.modules.model_sources.discovery import refresh_source_catalogs
 from app.modules.proxy.account_cache import get_account_selection_cache
 
 logger = logging.getLogger(__name__)
@@ -67,6 +68,7 @@ def _get_leader_election() -> _LeaderElectionLike:
 class ModelRefreshScheduler:
     interval_seconds: int
     enabled: bool
+    refresh_subscription_models: bool = True
     _task: asyncio.Task[None] | None = None
     _stop: asyncio.Event = field(default_factory=asyncio.Event)
 
@@ -97,7 +99,7 @@ class ModelRefreshScheduler:
 
     async def _refresh_once(self) -> None:
         ran_as_leader = await _get_leader_election().run_if_leader(self._refresh_as_leader)
-        if not ran_as_leader:
+        if not ran_as_leader and self.refresh_subscription_models:
             # Never fetch upstream on a non-leader; reconcile from the persisted
             # snapshot instead. This is the TTL backstop for a lost invalidation
             # bump — the 0.5s cache-invalidation poller is the fast path. Also
@@ -106,6 +108,9 @@ class ModelRefreshScheduler:
             await reconcile_model_registry_from_store()
 
     async def _refresh_as_leader(self) -> bool:
+        await refresh_source_catalogs()
+        if not self.refresh_subscription_models:
+            return True
         try:
             async with get_background_session() as session:
                 accounts_repo = AccountsRepository(session)
@@ -416,5 +421,6 @@ def build_model_refresh_scheduler() -> ModelRefreshScheduler:
     settings = get_settings()
     return ModelRefreshScheduler(
         interval_seconds=_REFRESH_INTERVAL_SECONDS,
-        enabled=settings.model_registry_enabled,
+        enabled=True,
+        refresh_subscription_models=settings.model_registry_enabled,
     )

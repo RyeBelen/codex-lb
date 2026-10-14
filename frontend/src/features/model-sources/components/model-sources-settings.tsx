@@ -54,7 +54,7 @@ export function ModelSourcesSettings({ disabled = false }: ModelSourcesSettingsP
   const sources = modelSourcesQuery.data?.sources ?? [];
   const busy =
     disabled ||
-    modelSourcesQuery.isFetching ||
+    modelSourcesQuery.isLoading ||
     createMutation.isPending ||
     updateMutation.isPending ||
     deleteMutation.isPending;
@@ -109,6 +109,9 @@ export function ModelSourcesSettings({ disabled = false }: ModelSourcesSettingsP
                     <Badge variant={source.isEnabled ? "default" : "secondary"}>
 	                      {source.isEnabled ? t("common.states.enabled") : t("common.states.disabled")}
                     </Badge>
+                    {source.autoDiscoverModels ? (
+                      <Badge variant="secondary">{t("modelSources.modeAutomatic")}</Badge>
+                    ) : null}
                     {protocolBadges(source).map((protocol) => (
                       <Badge key={protocol} variant="secondary">
                         {protocol}

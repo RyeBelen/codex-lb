@@ -192,6 +192,15 @@ def _disable_account_usage_summary_cache(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _disable_model_refresh_scheduler_startup(monkeypatch):
+    # Source discovery is always scheduled in production. Direct scheduler
+    # tests run real instances; unrelated app tests must not fetch providers.
+    import app.main as main_module
+
+    monkeypatch.setattr(main_module, "build_model_refresh_scheduler", lambda: _NoopScheduler())
+
+
+@pytest.fixture(autouse=True)
 def _disable_rate_limit_reset_credits_scheduler_startup(monkeypatch):
     import app.main as main_module
 
