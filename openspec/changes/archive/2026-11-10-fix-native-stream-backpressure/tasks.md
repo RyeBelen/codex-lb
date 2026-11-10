@@ -8,8 +8,7 @@
 ## 2. Verification and release
 
 - [x] 2.1 Run focused regressions, lint, types, and strict OpenSpec validation; commit the scoped fix.
-- [ ] 2.2 Build and verify an isolated immutable candidate against the exact production image, including native wire bursts and inference.
-- [ ] 2.3 Preserve production data/configuration and verify independent health monitoring and rollback before rollout.
-- [ ] 2.4 Roll out with automatic recovery armed and verify production readiness, inference, and error behavior.
-- [ ] 2.5 Record evidence, sync normative specs and stable context, verify and archive the change, and commit final artifacts.
-
+- [x] 2.2 Build and verify an isolated immutable candidate against the exact production image, including native wire bursts and inference.
+- [x] 2.3 Preserve production data/configuration and verify independent health monitoring and rollback before rollout.
+- [x] 2.4 Roll out with automatic recovery armed and verify production readiness, inference, and error behavior.
+- [x] 2.5 Record evidence, sync normative specs and stable context, verify and archive the change, and commit final artifacts.
