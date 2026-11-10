@@ -1,0 +1,20 @@
+{
+  "time": "2026-11-10T10:44:59.914282+00:00",
+  "state": "complete",
+  "image": "sha256:6dcc38ad70ef13797c9073b355ff9d8a531a4623cbcc3e644f16bbea881f31c6",
+  "container": "7b2a4b899546",
+  "prod_commit": "1268467448f275aedaa8bfa0e7f10b5ca83b6532",
+  "source_type": "github",
+  "auto_deploy": true,
+  "verified_pr_head": "001178d80529869ab9112ac7bdd3492c3e890d36",
+  "ci_run": "https://github.com/RyeBelen/codex-lb/actions/runs/42799874623",
+  "readiness_samples": 24,
+  "readiness_failures": 0,
+  "http_inference": "passed",
+  "websocket_continuation": "passed",
+  "compaction": "passed",
+  "rollback_image": "sha256:3f1addbd44c2f6194b19c12284986fa5954f1c4f3005f1bf12c45421821f1fd0",
+  "automatic_swarm_rollback": true,
+  "update_order": "stop-first",
+  "live_database_retained": true
+}
