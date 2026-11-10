@@ -32,6 +32,7 @@ _REQUIRED_NATIVE_CAPABILITIES = frozenset(
 _NATIVE_EVENT_LINE_LIMIT = 24 * 1024 * 1024
 _NATIVE_STREAM_QUEUE_LIMIT = 64
 _NATIVE_WEBSOCKET_MESSAGE_QUEUE_LIMIT = 64
+_NATIVE_QUEUE_DRAIN_TURNS = 64
 _NATIVE_CANCEL_TIMEOUT_SECONDS = 2.0
 _NATIVE_WEBSOCKET_COMMAND_TIMEOUT_SECONDS = 30.0
 
@@ -69,6 +70,10 @@ class NativeEgressTransportError(NativeEgressError):
         self.status_code = status_code
         self.headers = headers
         self.body = body
+
+    @property
+    def is_local_failure(self) -> bool:
+        return self.failure_phase in {"helper_exit", "helper_read", "helper_write", "shutdown", "consumer_backpressure"}
 
 
 @dataclass(frozen=True, slots=True)
@@ -369,7 +374,7 @@ class NativeEgressWebSocket:
                     text = item.get("text")
                     if not isinstance(text, str):
                         raise NativeEgressProtocolError("native websocket text event is invalid")
-                    self._queue_message(NativeWebSocketMessage(kind="text", text=text))
+                    await self._queue_message(NativeWebSocketMessage(kind="text", text=text))
                     continue
                 if event_type == "websocket_binary":
                     encoded = item.get("data")
@@ -379,7 +384,7 @@ class NativeEgressWebSocket:
                         data = base64.b64decode(encoded, validate=True)
                     except ValueError as exc:
                         raise NativeEgressProtocolError("native websocket binary event is not base64") from exc
-                    self._queue_message(NativeWebSocketMessage(kind="binary", data=data))
+                    await self._queue_message(NativeWebSocketMessage(kind="binary", data=data))
                     continue
                 if event_type == "websocket_close":
                     code = item.get("code")
@@ -389,7 +394,7 @@ class NativeEgressWebSocket:
                     if reason is not None and not isinstance(reason, str):
                         raise NativeEgressProtocolError("native websocket close reason is invalid")
                     self._remote_closed = True
-                    self._queue_message(
+                    await self._queue_message(
                         NativeWebSocketMessage(
                             kind="close",
                             close_code=code,
@@ -435,9 +440,9 @@ class NativeEgressWebSocket:
                 self._queue_terminal(terminal_failure)
             self._finish()
 
-    def _queue_message(self, message: NativeWebSocketMessage) -> None:
+    async def _queue_message(self, message: NativeWebSocketMessage) -> None:
         try:
-            self._messages.put_nowait(message)
+            await _queue_with_consumer_turns(self._messages, message)
         except asyncio.QueueFull as exc:
             while not self._messages.empty():
                 with contextlib.suppress(asyncio.QueueEmpty):
@@ -488,6 +493,7 @@ class SubprocessNativeEgressClient:
         self.executable = Path(executable)
         self._process: asyncio.subprocess.Process | None = None
         self._reader_task: asyncio.Task[None] | None = None
+        self._cancel_tasks: set[asyncio.Task[None]] = set()
         self._generation = 0
         self._request_sequence = 0
         self._streams: dict[
@@ -669,6 +675,10 @@ class SubprocessNativeEgressClient:
                     reader_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError, NativeEgressError):
                     await reader_task
+            cancel_tasks = tuple(self._cancel_tasks)
+            for task in cancel_tasks:
+                task.cancel()
+            await asyncio.gather(*cancel_tasks, return_exceptions=True)
             self._fail_generation(
                 generation,
                 NativeEgressTransportError("native helper closed", failure_phase="shutdown"),
@@ -783,12 +793,7 @@ class SubprocessNativeEgressClient:
                     continue
                 events = state[1]
                 try:
-                    events.put_nowait(event)
-                    if event.get("type") in {"head", "websocket_open"}:
-                        # Hand the accepted response to its consumer before a
-                        # helper with already-buffered output can fill the body
-                        # queue in this reader task's scheduling turn.
-                        await asyncio.sleep(0)
+                    await _queue_with_consumer_turns(events, event)
                 except asyncio.QueueFull:
                     overflow_failure = NativeEgressTransportError(
                         "native stream consumer exceeded the bounded event queue",
@@ -799,10 +804,12 @@ class SubprocessNativeEgressClient:
                         with contextlib.suppress(asyncio.QueueEmpty):
                             events.get_nowait()
                     events.put_nowait(overflow_failure)
-                    asyncio.create_task(
+                    cancel_task = asyncio.create_task(
                         self._cancel_orphaned_request(process, generation, request_id),
                         name=f"native-egress-overflow-cancel-{request_id}",
                     )
+                    self._cancel_tasks.add(cancel_task)
+                    cancel_task.add_done_callback(self._cancel_tasks.discard)
         except NativeEgressProtocolError as exc:
             failure = exc
         except BaseException as exc:
@@ -901,6 +908,20 @@ class SubprocessNativeEgressClient:
                     events.get_nowait()
             with contextlib.suppress(asyncio.QueueFull):
                 events.put_nowait(failure)
+
+
+async def _queue_with_consumer_turns[T](queue: asyncio.Queue[T], item: T) -> None:
+    # Buffered pipe reads and queue operations may never suspend. Consumers
+    # using wait_for or async parsers need several scheduling turns per item.
+    # Give them a bounded chance to drain a full queue, without waiting for
+    # a stalled consumer's I/O or blocking the shared reader indefinitely.
+    for _ in range(_NATIVE_QUEUE_DRAIN_TURNS):
+        if not queue.full():
+            queue.put_nowait(item)
+            await asyncio.sleep(0)
+            return
+        await asyncio.sleep(0)
+    queue.put_nowait(item)
 
 
 @lru_cache(maxsize=1)

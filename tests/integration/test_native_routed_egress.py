@@ -9,8 +9,10 @@ from typing import Any, cast
 
 import aiohttp
 import pytest
+from aiohttp import web
 from websockets.asyncio.server import serve as websocket_serve
 
+import app.core.clients.proxy_websocket as websocket_module
 from app.core.clients.codex import CodexClient
 from app.core.clients.native_egress import (
     SubprocessNativeEgressClient,
@@ -20,6 +22,7 @@ from app.core.clients.native_egress import (
 from app.core.clients.proxy import stream_responses
 from app.core.clients.proxy_websocket import (
     _RESPONSES_WEBSOCKET_POLICY,
+    NativeUpstreamWebSocket,
     _connect_upstream_websocket,
 )
 from app.core.openai.requests import ResponsesRequest
@@ -32,6 +35,96 @@ class _UnexpectedPythonSession:
 
     def ws_connect(self, *_args: object, **_kwargs: object) -> object:
         raise AssertionError("native routed websocket must not use aiohttp")
+
+
+@pytest.mark.asyncio
+async def test_native_wire_bursts_reach_http_and_websocket_relays(monkeypatch: pytest.MonkeyPatch) -> None:
+    helper = os.environ.get("CODEX_LB_NATIVE_EGRESS_TEST_BINARY")
+    if not helper:
+        pytest.skip("set CODEX_LB_NATIVE_EGRESS_TEST_BINARY to run the native burst wire probe")
+    count = 512
+    events = [json.dumps({"type": "response.output_text.delta", "delta": str(i)}) for i in range(count)]
+    events.append(json.dumps({"type": "response.completed", "response": {"id": "resp_burst"}}))
+
+    async def http_handler(request: web.Request) -> web.StreamResponse:
+        response = web.StreamResponse(headers={"Content-Type": "text/event-stream"})
+        await response.prepare(request)
+        for event in events:
+            await response.write(f"data: {event}\n\n".encode())
+        await response.write_eof()
+        return response
+
+    async def websocket_handler(request: web.Request) -> web.WebSocketResponse:
+        response = web.WebSocketResponse()
+        await response.prepare(request)
+        await response.receive()
+        for event in events:
+            await response.send_str(event)
+        await response.close()
+        return response
+
+    app = web.Application()
+    app.router.add_post("/codex/responses", http_handler)
+    app.router.add_get("/codex/responses", websocket_handler)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    port = runner.addresses[0][1]
+    native = SubprocessNativeEgressClient(helper)
+    monkeypatch.setattr(websocket_module, "discover_native_egress_client", lambda: native)
+    client = CodexClient(_UnexpectedPythonSession(), native_egress_client=native)
+    try:
+
+        async def read_http() -> None:
+            received = [
+                event
+                async for event in stream_responses(
+                    ResponsesRequest(model="gpt-5.4", instructions="", input="burst", stream=True),
+                    {},
+                    "wire-probe-token",
+                    "account-wire-probe",
+                    base_url=f"http://127.0.0.1:{port}",
+                    upstream_stream_transport_override="http",
+                    allow_direct_egress=True,
+                    suppress_live_usage=True,
+                    session=cast(aiohttp.ClientSession, _UnexpectedPythonSession()),
+                    native_egress_client=native,
+                )
+            ]
+            assert received == [f"data: {event}\n\n" for event in events]
+
+        async def read_websocket() -> None:
+            socket = await _connect_upstream_websocket(
+                {},
+                "wire-probe-token",
+                "account-wire-probe",
+                url=f"ws://127.0.0.1:{port}/codex/responses",
+                allow_direct_egress=True,
+                codex_client=client,
+                policy=_RESPONSES_WEBSOCKET_POLICY,
+            )
+            assert isinstance(socket, websocket_module.ArchivingUpstreamWebSocket)
+            assert isinstance(socket._wrapped, NativeUpstreamWebSocket)
+            try:
+                await socket.send_text('{"type":"response.create"}')
+                for event in events:
+                    message = await asyncio.wait_for(socket.receive(), 5)
+                    assert message.kind == "text"
+                    assert message.text == event
+                assert (await asyncio.wait_for(socket.receive(), 5)).kind == "close"
+            finally:
+                await socket.close()
+
+        async with asyncio.timeout(20), asyncio.TaskGroup() as group:
+            for _ in range(2):
+                group.create_task(read_http())
+                group.create_task(read_websocket())
+        assert not native._streams
+    finally:
+        await client.close()
+        await native.aclose()
+        await runner.cleanup()
 
 
 async def _copy_stream(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:

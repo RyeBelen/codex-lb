@@ -314,6 +314,22 @@ async def test_native_direct_adapter_classifies_helper_pong_timeout() -> None:
 
 
 @pytest.mark.asyncio
+async def test_native_backpressure_logs_safe_phase_and_remains_account_neutral(caplog) -> None:
+    class NativeConnection(_FakeNativeWebSocket):
+        async def receive(self) -> NativeWebSocketMessage:
+            raise NativeEgressTransportError(
+                "secret upstream payload must not be logged", failure_phase="consumer_backpressure"
+            )
+
+    websocket = NativeUpstreamWebSocket(cast(Any, NativeConnection()))
+    message = await websocket.receive()
+    assert message.kind == "error"
+    assert message.error_code == "proxy_network_unavailable"
+    assert "operation=receive failure_phase=consumer_backpressure" in caplog.text
+    assert "secret upstream payload" not in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_direct_adapter_does_not_trust_peer_keepalive_timeout_marker() -> None:
     class Connection:
         async def recv(self):

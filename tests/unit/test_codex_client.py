@@ -324,6 +324,7 @@ async def test_routed_native_confirmed_connect_failure_uses_next_endpoint(route:
     "failure",
     [
         NativeEgressTransportError("ambiguous", failure_phase="request"),
+        NativeEgressTransportError("local overflow", failure_phase="consumer_backpressure"),
         NativeEgressTransportError(
             "certificate",
             failure_phase="connect",
@@ -331,7 +332,7 @@ async def test_routed_native_confirmed_connect_failure_uses_next_endpoint(route:
             is_tls_verification_failure=True,
         ),
     ],
-    ids=["ambiguous", "tls-verification"],
+    ids=["ambiguous", "consumer-backpressure", "tls-verification"],
 )
 async def test_routed_native_unsafe_post_failure_never_replays(
     route: ResolvedUpstreamRoute,
@@ -352,6 +353,8 @@ async def test_routed_native_unsafe_post_failure_never_replays(
     assert len(native.request_calls) == 1
     assert session.calls == []
     assert exc_info.value.retryable_same_contract is False
+    if failure.failure_phase == "consumer_backpressure":
+        assert exc_info.value.error_code == "proxy_network_unavailable"
 
 
 @pytest.mark.asyncio

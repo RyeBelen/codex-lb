@@ -926,16 +926,10 @@ def _native_transport_error(
     exc: NativeEgressError,
 ) -> CodexTransportError:
     if isinstance(exc, NativeEgressTransportError):
-        process_failure = exc.failure_phase in {
-            "helper_exit",
-            "helper_read",
-            "helper_write",
-            "shutdown",
-        }
         return CodexTransportError(
             codex_transport_error_message(operation, endpoint_id, exc),
             status_code=exc.status_code,
-            error_code=PROCESS_NETWORK_UNAVAILABLE_CODE if process_failure else None,
+            error_code=PROCESS_NETWORK_UNAVAILABLE_CODE if exc.is_local_failure else None,
             retryable_same_contract=(exc.retryable_same_contract and not exc.is_tls_verification_failure),
             failure_phase=exc.failure_phase,
             is_tls_verification_failure=exc.is_tls_verification_failure,

@@ -3,7 +3,9 @@ from __future__ import annotations
 import asyncio
 import os
 import stat
+import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -19,6 +21,7 @@ from app.core.clients.native_egress import (
     close_discovered_native_egress_client,
     discover_native_egress_client,
 )
+from app.core.clients.proxy_websocket import NativeUpstreamWebSocket
 
 _HELPER_PROTOCOL_PREAMBLE = r"""
 import json
@@ -85,6 +88,161 @@ for line in sys.stdin:
     }), flush=True)
     print(json.dumps({"type": "end", "request_id": request_id}), flush=True)
 """
+
+
+@pytest.fixture
+def burst_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> SubprocessNativeEgressClient:
+    helper = tmp_path / "burst-helper.py"
+    _write_helper(
+        helper,
+        """#!/usr/bin/env python3
+import base64
+for line in sys.stdin:
+    command = json.loads(line)
+    request_id = command["request_id"]
+    kind = command["type"]
+    events = []
+    if kind == "request":
+        events.append({"type": "head", "status": 200, "http_version": "HTTP/2.0", "headers": []})
+        events.extend({"type": "chunk", "data": base64.b64encode(f"{i},".encode()).decode()} for i in range(256))
+        events.append({"type": "end"})
+    elif kind == "websocket_connect":
+        events.append({"type": "websocket_open", "status": 101, "headers": []})
+    elif kind == "websocket_send_text":
+        events.append({"type": "websocket_sent", "command_id": command["command_id"]})
+        for i in range(256):
+            if i % 2:
+                events.append({"type": "websocket_binary", "data": base64.b64encode(str(i).encode()).decode()})
+            else:
+                events.append({"type": "websocket_text", "text": str(i)})
+        events.append({"type": "websocket_close", "code": 1000, "reason": "completed"})
+    elif kind == "cancel":
+        events.append({"type": "cancelled"})
+    elif kind == "websocket_close":
+        events.append({"type": "websocket_sent", "command_id": command["command_id"]})
+        events.append({"type": "websocket_close", "code": 1000})
+    sys.stdout.write("".join(json.dumps({**event, "request_id": request_id}) + "\\n" for event in events))
+    sys.stdout.flush()
+""",
+    )
+    spawn = asyncio.create_subprocess_exec
+
+    async def spawn_python(*args: Any, **kwargs: Any) -> asyncio.subprocess.Process:
+        if args[0] == str(helper):
+            return await spawn(sys.executable, *args, **kwargs)
+        return await spawn(*args, **kwargs)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn_python)
+    return SubprocessNativeEgressClient(helper)
+
+
+async def _read_http_burst(client: SubprocessNativeEgressClient) -> bytes:
+    async with await client.request(
+        NativeEgressRequest(method="GET", url="https://example.test/burst", headers={})
+    ) as r:
+        return await r.read()
+
+
+async def _open_burst_websocket(client: SubprocessNativeEgressClient) -> NativeUpstreamWebSocket:
+    socket = await client.websocket(
+        NativeWebSocketRequest(
+            url="wss://example.test/burst", headers={}, connect_timeout_seconds=2, max_message_bytes=1024
+        )
+    )
+    relay = NativeUpstreamWebSocket(socket)
+    await relay.send_text("start")
+    return relay
+
+
+@pytest.mark.asyncio
+async def test_buffered_http_bursts_complete_concurrently(burst_client: SubprocessNativeEgressClient) -> None:
+    try:
+        bodies = await asyncio.wait_for(asyncio.gather(*(_read_http_burst(burst_client) for _ in range(4))), 5)
+        assert bodies == [b"".join(f"{i},".encode() for i in range(256))] * 4
+        assert not burst_client._streams
+    finally:
+        await burst_client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_buffered_websocket_burst_reaches_relay_in_order(burst_client: SubprocessNativeEgressClient) -> None:
+    relay = None
+    try:
+        relay = await _open_burst_websocket(burst_client)
+        for i in range(256):
+            message = await asyncio.wait_for(relay.receive(), 2)
+            assert message.kind == ("binary" if i % 2 else "text")
+            assert (message.data.decode() if message.data is not None else message.text) == str(i)
+        terminal = await asyncio.wait_for(relay.receive(), 2)
+        assert terminal.kind == "close"
+        assert terminal.close_code == 1000
+        assert terminal.close_reason == "completed"
+        await relay.close()
+        assert not burst_client._streams
+    finally:
+        if relay is not None:
+            await relay.close()
+        await burst_client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_stalled_websocket_is_account_neutral_and_does_not_block_http(
+    burst_client: SubprocessNativeEgressClient,
+) -> None:
+    relay = None
+    try:
+        relay = await _open_burst_websocket(burst_client)
+        body = await asyncio.wait_for(_read_http_burst(burst_client), 5)
+        assert body == b"".join(f"{i},".encode() for i in range(256))
+        message = await asyncio.wait_for(relay.receive(), 2)
+        assert message.kind == "error"
+        assert message.error_code == "proxy_network_unavailable"
+        assert not burst_client._streams
+    finally:
+        if relay is not None:
+            await relay.close()
+        await asyncio.wait_for(burst_client.aclose(), 3)
+
+
+@pytest.mark.asyncio
+async def test_close_during_burst_releases_only_owned_stream(burst_client: SubprocessNativeEgressClient) -> None:
+    try:
+        response = await burst_client.request(
+            NativeEgressRequest(method="GET", url="https://example.test/close", headers={})
+        )
+        healthy = asyncio.create_task(_read_http_burst(burst_client))
+        await asyncio.wait_for(response.aclose(), 3)
+        assert await asyncio.wait_for(healthy, 3) == b"".join(f"{i},".encode() for i in range(256))
+        assert not burst_client._streams
+    finally:
+        await asyncio.wait_for(burst_client.aclose(), 3)
+
+
+@pytest.mark.asyncio
+async def test_cancelled_burst_consumer_releases_ownership(burst_client: SubprocessNativeEgressClient) -> None:
+    started = asyncio.Event()
+
+    async def consume() -> None:
+        async with await burst_client.request(
+            NativeEgressRequest(method="GET", url="https://example.test/cancel", headers={})
+        ) as response:
+            async for _ in response.iter_bytes():
+                started.set()
+                await asyncio.Event().wait()
+
+    consumer = asyncio.create_task(consume())
+    try:
+        await asyncio.wait_for(started.wait(), 2)
+        consumer.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await consumer
+        assert await asyncio.wait_for(_read_http_burst(burst_client), 3)
+        assert not burst_client._streams
+    finally:
+        consumer.cancel()
+        await asyncio.gather(consumer, return_exceptions=True)
+        await asyncio.wait_for(burst_client.aclose(), 3)
+        assert not burst_client._cancel_tasks
 
 
 @pytest.mark.asyncio

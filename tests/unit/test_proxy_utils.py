@@ -8889,8 +8889,13 @@ async def test_stream_responses_direct_http_falls_back_when_native_helper_is_una
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "phase, expected_code", [("body_read", "upstream_error"), ("consumer_backpressure", "proxy_network_unavailable")]
+)
 async def test_stream_responses_does_not_replay_ambiguous_native_failure_through_aiohttp(
     monkeypatch: pytest.MonkeyPatch,
+    phase: str,
+    expected_code: str,
 ) -> None:
     class Settings:
         upstream_base_url = "https://chatgpt.com/backend-api"
@@ -8912,7 +8917,7 @@ async def test_stream_responses_does_not_replay_ambiguous_native_failure_through
     native_client = _NativeEgressClientHarness(
         proxy_module.NativeEgressTransportError(
             "native upstream response body failed",
-            failure_phase="body_read",
+            failure_phase=phase,
             retryable_same_contract=False,
         )
     )
@@ -8934,7 +8939,7 @@ async def test_stream_responses_does_not_replay_ambiguous_native_failure_through
     assert event[SYNTHETIC_TRANSPORT_FAILURE_MARKER] is True
     response = cast(dict[str, object], event["response"])
     error = cast(dict[str, object], response["error"])
-    assert error["code"] == "upstream_error"
+    assert error["code"] == expected_code
     assert session.calls == []
 
 
