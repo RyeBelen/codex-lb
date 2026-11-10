@@ -4313,6 +4313,8 @@ async def _stream_responses_with_session(
     except NativeEgressTransportError as exc:
         retryable_same_contract = exc.retryable_same_contract
         native_error_code = "upstream_unavailable" if retryable_same_contract else "upstream_error"
+        if exc.is_local_failure:
+            native_error_code = PROCESS_NETWORK_UNAVAILABLE_CODE
         native_error_message = str(exc) or "Native upstream request failed"
         error_code = native_error_code
         error_message = native_error_message

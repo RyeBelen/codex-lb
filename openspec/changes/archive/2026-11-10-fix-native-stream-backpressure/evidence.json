@@ -1,0 +1,64 @@
+{
+  "implementation_commit": "eabe5270cab8e1cb03360dc2178dc329595598b2",
+  "base_commit": "a1f2a616007a49f4fe03d975525962441a1d2d05",
+  "previous_image": "sha256:7607b22ad573424b3682e17f7e1b9b30d024d130cc3bf7687e81a84271d24457",
+  "deployed_image": "sha256:3f1addbd44c2f6194b19c12284986fa5954f1c4f3005f1bf12c45421821f1fd0",
+  "production_container": "8f542921b0a2",
+  "source_hashes": {
+    "native_egress.py": "41456a63518835b5d719b54b163b41a8d12ed72baf16c6a0c97048c7d1a2df1e",
+    "proxy.py": "3569b65bcedd8886d51733ea0e89664fc796f98f42454006a413a4a1c4dd86c0",
+    "proxy_websocket.py": "d4cd325b46d4f4953a57f340fb32028f0a26a2db1a72dcaaef59b8d157ab2054",
+    "codex.py": "53d216203ab2a76965e28e61090fff588379f3571f319c39f96984b25a3732aa"
+  },
+  "verification": {
+    "linux_tests_passed": 243,
+    "focused_native_http_tests_passed": 25,
+    "focused_account_health_compaction_owner_tests_passed": 183,
+    "lint_and_types": "passed",
+    "real_http_inference": "passed",
+    "real_websocket_continuation": "passed",
+    "real_compact_request": "passed",
+    "automatic_rollback_rehearsal": "passed",
+    "independent_image_recovery_rehearsal": "passed",
+    "production_image_and_health": "passed",
+    "readiness_observation_samples": 54,
+    "readiness_observation_failures": 0,
+    "production_verified_at": "2026-11-10T09:36:11.585043+00:00",
+    "observation_completed_at": "2026-11-10T09:41:18.846378+00:00",
+    "initial_post_verification_request_sample": [
+      {
+        "status": "success",
+        "error_code": null,
+        "count": 10
+      }
+    ],
+    "final_post_verification_request_sample": [
+      {
+        "status": "success",
+        "error_code": null,
+        "count": 25
+      },
+      {
+        "status": "error",
+        "error_code": "interrupted",
+        "count": 1
+      }
+    ],
+    "final_sample_note": "The one interrupted WebSocket response had message interrupted and no native transport failure metadata. No stream_incomplete, consumer_backpressure, or owner-unavailable error was present in this final sample."
+  },
+  "safeguards": {
+    "git_auto_deploy_enabled": false,
+    "image_pinned": true,
+    "update_failure_action": "rollback",
+    "update_order": "stop-first",
+    "no_schema_migration": true,
+    "database_backup": "/var/lib/codex-lb/recovery-native-backpressure-20261110/store.db",
+    "backup_quick_check": "ok",
+    "backup_sha256": "e042e8985f0c64ef10aff5568cf143229c971e06f140b7a66f42623812012751"
+  },
+  "limitations": [
+    "Original screenshot exception was unavailable; reproduced transport failure is fixed.",
+    "Nine untouched main OpenSpec capabilities have existing strict-validation failures.",
+    "Hotfix commit is local; deployment remains pinned pending normal branch integration and review."
+  ]
+}

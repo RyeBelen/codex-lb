@@ -458,12 +458,13 @@ def _native_websocket_transport_error(
     operation: str,
 ) -> UpstreamWebSocketTransportError:
     phase = exc.failure_phase if isinstance(exc, NativeEgressTransportError) else "protocol"
+    logger.warning("native_websocket_failure operation=%s failure_phase=%s", operation, phase)
     if phase == "liveness_timeout":
         return UpstreamWebSocketTransportError(
             f"Upstream websocket {operation} failed",
             error_code=UPSTREAM_WEBSOCKET_LIVENESS_TIMEOUT_CODE,
         )
-    account_neutral = phase in {"helper_exit", "helper_read", "helper_write", "shutdown"}
+    account_neutral = isinstance(exc, NativeEgressTransportError) and exc.is_local_failure
     return UpstreamWebSocketTransportError(
         f"Upstream websocket {operation} failed",
         error_code=PROCESS_NETWORK_UNAVAILABLE_CODE if account_neutral else "upstream_unavailable",
