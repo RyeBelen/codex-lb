@@ -1414,6 +1414,42 @@
         "bug",
         "test"
       ]
+    },
+    {
+      "login": "felixcake618",
+      "name": "Felix Cake",
+      "avatar_url": "https://avatars.githubusercontent.com/u/91266981?v=4",
+      "profile": "https://github.com/felixcake618",
+      "contributions": [
+        "code"
+      ]
+    },
+    {
+      "login": "RyeBelen",
+      "name": "Kapitantutan",
+      "avatar_url": "https://avatars.githubusercontent.com/u/121075326?v=4",
+      "profile": "https://github.com/RyeBelen",
+      "contributions": [
+        "code"
+      ]
+    },
+    {
+      "login": "TheFoolThatDoesntBelongToThisEra",
+      "name": "TheFoolThatDoesntBelongToThisEra",
+      "avatar_url": "https://avatars.githubusercontent.com/u/252236154?v=4",
+      "profile": "https://github.com/TheFoolThatDoesntBelongToThisEra",
+      "contributions": [
+        "code"
+      ]
+    },
+    {
+      "login": "xjrb10",
+      "name": "xjrb10",
+      "avatar_url": "https://avatars.githubusercontent.com/u/45172322?v=4",
+      "profile": "https://github.com/xjrb10",
+      "contributions": [
+        "code"
+      ]
     }
   ],
   "contributorsPerLine": 7,
